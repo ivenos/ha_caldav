@@ -1,0 +1,17 @@
+"""Constants for the CalDAV integration."""
+
+DOMAIN = "ha_caldav"
+
+CONF_CALENDARS = "calendars"
+CONF_DAYS = "days"
+CONF_INCLUDE_ALL_DAY = "include_all_day"
+CONF_READ_ONLY = "read_only"
+
+DEFAULT_DAYS = 7
+DEFAULT_INCLUDE_ALL_DAY = True
+DEFAULT_READ_ONLY = False
+DEFAULT_SCAN_INTERVAL = 15
+
+REQUEST_TIMEOUT = 10
+
+RANGE_THIS_AND_FUTURE = "THISANDFUTURE"

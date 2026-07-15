@@ -1,0 +1,46 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "CalDAV-Konto",
+        "description": "Mit einem CalDAV-Server wie Nextcloud verbinden.",
+        "data": {
+          "url": "URL",
+          "username": "Benutzername",
+          "password": "Passwort",
+          "verify_ssl": "SSL-Zertifikat prüfen"
+        }
+      },
+      "reauth_confirm": {
+        "title": "CalDAV neu anmelden",
+        "description": "Das Passwort für {username} wird nicht mehr akzeptiert. Bitte das aktuelle eingeben.",
+        "data": {
+          "password": "Passwort"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Ungültige Anmeldedaten.",
+      "cannot_connect": "Verbindung fehlgeschlagen.",
+      "unknown": "Unerwarteter Fehler."
+    },
+    "abort": {
+      "already_configured": "Dieses Konto ist bereits eingerichtet.",
+      "reauth_successful": "Die erneute Anmeldung war erfolgreich."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "CalDAV-Optionen",
+        "data": {
+          "calendars": "Einzubindende Kalender",
+          "scan_interval": "Minuten zwischen Abfragen auf Änderungen außerhalb von Home Assistant",
+          "days": "Tage im Voraus für die Ermittlung des nächsten Termins",
+          "include_all_day": "Ganztägige Termine beim nächsten Termin berücksichtigen",
+          "read_only": "Nur lesen (Anlegen, Bearbeiten und Löschen ausblenden)"
+        }
+      }
+    }
+  }
+}

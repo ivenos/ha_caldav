@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set version from tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          tmp=$(mktemp)
+          jq --arg v "$version" '.version = $v' custom_components/ha_caldav/manifest.json > "$tmp"
+          mv "$tmp" custom_components/ha_caldav/manifest.json
+
+      - name: Build zip
+        run: |
+          cd custom_components/ha_caldav
+          zip -r ../../ha_caldav.zip .
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ha_caldav.zip
+          generate_release_notes: true

@@ -4,7 +4,6 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
-# Reads only the PR body from the event payload; no token access needed.
 permissions: {}
 
 jobs:

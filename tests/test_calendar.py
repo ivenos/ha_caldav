@@ -1,8 +1,9 @@
 """Tests for the CalDAV calendar entity."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
 
+from caldav.elements import dav
 from caldav.lib.error import DAVError
 from homeassistant.components.calendar import CalendarEntityFeature
 from homeassistant.const import (
@@ -18,6 +19,7 @@ from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.util import dt as dt_util
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from requests import Timeout
 import vobject
 
 from custom_components.ha_caldav.const import CONF_CALENDARS, CONF_READ_ONLY, DOMAIN
@@ -176,3 +178,169 @@ async def test_server_error_becomes_home_assistant_error(hass: HomeAssistant) ->
         pytest.raises(HomeAssistantError, match="CalDAV delete error"),
     ):
         await entity.async_delete_event("uid-1")
+
+
+async def test_unchanged_calendar_skips_the_expand(hass: HomeAssistant) -> None:
+    calendar = _calendar("Personal")
+    # A stable sync-token means nothing was touched between polls.
+    calendar.objects_by_sync_token.return_value.sync_token = "token-1"
+    await _setup(hass, [calendar])
+    entity = _entity(hass, "calendar.iven_personal")
+
+    calls = calendar.search.call_count
+    await entity.coordinator.async_refresh()
+
+    assert calendar.search.call_count == calls
+
+
+async def test_changed_calendar_refetches(hass: HomeAssistant) -> None:
+    calendar = _calendar("Personal")
+    # A fresh token every poll means the calendar always looks changed.
+    calendar.objects_by_sync_token.side_effect = lambda token=None: Mock(
+        sync_token=object()
+    )
+    await _setup(hass, [calendar])
+    entity = _entity(hass, "calendar.iven_personal")
+
+    calls = calendar.search.call_count
+    await entity.coordinator.async_refresh()
+
+    assert calendar.search.call_count > calls
+
+
+async def test_change_survives_a_failed_poll(hass: HomeAssistant) -> None:
+    from custom_components.ha_caldav.coordinator import HaCaldavCoordinator
+
+    entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    calendar = _calendar("Personal")
+    # Poll 2's fetch fails right after the token advanced to t2; the token must
+    # not be committed, so poll 3 (token still t2) re-detects and refetches.
+    calendar.objects_by_sync_token.side_effect = [
+        Mock(sync_token="t1"),
+        Mock(sync_token="t2"),
+        Mock(sync_token="t2"),
+    ]
+    calendar.search.side_effect = [
+        [_search_item("First", timedelta(days=1))],
+        Timeout("boom"),
+        [_search_item("Second", timedelta(days=1))],
+    ]
+    coordinator = HaCaldavCoordinator(
+        hass,
+        entry,
+        calendar,
+        days=7,
+        include_all_day=True,
+        scan_interval=timedelta(minutes=15),
+    )
+
+    await coordinator.async_refresh()
+    assert coordinator.data.summary == "First"
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+    assert coordinator.data.summary == "Second"
+
+
+def _event_fields() -> dict:
+    return {
+        "summary": "x",
+        "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+        "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+    }
+
+
+async def test_update_forwards_etag_and_clears_it_after_write(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass, [_calendar("Personal")])
+    entity = _entity(hass, "calendar.iven_personal")
+    entity.coordinator.etags = {"uid-1": '"e"'}
+
+    with patch("custom_components.ha_caldav.calendar.update_event") as update:
+        await entity.async_update_event("uid-1", _event_fields())
+
+    assert update.call_args.kwargs["expected_etag"] == '"e"'
+    assert "uid-1" not in entity.coordinator.etags
+
+
+async def test_delete_forwards_etag_and_clears_it_after_write(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass, [_calendar("Personal")])
+    entity = _entity(hass, "calendar.iven_personal")
+    entity.coordinator.etags = {"uid-1": '"e"'}
+
+    with patch("custom_components.ha_caldav.calendar.delete_event") as delete:
+        await entity.async_delete_event("uid-1")
+
+    assert delete.call_args.kwargs["expected_etag"] == '"e"'
+    assert "uid-1" not in entity.coordinator.etags
+
+
+def _etag_item(uid: str, etag: str) -> Mock:
+    item = Mock()
+    item.vobject_instance = vobject.readOne(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
+        f"BEGIN:VEVENT\nUID:{uid}\nDTSTAMP:20260101T000000Z\n"
+        "DTSTART:20260706T090000Z\nDTEND:20260706T100000Z\nSUMMARY:x\n"
+        "END:VEVENT\nEND:VCALENDAR\n"
+    )
+    item.props = {dav.GetEtag.tag: etag}
+    return item
+
+
+async def test_get_events_caches_etags(hass: HomeAssistant) -> None:
+    calendar = _calendar("Personal")
+    # The non-expanded (etag) search carries the etags; the expanded display
+    # search does not.
+    calendar.search.side_effect = lambda **kw: (
+        [_etag_item("uid-1", '"e"')] if kw.get("expand") is False else []
+    )
+    await _setup(hass, [calendar])
+    entity = _entity(hass, "calendar.iven_personal")
+
+    await entity.async_get_events(
+        hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
+    )
+
+    assert entity.coordinator.etags == {"uid-1": '"e"'}
+
+
+async def test_failed_write_keeps_etag_for_retry(hass: HomeAssistant) -> None:
+    # The pop must run only after a successful write; a failed one leaves the
+    # cached etag so the retry still validates against the unchanged server copy.
+    await _setup(hass, [_calendar("Personal")])
+    entity = _entity(hass, "calendar.iven_personal")
+    entity.coordinator.etags = {"uid-1": '"e"'}
+
+    with (
+        patch(
+            "custom_components.ha_caldav.calendar.update_event",
+            side_effect=DAVError("boom"),
+        ),
+        pytest.raises(HomeAssistantError),
+    ):
+        await entity.async_update_event("uid-1", _event_fields())
+
+    assert entity.coordinator.etags["uid-1"] == '"e"'
+
+
+async def test_get_events_survives_etag_refresh_failure(hass: HomeAssistant) -> None:
+    calendar = _calendar("Personal")
+
+    def search(**kw):
+        if kw.get("expand") is False:
+            raise DAVError("boom")
+        return []
+
+    calendar.search.side_effect = search
+    await _setup(hass, [calendar])
+    entity = _entity(hass, "calendar.iven_personal")
+
+    events = await entity.async_get_events(
+        hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
+    )
+
+    assert events == []
+    assert entity.coordinator.etags == {}

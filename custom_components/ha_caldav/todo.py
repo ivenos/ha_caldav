@@ -19,7 +19,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from requests import ConnectionError as RequestsConnectionError, Timeout
+from requests import RequestException
 
 from . import HaCaldavConfigEntry
 from .api import create_todo, delete_todo, update_todo
@@ -33,7 +33,7 @@ from .const import (
 )
 from .coordinator import TODO_STATUS_INV, HaCaldavTodoCoordinator
 
-WRITE_ERRORS = (RequestsConnectionError, Timeout, DAVError, ValueError)
+WRITE_ERRORS = (RequestException, DAVError, ValueError)
 
 
 async def async_setup_entry(

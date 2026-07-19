@@ -3,9 +3,9 @@
     "step": {
       "user": {
         "title": "CalDAV-Konto",
-        "description": "Mit einem CalDAV-Server wie Nextcloud verbinden.",
+        "description": "URL des CalDAV-Servers und die Zugangsdaten eingeben.",
         "data": {
-          "url": "URL",
+          "url": "Server-URL",
           "username": "Benutzername",
           "password": "Passwort",
           "verify_ssl": "SSL-Zertifikat prüfen"

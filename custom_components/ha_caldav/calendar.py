@@ -19,10 +19,10 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from requests import ConnectionError as RequestsConnectionError, Timeout
+from requests import RequestException
 
 from . import HaCaldavConfigEntry
-from .api import create_event, delete_event, update_event
+from .api import create_event
 from .const import (
     CONF_CALENDARS,
     CONF_DAYS,
@@ -36,8 +36,9 @@ from .const import (
     RANGE_THIS_AND_FUTURE,
 )
 from .coordinator import HaCaldavCoordinator
+from .recurrence import delete_event, update_event
 
-WRITE_ERRORS = (RequestsConnectionError, Timeout, DAVError, ValueError)
+WRITE_ERRORS = (RequestException, DAVError, ValueError)
 
 
 async def async_setup_entry(
@@ -139,9 +140,13 @@ class HaCaldavCalendarEntity(CoordinatorEntity[HaCaldavCoordinator], CalendarEnt
                 _item_data(event),
                 recurrence_id,
                 recurrence_range == RANGE_THIS_AND_FUTURE,
+                expected_etag=self.coordinator.etags.get(uid),
             ),
             "update",
         )
+        # The write moved the server etag; drop the stale cache entry so a quick
+        # follow-up edit is not flagged as a spurious conflict.
+        self.coordinator.etags.pop(uid, None)
 
     async def async_delete_event(
         self,
@@ -157,9 +162,11 @@ class HaCaldavCalendarEntity(CoordinatorEntity[HaCaldavCoordinator], CalendarEnt
                 uid,
                 recurrence_id,
                 recurrence_range == RANGE_THIS_AND_FUTURE,
+                expected_etag=self.coordinator.etags.get(uid),
             ),
             "delete",
         )
+        self.coordinator.etags.pop(uid, None)
 
     async def _write(self, job: partial[None], action: str) -> None:
         try:

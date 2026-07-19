@@ -1,55 +1,40 @@
-# CalDAV Complete for Home Assistant
+# 📅 CalDAV for Home Assistant
 
-The built-in `caldav` integration reads calendars and creates events, but it cannot edit or
-delete them, so a Nextcloud calendar added through it can only be filled, never corrected.
-This integration does the full set: create, edit and delete, for single events and repeating
-series alike, plus to-do lists for Nextcloud Tasks. The edit and delete controls then appear
-in the normal Home Assistant calendar view.
+Home Assistant already has a built-in [CalDAV integration](https://www.home-assistant.io/integrations/caldav/). It's fine for showing your calendars and adding the odd event, but that's about where it stops: no editing, no deleting, and forget about changing a recurring series. Put something on your Nextcloud calendar through it and you're stuck with it until you go fix it somewhere else.
+
+This one closes that gap. Same servers, same underlying CalDAV library, just with the write support the built-in version never got. So instead of only reading a calendar in Home Assistant, you can actually run it from there, and that's where the extra bits come in:
 
 ## Features
 
-- Everything the built-in integration does, plus editing and deleting events.
-- Repeating events: change or remove a single occurrence, an occurrence and everything after
-  it, or the whole series.
-- To-do lists for VTODO items (Nextcloud Tasks), with due dates and descriptions.
-- Pick which calendars to include, how often to poll, and whether they are read-only.
-- Re-authentication when the password changes.
+- ✏️ Edit and delete events, not only create them.
+- 🔁 Recurring events done right: change or remove a single occurrence, that one and everything after it, or the whole series.
+- ✅ Finish a repeating to-do and it rolls forward to the next due date instead of marking the whole series done.
+- 🛡️ If someone changed an event on the server since your last sync, your edit gets stopped instead of quietly overwriting theirs.
+- ⚡ Polling only does the expensive work when something actually changed, so it stays light.
 
 ## Requirements
 
-Home Assistant 2026.3 or newer, and a CalDAV account with write access.
+Home Assistant 2026.3 or newer, and a CalDAV account you can write to.
 
 ## Installation
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ivenos&repository=ha_caldav&category=integration)
 
-Or add `https://github.com/ivenos/ha_caldav` in HACS as a custom repository with category
-**Integration**. Restart Home Assistant afterwards, then:
+Prefer to add it by hand? Drop `https://github.com/ivenos/ha_caldav` into HACS as a custom repository (category **Integration**) and restart Home Assistant.
+
+Once it's installed, start the setup:
 
 [![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=ha_caldav)
 
-Or go to **Settings > Devices & services > Add integration** and search for **CalDAV
-Complete**. For Nextcloud the URL usually looks like
-`https://cloud.example.com/remote.php/dav`.
+...or open **Settings → Devices & services → Add integration** and search for **CalDAV Complete**. Enter your server URL, which for Nextcloud usually looks like `https://cloud.example.com/remote.php/dav`.
 
-Each account becomes a device holding a `calendar.<account>_<calendar>` entity and a
-`todo.<account>_<calendar>` list per calendar. The options dialog covers calendar selection,
-the poll interval (15 minutes by default), and read-only mode.
+Each account turns into a device with a `calendar.<account>_<calendar>` entity and a `todo.<account>_<calendar>` list per calendar. From the options you can pick which calendars to load, how often to poll (every 15 minutes by default), and whether to keep everything read-only. Change your password and it'll ask you to sign in again.
 
-If the built-in `caldav` integration is set up for the same account, remove it to avoid
-duplicate entities. This integration covers everything it does.
-
-## Usage
-
-Open the calendar panel or a calendar card, select an event and use edit or delete. For a
-repeating event, Home Assistant asks whether the change applies to that occurrence, that one
-and all following, or the whole series. Changes are written to the server immediately;
-changes made elsewhere appear on the next poll.
+Already running the built-in `caldav` integration for the same account? Drop it, or you'll see everything twice.
 
 ## Compatibility
 
-Tested against Nextcloud 32, 33 and 34. Other CalDAV servers such as Radicale and Baikal
-speak the same protocol and are expected to work, but are not tested.
+CI runs the full test suite on every push against the current and previous Nextcloud majors, plus Radicale and Xandikos. Other RFC 4791 servers like Baikal should work too, they just aren't tested.
 
 ## License
 

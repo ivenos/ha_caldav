@@ -8,11 +8,14 @@ import logging
 from typing import Any
 
 import caldav
+from caldav.elements import dav
+from caldav.lib.error import DAVError
 from homeassistant.components.calendar import CalendarEvent
 from homeassistant.components.todo import TodoItem, TodoItemStatus
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 import homeassistant.util.dt as dt_util
+import requests
 
 from . import HaCaldavConfigEntry
 
@@ -55,6 +58,10 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarEvent | None]):
         self.calendar = calendar
         self.days = days
         self.include_all_day = include_all_day
+        self.etags: dict[str, str] = {}
+        self._sync_token: str | None = None
+        self._window_events: list[Any] | None = None
+        self._window: tuple[datetime, datetime] | None = None
 
     async def async_get_events(
         self, hass: HomeAssistant, start_date: datetime, end_date: datetime
@@ -69,6 +76,9 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarEvent | None]):
                 expand=True,
             )
         )
+        # Cache etags for exactly the range the user can see and edit, so a
+        # later write can detect a change made on the server since.
+        await hass.async_add_executor_job(self._refresh_etags, start_date, end_date)
         return [
             to_event(item.vobject_instance.vevent)
             for item in results
@@ -76,21 +86,32 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarEvent | None]):
         ]
 
     async def _async_update_data(self) -> CalendarEvent | None:
-        """Return the next upcoming event within the configured window."""
+        """Return the next upcoming event within the configured window.
+
+        A sync-collection REPORT (RFC 6578) gates the expensive expand: while the
+        calendar is unchanged and the window has not moved, the next event is
+        recomputed from the cached occurrences instead of fetching them again.
+        """
         start = dt_util.start_of_local_day()
         end = start + timedelta(days=self.days)
-        results = await self.hass.async_add_executor_job(
-            partial(self.calendar.search, start=start, end=end, event=True, expand=True)
-        )
-        # The server is not required to return results in any order.
-        vevents = sorted(
-            (
+        changed, token = await self.hass.async_add_executor_job(self._sync_changed)
+        if self._window_events is None or changed or self._window != (start, end):
+            results = await self.hass.async_add_executor_job(
+                partial(
+                    self.calendar.search, start=start, end=end, event=True, expand=True
+                )
+            )
+            self._window_events = [
                 item.vobject_instance.vevent
                 for item in results
                 if hasattr(item.vobject_instance, "vevent")
-            ),
-            key=sort_key,
-        )
+            ]
+            self._window = (start, end)
+            # Commit the token only after a successful fetch; a failed search
+            # above leaves it in place so the next poll re-detects the change.
+            self._sync_token = token
+        # The server is not required to return results in any order.
+        vevents = sorted(self._window_events, key=sort_key)
         vevent = next(
             (
                 vevent
@@ -101,6 +122,43 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarEvent | None]):
             None,
         )
         return to_event(vevent) if vevent is not None else None
+
+    def _sync_changed(self) -> tuple[bool, str | None]:
+        """Return (changed, token) since the last poll (RFC 6578), uncommitted.
+
+        The token is opaque and changes on any add, edit or delete. This probe
+        is an optimization only, so any failure (network, a server without
+        sync-collection, a malformed response) degrades to a full refresh with
+        the token left unchanged.
+        """
+        try:
+            collection = self.calendar.objects_by_sync_token(self._sync_token)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("sync-collection failed, refreshing in full: %s", err)
+            return True, self._sync_token
+        return collection.sync_token != self._sync_token, collection.sync_token
+
+    def _refresh_etags(self, start: datetime, end: datetime) -> None:
+        """Cache uid -> etag for the window so a write can spot a stale edit.
+
+        The display search expands the series and drops per-resource etags, so
+        the etags come from a second, non-expanded search.
+        """
+        try:
+            items = self.calendar.search(
+                start=start, end=end, event=True, expand=False, props=[dav.GetEtag()]
+            )
+        except (requests.RequestException, DAVError) as err:
+            _LOGGER.debug("Could not refresh etags: %s", err)
+            return
+        etags: dict[str, str] = {}
+        for item in items:
+            if not hasattr(item.vobject_instance, "vevent"):
+                continue
+            etag = item.props.get(dav.GetEtag.tag)
+            if isinstance(etag, str):
+                etags[str(item.vobject_instance.vevent.uid.value)] = etag
+        self.etags = etags
 
 
 class HaCaldavTodoCoordinator(DataUpdateCoordinator[list[TodoItem]]):

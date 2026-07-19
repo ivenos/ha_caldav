@@ -3,7 +3,11 @@
 from unittest.mock import Mock, patch
 
 from caldav.lib.error import DAVError
-from homeassistant.components.todo import TodoItem, TodoListEntityFeature
+from homeassistant.components.todo import (
+    TodoItem,
+    TodoItemStatus,
+    TodoListEntityFeature,
+)
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -77,9 +81,12 @@ async def test_create_forwards_mapped_status(hass: HomeAssistant) -> None:
     entity = _entity(hass)
 
     with patch("custom_components.ha_caldav.todo.create_todo") as create:
-        await entity.async_create_todo_item(TodoItem(summary="Buy milk"))
+        await entity.async_create_todo_item(
+            TodoItem(summary="Buy milk", status=TodoItemStatus.COMPLETED)
+        )
 
     assert create.call_args.args[1]["summary"] == "Buy milk"
+    assert create.call_args.args[1]["status"] == "COMPLETED"
 
 
 async def test_delete_forwards_every_uid(hass: HomeAssistant) -> None:

@@ -197,7 +197,7 @@ def test_to_todo_skips_items_home_assistant_cannot_address() -> None:
 
 
 def test_recurrence_id_round_trips_into_the_write_path() -> None:
-    from custom_components.ha_caldav.api import parse_recurrence_id
+    from custom_components.ha_caldav.recurrence import parse_recurrence_id
 
     timed = vevent(
         "DTSTART:20260713T090000Z\nDTEND:20260713T100000Z\n"

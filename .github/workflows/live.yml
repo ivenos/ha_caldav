@@ -6,8 +6,6 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-  # Catches the case unit tests never can: a new Nextcloud release breaking us
-  # without a single line of our code changing.
   schedule:
     - cron: "0 4 * * 1"
 
@@ -20,17 +18,43 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.14"
-  # Throwaway container that exists for the length of one job; nothing to hide.
-  NEXTCLOUD_PASSWORD: "TestPass!2026"
 
 jobs:
-  nextcloud:
-    name: Nextcloud ${{ matrix.nextcloud }}
+  # Nextcloud is tested on the current major and the one behind it, resolved at
+  # run time from Docker Hub so the pair stays current without anyone bumping a
+  # pin. Radicale and Xandikos publish rolling images.
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.build.outputs.include }}
+    steps:
+      - id: build
+        run: |
+          set -euo pipefail
+          # Two pages so an actively patched previous major is not buried past
+          # the last_updated window by a flood of newer-major variant tags.
+          names=""
+          for page in 1 2; do
+            names+=$(curl -fsS --retry 3 --retry-all-errors --max-time 30 \
+              "https://hub.docker.com/v2/repositories/library/nextcloud/tags/?page_size=100&page=$page&ordering=last_updated" \
+              | jq '.results[].name | select(test("^[0-9]+$")) | tonumber')$'\n'
+          done
+          majors=$(jq -cs 'unique | sort | reverse | .[0:2]' <<<"$names")
+          test "$(jq length <<<"$majors")" -eq 2 \
+            || { echo "::error::could not resolve two Nextcloud majors"; exit 1; }
+          include=$(jq -cn --argjson m "$majors" \
+            '[$m[] | {server: "nextcloud", tag: (. | tostring)}]
+             + [{server: "radicale", tag: "latest"}, {server: "xandikos", tag: "latest"}]')
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+
+  live:
+    needs: matrix
+    name: ${{ matrix.server }} ${{ matrix.tag }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        nextcloud: ["32", "33", "34", "latest"]
+        include: ${{ fromJSON(needs.matrix.outputs.include) }}
 
     steps:
       - uses: actions/checkout@v7
@@ -44,35 +68,5 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements_test.txt
 
-      - name: Start Nextcloud ${{ matrix.nextcloud }}
-        run: |
-          docker run -d --name nextcloud -p 8080:80 \
-            -e SQLITE_DATABASE=nextcloud \
-            -e NEXTCLOUD_ADMIN_USER=admin \
-            -e NEXTCLOUD_ADMIN_PASSWORD='${{ env.NEXTCLOUD_PASSWORD }}' \
-            -e NEXTCLOUD_TRUSTED_DOMAINS=localhost \
-            nextcloud:${{ matrix.nextcloud }}
-
-      - name: Wait for the install to finish
-        run: |
-          for _ in $(seq 1 60); do
-            if curl -fsS http://localhost:8080/status.php 2>/dev/null | grep -q '"installed":true'; then
-              curl -fsS http://localhost:8080/status.php
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::Nextcloud did not finish installing"
-          docker logs --tail 50 nextcloud
-          exit 1
-
-      - name: Run live tests
-        env:
-          CALDAV_URL: http://localhost:8080/remote.php/dav
-          CALDAV_USERNAME: admin
-          CALDAV_PASSWORD: ${{ env.NEXTCLOUD_PASSWORD }}
-        run: pytest -m live -v
-
-      - name: Nextcloud logs
-        if: failure()
-        run: docker logs --tail 100 nextcloud
+      - name: Run live tests against ${{ matrix.server }} ${{ matrix.tag }}
+        run: .github/scripts/live-test.sh ${{ matrix.server }} ${{ matrix.tag }} -- -v

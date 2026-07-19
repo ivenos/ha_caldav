@@ -15,7 +15,6 @@ env:
   RUFF_VERSION: "0.15.21"
   PYTHON_VERSION: "3.14"
 
-# Least privilege; no job here needs more.
 permissions:
   contents: read
 

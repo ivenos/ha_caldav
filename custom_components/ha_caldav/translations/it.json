@@ -1,0 +1,46 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Account CalDAV",
+        "description": "Inserisci l'URL del server CalDAV e le credenziali dell'account.",
+        "data": {
+          "url": "URL del server",
+          "username": "Nome utente",
+          "password": "Password",
+          "verify_ssl": "Verifica il certificato SSL"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Autentica di nuovo CalDAV",
+        "description": "La password di {username} non è più accettata. Inserisci quella attuale.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Autenticazione non valida.",
+      "cannot_connect": "Connessione non riuscita.",
+      "unknown": "Errore imprevisto."
+    },
+    "abort": {
+      "already_configured": "Questo account è già configurato.",
+      "reauth_successful": "La nuova autenticazione è riuscita."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opzioni CalDAV",
+        "data": {
+          "calendars": "Calendari da includere",
+          "scan_interval": "Minuti tra i controlli delle modifiche effettuate al di fuori di Home Assistant",
+          "days": "Giorni di anticipo per determinare il prossimo evento",
+          "include_all_day": "Includi gli eventi per l'intera giornata nel prossimo evento",
+          "read_only": "Sola lettura (nascondi i controlli di creazione, modifica ed eliminazione)"
+        }
+      }
+    }
+  }
+}

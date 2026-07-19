@@ -16,11 +16,10 @@ import pytest_socket
 from custom_components.ha_caldav.api import (
     create_event,
     create_todo,
-    delete_event,
     delete_todo,
-    update_event,
     update_todo,
 )
+from custom_components.ha_caldav.recurrence import delete_event, update_event
 
 pytestmark = pytest.mark.live
 
@@ -369,3 +368,68 @@ def test_todo_with_due_datetime(calendar) -> None:
     due = todos(calendar)["Call back"].due
     assert isinstance(due, datetime)
     assert due.astimezone(UTC) == datetime(2026, 7, 10, 15, 30, tzinfo=UTC)
+
+
+def etag_of(calendar, uid: str) -> str:
+    """Return the etag the server currently reports for a resource."""
+    from caldav.elements import dav
+
+    for item in calendar.search(
+        event=True,
+        start=RANGE_START,
+        end=RANGE_END,
+        expand=False,
+        props=[dav.GetEtag()],
+    ):
+        if str(item.vobject_instance.vevent.uid.value) == uid:
+            return item.props[dav.GetEtag.tag]
+    raise AssertionError(f"no etag for {uid}")
+
+
+def test_update_refuses_stale_write(calendar) -> None:
+    create_event(
+        calendar,
+        {
+            "summary": "Meeting",
+            "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+        },
+    )
+    uid = uid_of(calendar)
+    seen = etag_of(calendar, uid)
+
+    # Someone edits the same event directly on the server.
+    other = calendar.event_by_uid(uid)
+    other.data = other.data.replace("Meeting", "Changed on the server")
+    other.save()
+    assert etag_of(calendar, uid) != seen
+
+    my_edit = {
+        "summary": "My edit",
+        "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+        "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+    }
+    # Writing against the version the user saw must be refused, not overwrite it.
+    with pytest.raises(ValueError, match="changed on the server"):
+        update_event(calendar, uid, my_edit, expected_etag=seen)
+    assert "Changed on the server" in summaries(calendar).values()
+
+    # Writing against the current version goes through.
+    update_event(calendar, uid, my_edit, expected_etag=etag_of(calendar, uid))
+    assert "My edit" in summaries(calendar).values()
+
+
+def test_completing_recurring_todo_rolls_forward(calendar) -> None:
+    from homeassistant.components.todo import TodoItemStatus
+
+    calendar.save_todo(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//test//EN\r\n"
+        "BEGIN:VTODO\r\nUID:rt1\r\nDTSTAMP:20260101T000000Z\r\n"
+        "DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\n"
+        "SUMMARY:Water\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+    update_todo(calendar, "rt1", {"summary": "Water", "status": "COMPLETED"})
+
+    item = todos(calendar)["Water"]
+    assert item.status == TodoItemStatus.NEEDS_ACTION
+    assert item.due.astimezone(UTC) == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)

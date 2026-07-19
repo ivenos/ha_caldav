@@ -29,4 +29,3 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: ha_caldav.zip
-          generate_release_notes: true

@@ -13,11 +13,12 @@ from caldav.lib.error import DAVError
 from homeassistant.components.calendar import CalendarEvent
 from homeassistant.components.todo import TodoItem, TodoItemStatus
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 import homeassistant.util.dt as dt_util
 import requests
 
 from . import HaCaldavConfigEntry
+from .color import fetch_colors
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -159,6 +160,41 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarEvent | None]):
             if isinstance(etag, str):
                 etags[str(item.vobject_instance.vevent.uid.value)] = etag
         self.etags = etags
+
+
+class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, str | None]]):
+    """Track the color each calendar carries on the server."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: HaCaldavConfigEntry,
+        client: caldav.DAVClient,
+        scan_interval: timedelta,
+    ) -> None:
+        """Initialize the coordinator."""
+        super().__init__(
+            hass,
+            _LOGGER,
+            name="CalDAV colors",
+            update_interval=scan_interval,
+            config_entry=entry,
+        )
+        self.client = client
+
+    async def _async_update_data(self) -> dict[str, str | None]:
+        """Return the color of every calendar on the account.
+
+        Failing keeps the previous colors and leaves data None until a first
+        fetch succeeds, which an empty result must not be confused with: that
+        one means the server reports no colors and clears them. UpdateFailed
+        rather than the original error, because only that one is logged once
+        instead of as a traceback on every poll.
+        """
+        try:
+            return await self.hass.async_add_executor_job(fetch_colors, self.client)
+        except Exception as err:  # noqa: BLE001
+            raise UpdateFailed(f"Could not read calendar colors: {err}") from err
 
 
 class HaCaldavTodoCoordinator(DataUpdateCoordinator[list[TodoItem]]):

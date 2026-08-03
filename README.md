@@ -9,6 +9,7 @@ This one closes that gap. Same servers, same underlying CalDAV library, just wit
 - ✏️ Edit and delete events, not only create them.
 - 🔁 Recurring events done right: change or remove a single occurrence, that one and everything after it, or the whole series.
 - ✅ Finish a repeating to-do and it rolls forward to the next due date instead of marking the whole series done.
+- 🎨 Calendars come in the colour they have on the server and follow along when you change it there, unless you pick your own in Home Assistant.
 - 🛡️ If someone changed an event on the server since your last sync, your edit gets stopped instead of quietly overwriting theirs.
 - ⚡ Polling only does the expensive work when something actually changed, so it stays light.
 

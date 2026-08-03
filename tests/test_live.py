@@ -433,3 +433,29 @@ def test_completing_recurring_todo_rolls_forward(calendar) -> None:
     item = todos(calendar)["Water"]
     assert item.status == TodoItemStatus.NEEDS_ACTION
     assert item.due.astimezone(UTC) == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+
+
+def test_calendar_color_round_trips(calendar) -> None:
+    """The color the server holds must come back keyed by the calendar's path."""
+    from caldav.elements import ical
+
+    from custom_components.ha_caldav.color import calendar_key, fetch_colors
+
+    client = caldav.DAVClient(URL, username=USERNAME, password=PASSWORD)
+    try:
+        calendar.set_properties([ical.CalendarColor("#00679EFF")])
+        # Alpha is what a client may well have written, and the server hands it
+        # straight back; turning it into #rrggbb is on us.
+        assert calendar.get_property(ical.CalendarColor()) == "#00679EFF"
+
+        colors = fetch_colors(client)
+    finally:
+        # The calendar is shared with every test in this module.
+        calendar.set_properties([ical.CalendarColor("")])
+
+    assert colors[calendar_key(calendar.url)] == "#00679e"
+    # Two calendars reducing to one key would hand one of them the other's
+    # color. Spare keys are fine: a depth-1 PROPFIND also reaches subscriptions
+    # and trashed calendars, which are not calendars() results.
+    keys = [calendar_key(found.url) for found in client.principal().calendars()]
+    assert len(keys) == len(set(keys))

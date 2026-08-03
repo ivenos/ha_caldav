@@ -9,13 +9,15 @@ from typing import Any
 import caldav
 from caldav.lib.error import DAVError, NotFoundError
 from homeassistant.components.calendar import (
+    DOMAIN as CALENDAR_DOMAIN,
     CalendarEntity,
     CalendarEntityFeature,
     CalendarEvent,
 )
 from homeassistant.const import CONF_SCAN_INTERVAL
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -23,6 +25,7 @@ from requests import RequestException
 
 from . import HaCaldavConfigEntry
 from .api import create_event
+from .color import calendar_key
 from .const import (
     CONF_CALENDARS,
     CONF_DAYS,
@@ -35,10 +38,14 @@ from .const import (
     DOMAIN,
     RANGE_THIS_AND_FUTURE,
 )
-from .coordinator import HaCaldavCoordinator
+from .coordinator import HaCaldavColorCoordinator, HaCaldavCoordinator
 from .recurrence import delete_event, update_event
 
 WRITE_ERRORS = (RequestException, DAVError, ValueError)
+
+# Home Assistant owns the visible color under its own domain, so the record of
+# what we took from the server needs a namespace of its own.
+COLOR_STATE = f"{DOMAIN}.private"
 
 
 async def async_setup_entry(
@@ -58,6 +65,11 @@ async def async_setup_entry(
 
     calendars = await hass.async_add_executor_job(fetch_calendars, client)
 
+    # Refreshed up front so the first sync of every entity has colors to work
+    # with rather than having to wait a whole scan interval for them.
+    colors = HaCaldavColorCoordinator(hass, entry, client, scan_interval)
+    await colors.async_refresh()
+
     entities: list[HaCaldavCalendarEntity] = []
     for calendar in calendars:
         if selected and calendar.name not in selected:
@@ -66,7 +78,9 @@ async def async_setup_entry(
             hass, entry, calendar, days, include_all_day, scan_interval
         )
         await coordinator.async_config_entry_first_refresh()
-        entities.append(HaCaldavCalendarEntity(coordinator, entry, calendar, read_only))
+        entities.append(
+            HaCaldavCalendarEntity(coordinator, colors, entry, calendar, read_only)
+        )
     async_add_entities(entities)
 
 
@@ -90,6 +104,7 @@ class HaCaldavCalendarEntity(CoordinatorEntity[HaCaldavCoordinator], CalendarEnt
     def __init__(
         self,
         coordinator: HaCaldavCoordinator,
+        colors: HaCaldavColorCoordinator,
         entry: HaCaldavConfigEntry,
         calendar: caldav.Calendar,
         read_only: bool = False,
@@ -99,6 +114,10 @@ class HaCaldavCalendarEntity(CoordinatorEntity[HaCaldavCoordinator], CalendarEnt
         if read_only:
             self._attr_supported_features = CalendarEntityFeature(0)
         self.calendar = calendar
+        self.colors = colors
+        self._color_key = calendar_key(calendar.url)
+        self._written_color: str | None = None
+        self._picked = False
         self._attr_name = calendar.name or "CalDAV"
         self._attr_unique_id = f"{entry.entry_id}-{calendar.url}"
         self._attr_device_info = DeviceInfo(
@@ -106,6 +125,86 @@ class HaCaldavCalendarEntity(CoordinatorEntity[HaCaldavCoordinator], CalendarEnt
             entry_type=DeviceEntryType.SERVICE,
             name=entry.title,
         )
+
+    async def async_added_to_hass(self) -> None:
+        """Start following the color this calendar carries on the server."""
+        # Before the base class, which is what subscribes to registry updates:
+        # a hook running while this is unset would read as a color the user set.
+        if entry := self.registry_entry:
+            self._written_color = entry.options.get(CALENDAR_DOMAIN, {}).get("color")
+        await super().async_added_to_hass()
+        self.async_on_remove(self.colors.async_add_listener(self._async_sync_color))
+        self._async_sync_color()
+
+    @callback
+    def async_registry_entry_updated(self) -> None:
+        """Note a color the user picked the moment they pick it.
+
+        Someone who changes the color twice between two polls can land back on
+        the one the server carries, which the stored state alone cannot tell
+        from never having touched it.
+        """
+        if (entry := self.registry_entry) is None:
+            return
+        if entry.options.get(CALENDAR_DOMAIN, {}).get("color") == self._written_color:
+            return
+        self._picked = True
+        # Recorded right away rather than at the next poll, which a restart in
+        # between would never let happen.
+        state = entry.options.get(COLOR_STATE)
+        if state is not None and not state.get("override"):
+            er.async_get(self.hass).async_update_entity_options(
+                self.entity_id, COLOR_STATE, {**state, "override": True}
+            )
+
+    @callback
+    def _async_sync_color(self) -> None:
+        """Carry a server-side color over to the entity setting.
+
+        Clearing the color counts as a choice, and the flag that records one
+        never clears. A calendar the server did not report on is left alone:
+        that is a lookup that went wrong, not a color someone removed.
+        """
+        if (entry := self.registry_entry) is None or self.colors.data is None:
+            return
+        if self._color_key not in self.colors.data:
+            return
+        state = entry.options.get(COLOR_STATE)
+        current = entry.options.get(CALENDAR_DOMAIN, {}).get("color")
+        server = self._server_color()
+        if state is None:
+            # No record yet: an entity registered before we tracked colors, so
+            # anything already showing is a color the user picked themselves.
+            override = current is not None
+        else:
+            override = state.get("override") or current != state.get("color")
+        override = override or self._picked
+
+        registry = er.async_get(self.hass)
+        # Both branches that do not return fall through to the record below: a
+        # newly spotted pick has to be stored before the next poll.
+        if override:
+            if state is not None and state.get("override"):
+                return
+        elif state is not None and server == state.get("color"):
+            return
+        else:
+            options = dict(entry.options.get(CALENDAR_DOMAIN, {}))
+            if server is None:
+                options.pop("color", None)
+            else:
+                options["color"] = server
+            # Recorded before the write, which calls back into the watcher above.
+            self._written_color = server
+            registry.async_update_entity_options(
+                self.entity_id, CALENDAR_DOMAIN, options or None
+            )
+        self.registry_entry = registry.async_update_entity_options(
+            self.entity_id, COLOR_STATE, {"color": server, "override": override}
+        )
+
+    def _server_color(self) -> str | None:
+        return (self.colors.data or {}).get(self._color_key)
 
     @property
     def event(self) -> CalendarEvent | None:

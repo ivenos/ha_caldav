@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant
 import requests
 
 from . import HaCaldavConfigEntry
+from .color import calendar_key, fetch_colors
 
 TO_REDACT = {CONF_PASSWORD, CONF_URL, CONF_USERNAME}
 
@@ -33,16 +34,30 @@ async def async_get_config_entry_diagnostics(
 
 
 def _calendars(client: caldav.DAVClient) -> Any:
-    """Return each calendar with the component types the server accepts for it."""
+    """Return each calendar with its color and the components it accepts."""
     try:
         found = client.principal().calendars()
     except (requests.RequestException, DAVError) as err:
         # Error text embeds the server URL and username, which the redaction
         # above strips; only the error type is safe to include.
         return {"error": type(err).__name__}
+    colors: dict[str, str | None] = {}
+    color_error = None
+    try:
+        colors = fetch_colors(client)
+    except Exception as err:  # noqa: BLE001
+        # A malformed multistatus has caldav raising anything from
+        # AssertionError to TypeError.
+        color_error = type(err).__name__
     calendars = []
     for calendar in found:
         info: dict[str, Any] = {"name": calendar.name}
+        # Reported apart from a missing color, which is a thing a server is
+        # allowed to say.
+        if color_error is not None:
+            info["color_error"] = color_error
+        else:
+            info["color"] = colors.get(calendar_key(calendar.url))
         try:
             info["components"] = calendar.get_supported_components()
         except (requests.RequestException, DAVError) as err:

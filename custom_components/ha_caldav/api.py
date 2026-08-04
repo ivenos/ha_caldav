@@ -1,17 +1,49 @@
 """CalDAV write operations for events and to-do items.
 
 The recurring-series surgery lives in :mod:`.recurrence`; this module holds the
-straightforward create and to-do operations.
+straightforward create and to-do operations, and the uid lookup both rely on.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, time
+import logging
 from typing import Any
 
 import caldav
+from caldav.lib.error import NotFoundError
 from dateutil.rrule import rrulestr
 from icalendar import vRecur
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def object_by_uid(calendar: caldav.Calendar, uid: str, todo: bool = False) -> Any:
+    """Return the calendar object carrying this uid.
+
+    The library has the server filter on UID, which iCloud rejects outright.
+    A lookup that came back empty is taken at face value; a rejected one is
+    retried as a plain component search, which is a shape those servers do
+    answer, and the uid is matched here instead.
+    """
+    try:
+        return calendar.todo_by_uid(uid) if todo else calendar.event_by_uid(uid)
+    except NotFoundError:
+        raise
+    # Rejection reaches us as anything from ReportError to TypeError, depending
+    # on how the installed caldav handles its own fallback.
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Server refused the uid search, scanning instead: %s", err)
+    found = (
+        calendar.search(todo=True, include_completed=True)
+        if todo
+        else calendar.search(event=True)
+    )
+    for item in found:
+        component = item.icalendar_component
+        if component is not None and str(component.get("UID", "")) == uid:
+            return item
+    raise NotFoundError(f"{uid} not found on server")
 
 
 def create_event(calendar: caldav.Calendar, data: dict[str, Any]) -> None:
@@ -26,7 +58,7 @@ def create_todo(calendar: caldav.Calendar, data: dict[str, Any]) -> None:
 
 def update_todo(calendar: caldav.Calendar, uid: str, data: dict[str, Any]) -> None:
     """Apply changed fields to an existing to-do item."""
-    todo = calendar.todo_by_uid(uid)
+    todo = object_by_uid(calendar, uid, todo=True)
     vtodo = todo.icalendar_component
     # Completing a recurring task rolls it to the next occurrence instead of
     # closing the whole series.
@@ -51,7 +83,7 @@ def update_todo(calendar: caldav.Calendar, uid: str, data: dict[str, Any]) -> No
 
 def delete_todo(calendar: caldav.Calendar, uid: str) -> None:
     """Delete a to-do item."""
-    calendar.todo_by_uid(uid).delete()
+    object_by_uid(calendar, uid, todo=True).delete()
 
 
 def _roll_todo(vtodo: Any) -> bool:

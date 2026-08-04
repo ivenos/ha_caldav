@@ -26,6 +26,8 @@ from icalendar import (
 )
 import requests
 
+from .api import object_by_uid
+
 _LOGGER = logging.getLogger(__name__)
 
 _MAX_OCCURRENCES = 10_000
@@ -42,7 +44,7 @@ def update_event(
     expected_etag: str | None = None,
 ) -> None:
     """Update a whole series, a single occurrence, or an occurrence onwards."""
-    dav_event = calendar.event_by_uid(uid)
+    dav_event = object_by_uid(calendar, uid)
     _check_etag(dav_event, expected_etag)
     ical = dav_event.icalendar_instance
     master = _master(ical)
@@ -136,7 +138,7 @@ def delete_event(
     expected_etag: str | None = None,
 ) -> None:
     """Delete a whole series, a single occurrence, or an occurrence onwards."""
-    dav_event = calendar.event_by_uid(uid)
+    dav_event = object_by_uid(calendar, uid)
     _check_etag(dav_event, expected_etag)
 
     if recurrence_id is None:
@@ -474,7 +476,7 @@ def _head_uncapped(
     calendar: caldav.Calendar, uid: str, occurrence: datetime | date
 ) -> bool:
     try:
-        ical = calendar.event_by_uid(uid).icalendar_instance
+        ical = object_by_uid(calendar, uid).icalendar_instance
     except _NETWORK_FAILURES:
         return False
     return _has_occurrences_from(_master(ical), occurrence)

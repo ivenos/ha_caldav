@@ -441,7 +441,7 @@ def test_calendar_color_round_trips(calendar) -> None:
 
     from custom_components.ha_caldav.color import calendar_key, fetch_colors
 
-    client = caldav.DAVClient(URL, username=USERNAME, password=PASSWORD)
+    client = calendar.client
     try:
         calendar.set_properties([ical.CalendarColor("#00679EFF")])
         # Alpha is what a client may well have written, and the server hands it

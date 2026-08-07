@@ -2,38 +2,32 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 from functools import partial
 from typing import Any
 
-import caldav
-from caldav.lib.error import DAVError, NotFoundError
 from homeassistant.components.todo import (
     TodoItem,
     TodoListEntity,
     TodoListEntityFeature,
 )
-from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from requests import RequestException
 
-from . import HaCaldavConfigEntry
-from .api import create_todo, delete_todo, update_todo
-from .calendar import fetch_calendars
-from .const import (
-    CONF_CALENDARS,
-    CONF_READ_ONLY,
-    DEFAULT_READ_ONLY,
-    DEFAULT_SCAN_INTERVAL,
-    DOMAIN,
+from .api import create_todo, delete_todos, reorder_todos, update_todo
+from .const import DOMAIN
+from .coordinator import (
+    TODO_STATUS_INV,
+    HaCaldavConfigEntry,
+    ManagedCalendar,
+    todo_unique_id,
 )
-from .coordinator import TODO_STATUS_INV, HaCaldavTodoCoordinator
+from .entity import HaCaldavEntity
 
-WRITE_ERRORS = (RequestException, DAVError, ValueError)
+# Service calls only; the to-do panel, reordering included, comes in over the
+# websocket and never reaches it. What actually keeps two writes off the same
+# object is the per-collection lock in HaCaldavEntity.async_write.
+PARALLEL_UPDATES = 1
 
 
 async def async_setup_entry(
@@ -41,93 +35,99 @@ async def async_setup_entry(
     entry: HaCaldavConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up one to-do list per selected calendar."""
-    client = entry.runtime_data
-    selected = entry.options.get(CONF_CALENDARS)
-    read_only = entry.options.get(CONF_READ_ONLY, DEFAULT_READ_ONLY)
-    scan_interval = timedelta(
-        minutes=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    """Set up one to-do list per calendar that holds to-do items."""
+    async_add_entities(
+        HaCaldavTodoListEntity(managed, entry)
+        for managed in entry.runtime_data.calendars
+        if managed.capability.supports_todos
     )
 
-    calendars = await hass.async_add_executor_job(fetch_calendars, client)
 
-    entities: list[HaCaldavTodoListEntity] = []
-    for calendar in calendars:
-        if selected and calendar.name not in selected:
-            continue
-        coordinator = HaCaldavTodoCoordinator(hass, entry, calendar, scan_interval)
-        await coordinator.async_config_entry_first_refresh()
-        entities.append(HaCaldavTodoListEntity(coordinator, entry, calendar, read_only))
-    async_add_entities(entities)
-
-
-class HaCaldavTodoListEntity(
-    CoordinatorEntity[HaCaldavTodoCoordinator], TodoListEntity
-):
+class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
     """The VTODO items of a CalDAV calendar."""
-
-    _attr_has_entity_name = True
-    _attr_supported_features = (
-        TodoListEntityFeature.CREATE_TODO_ITEM
-        | TodoListEntityFeature.UPDATE_TODO_ITEM
-        | TodoListEntityFeature.DELETE_TODO_ITEM
-        | TodoListEntityFeature.SET_DUE_DATE_ON_ITEM
-        | TodoListEntityFeature.SET_DUE_DATETIME_ON_ITEM
-        | TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
-    )
 
     def __init__(
         self,
-        coordinator: HaCaldavTodoCoordinator,
+        managed: ManagedCalendar,
         entry: HaCaldavConfigEntry,
-        calendar: caldav.Calendar,
-        read_only: bool = False,
     ) -> None:
         """Initialize the to-do list entity."""
-        super().__init__(coordinator)
-        if read_only:
-            self._attr_supported_features = TodoListEntityFeature(0)
-        self.calendar = calendar
-        self._attr_name = calendar.name or "CalDAV"
-        self._attr_unique_id = f"{entry.entry_id}-{calendar.url}-todo"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            entry_type=DeviceEntryType.SERVICE,
-            name=entry.title,
+        super().__init__(managed, entry)
+        self._attr_supported_features = (
+            TodoListEntityFeature.CREATE_TODO_ITEM
+            | TodoListEntityFeature.UPDATE_TODO_ITEM
+            | TodoListEntityFeature.DELETE_TODO_ITEM
+            | TodoListEntityFeature.MOVE_TODO_ITEM
+            | TodoListEntityFeature.SET_DUE_DATE_ON_ITEM
+            | TodoListEntityFeature.SET_DUE_DATETIME_ON_ITEM
+            | TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+            if managed.writable
+            else TodoListEntityFeature(0)
         )
+        self._attr_unique_id = todo_unique_id(entry.entry_id, managed.calendar.url)
 
     @property
     def todo_items(self) -> list[TodoItem] | None:
         """Return the to-do items."""
-        return self.coordinator.data
+        return self.coordinator.data.todos if self.coordinator.data else None
 
     async def async_create_todo_item(self, item: TodoItem) -> None:
         """Add an item to the list."""
-        await self._write(
+        await self.async_write(
             partial(create_todo, self.calendar, _item_data(item)), "create"
         )
 
     async def async_update_todo_item(self, item: TodoItem) -> None:
         """Update an item on the list."""
-        await self._write(
-            partial(update_todo, self.calendar, item.uid, _item_data(item)), "update"
+        await self.async_write(
+            partial(
+                update_todo,
+                self.calendar,
+                item.uid,
+                _item_data(item),
+                self.coordinator.todo_etags.get(item.uid or ""),
+            ),
+            "update",
+            forget=("todo_etags", (item.uid or "",)),
         )
 
     async def async_delete_todo_items(self, uids: list[str]) -> None:
         """Delete items from the list."""
-        for uid in uids:
-            await self._write(partial(delete_todo, self.calendar, uid), "delete")
+        await self.async_write(
+            partial(
+                delete_todos, self.calendar, uids, dict(self.coordinator.todo_etags)
+            ),
+            "delete",
+            forget=("todo_etags", tuple(uids)),
+        )
 
-    async def _write(self, job: partial[None], action: str) -> None:
-        try:
-            await self.hass.async_add_executor_job(job)
-        except NotFoundError as err:
-            raise HomeAssistantError(
-                f"To-do item not found on the server: {err}"
-            ) from err
-        except WRITE_ERRORS as err:
-            raise HomeAssistantError(f"CalDAV {action} error: {err}") from err
-        await self.coordinator.async_request_refresh()
+    async def async_move_todo_item(
+        self, uid: str, previous_uid: str | None = None
+    ) -> None:
+        """Move an item behind another one, or to the front of the list."""
+        items = self.coordinator.data.todos if self.coordinator.data else []
+        order = [item.uid for item in items if item.uid]
+        for wanted in (uid, previous_uid):
+            if wanted is not None and wanted not in order:
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN,
+                    translation_key="unknown_todo_item",
+                    translation_placeholders={"uid": wanted},
+                )
+        if previous_uid == uid:
+            return
+        order.remove(uid)
+        order.insert(0 if previous_uid is None else order.index(previous_uid) + 1, uid)
+        await self.async_write(
+            partial(reorder_todos, self.calendar, order),
+            "reorder",
+            # The moved item is written, and so is every other one whenever the
+            # list has to be renumbered, which is the first drag of any list the
+            # server never numbered. Their etags are stale either way, and the
+            # refresh behind this is debounced, so the next tick of one of them
+            # would be refused as a conflict the user made themselves.
+            forget=("todo_etags", tuple(order)),
+        )
 
 
 def _item_data(item: TodoItem) -> dict[str, Any]:

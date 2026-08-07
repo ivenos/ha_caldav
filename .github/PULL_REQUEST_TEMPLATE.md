@@ -6,8 +6,14 @@
 
 ## Test plan
 
-<!-- How did you verify your change? Which CalDAV server did you test against, and which
-     operations (create, update, delete) did you check in the Home Assistant calendar view? -->
+<!-- Which CalDAV server did you test against, and what did you exercise: the calendar
+     view, the to-do list, or which actions? -->
+
+## Checklist
+
+- [ ] One concern per pull request
+- [ ] Tests added for the behaviour that changed
+- [ ] `pytest`, `ruff check` and `ruff format --check` pass
 
 ---
 

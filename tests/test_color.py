@@ -18,11 +18,8 @@ from pytest_homeassistant_custom_component.common import (
 import requests
 
 from custom_components.ha_caldav.calendar import COLOR_STATE
-from custom_components.ha_caldav.color import (
-    calendar_key,
-    fetch_colors,
-    normalize_color,
-)
+from custom_components.ha_caldav.color import fetch_colors, normalize_color
+from custom_components.ha_caldav.connection import calendar_key
 from custom_components.ha_caldav.const import DOMAIN
 from custom_components.ha_caldav.coordinator import HaCaldavColorCoordinator
 
@@ -65,21 +62,6 @@ PERSONAL_HREF = f"{PERSONAL_PATH}/"
 )
 def test_normalize_color(value, expected) -> None:
     assert normalize_color(value) == expected
-
-
-@pytest.mark.parametrize(
-    ("url", "expected"),
-    [
-        (PERSONAL_URL, PERSONAL_PATH),
-        (f"{PERSONAL_PATH}/", PERSONAL_PATH),
-        (PERSONAL_PATH, PERSONAL_PATH),
-        # The calendar url keeps its percent-encoding, the PROPFIND href does not.
-        ("https://x.example/dav/cal%C3%A4nder/", "/dav/caländer"),
-        ("/dav/caländer", "/dav/caländer"),
-    ],
-)
-def test_calendar_key_matches_both_spellings(url, expected) -> None:
-    assert calendar_key(url) == expected
 
 
 def _props(value: str | None) -> dict:
@@ -490,6 +472,11 @@ async def test_color_is_polled_without_anyone_asking(hass: HomeAssistant) -> Non
     }
 
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=16))
+    # Twice: the poll writes the color through async_update_entry, and the
+    # listener that stores it is scheduled by that write rather than awaited by
+    # it. One cycle happens to be enough on an idle machine and is not under
+    # load, which is a test that goes red in CI for no reason.
+    await hass.async_block_till_done()
     await hass.async_block_till_done()
 
     assert _options(hass)["calendar"]["color"] == "#123456"
@@ -698,8 +685,8 @@ async def test_startup_failure_keeps_the_visible_color(hass: HomeAssistant) -> N
 
 
 async def test_entity_enabled_later_follows_the_server(hass: HomeAssistant) -> None:
-    # Registered but never added, so nothing ran for it. Once enabled it has to
-    # take the color the server carries now, not the one it had back then.
+    # Disabled, so nothing of ours ever ran for it: the color comes from
+    # registration alone, and enabling it later still has to pick up a change.
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="iven",
@@ -709,7 +696,7 @@ async def test_entity_enabled_later_follows_the_server(hass: HomeAssistant) -> N
     )
     entry.add_to_hass(hass)
     await _setup(hass, {PERSONAL_HREF: "#00679e"}, entry)
-    assert "calendar" not in _options(hass)
+    assert _options(hass)["calendar"]["color"] == "#00679e"
 
     er.async_get(hass).async_update_entity("calendar.iven_personal", disabled_by=None)
     await _reload(hass, entry, "#123456")
@@ -732,3 +719,57 @@ async def test_setup_survives_a_server_that_cannot_answer(
 
     assert hass.states.get("calendar.iven_personal") is not None
     assert "color" not in _options(hass).get("calendar", {})
+
+
+async def test_a_failed_colour_read_names_no_url_and_no_body(
+    hass: HomeAssistant,
+) -> None:
+    """UpdateFailed is logged at error level, in the plain log.
+
+    caldav's own message carries the url it was reading, the account name in
+    it, and the whole response body it got back, which for a failing REPORT is
+    calendar content.
+    """
+    from caldav.lib.error import PropfindError
+
+    entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    client = _client()
+    client.principal.return_value.calendar_home_set.get_properties.side_effect = (
+        PropfindError(
+            "403 Forbidden at 'https://cloud.example.com/remote.php/dav/iven/'"
+            "\n\n<d:multistatus><d:href>/dav/iven/therapy/</d:href></d:multistatus>"
+        )
+    )
+    coordinator = HaCaldavColorCoordinator(hass, entry, client, timedelta(minutes=15))
+
+    await coordinator.async_refresh()
+
+    reported = str(coordinator.last_exception)
+    assert "cloud.example.com" not in reported
+    assert "therapy" not in reported
+    assert "PropfindError" in reported
+
+
+async def test_writing_a_color_after_a_hand_pick_makes_the_calendar_follow_again(
+    hass: HomeAssistant,
+) -> None:
+    """Left recorded against the old color, the registry watcher reads the
+    user's earlier pick as a fresh one and puts the override straight back, so
+    the service reports success and nothing on screen ever changes again."""
+    await _setup(hass, {PERSONAL_HREF: "#00679e"})
+    er.async_get(hass).async_update_entity_options(
+        "calendar.iven_personal", "calendar", {"color": "#abcdef"}
+    )
+    await hass.async_block_till_done()
+    assert _options(hass)[COLOR_STATE]["override"] is True
+
+    _entity(hass).async_follow_server_color()
+    await hass.async_block_till_done()
+
+    assert _options(hass)[COLOR_STATE]["override"] is False
+
+    await _recolor(hass, "#cccccc")
+
+    assert _options(hass)["calendar"]["color"] == "#cccccc"
+    assert _options(hass)[COLOR_STATE] == {"color": "#cccccc", "override": False}

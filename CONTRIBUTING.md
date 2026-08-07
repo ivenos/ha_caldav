@@ -11,29 +11,47 @@ python3.14 -m venv .venv
 
 ## Tests
 
-Unit tests, from the repo root (live tests are excluded by default):
+Unit tests, from the repo root:
 
 ```bash
-pytest
+.venv/bin/pytest
 ```
 
 Lint and format:
 
 ```bash
-ruff check
-ruff format --check
+.venv/bin/ruff check
+.venv/bin/ruff format --check
 ```
 
 Live tests exercise a real CalDAV server in a throwaway Docker container and are
 excluded unless you ask for them. Bring one up and run them with:
 
 ```bash
-.github/scripts/live-test.sh nextcloud    # also: radicale, xandikos
+.github/scripts/live-test.sh nextcloud    # also: baikal, radicale, sogo, xandikos
+.github/scripts/live-test.sh nextcloud 31 -- -v    # a given tag, then pytest args
 ```
 
-The container is removed afterwards, on failure included. CI runs the same
-script against Nextcloud (the current major and the one behind), Radicale and
-Xandikos.
+The containers are removed afterwards, on failure included. Baikal and SOGo
+need more than a start: the script seeds Baikal's config file and database in
+place of its install wizard, and gives SOGo a MariaDB container plus the SQL
+view it authenticates against. CI runs the same script against Nextcloud (the
+current major and the one behind), Radicale, Xandikos, Baikal and SOGo.
+
+Test doubles stand in for `caldav` objects, and a forgiving one hides real
+defects: a `save()` that records nothing hid a double SEQUENCE bump, and a
+resource exposing only `icalendar_component` hid an edit landing on the wrong
+subcomponent. Model what the library actually does, or let caldav's own code
+run against `RecordingClient` from `tests/conftest.py`, which captures the PUT
+instead of sending it.
+
+## Config entry versions
+
+Changing the shape of the account key or of an entity `unique_id` needs
+`MINOR_VERSION` on the config flow moved as well. Home Assistant compares the
+stored version against the handler's and returns before loading the component
+when they agree, so a migration written for entries that already carry the
+current number never runs at all.
 
 ## Code style
 
@@ -59,6 +77,16 @@ The changelog lives in the GitHub release notes, in Keep a Changelog style
 `caldav`, `icalendar` and `vobject` are pinned to the versions Home Assistant
 core ships, not the latest on PyPI, so the integration runs in the same
 environment as the built-in `caldav` integration. Do not bump them on their own.
+
+`dateutil` is imported directly but not listed: `icalendar` and `vobject` both
+require it, and since those two are pinned to an exact version, so is what they
+pull in. Declaring it here could only conflict with them.
+
+## Translations
+
+`strings.json` is the source. Every key in it has to exist in all five files
+under `translations/`, `en.json` included, with the same `{placeholders}`.
+Adding a user-facing string therefore means touching six files.
 
 ## Pull requests
 

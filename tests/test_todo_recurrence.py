@@ -21,6 +21,10 @@ class FakeTodo:
         self.saved = False
 
     @property
+    def icalendar_instance(self):
+        return self._cal
+
+    @property
     def icalendar_component(self):
         return next(c for c in self._cal.walk() if c.name == "VTODO")
 
@@ -122,15 +126,18 @@ def test_completing_misaligned_count_one_closes_without_invalid_count() -> None:
     assert b"COUNT=0" not in vtodo["RRULE"].to_ical()
 
 
-def test_completing_with_mismatched_until_closes_instead_of_raising() -> None:
-    # Floating anchor with a UTC UNTIL is RFC-noncompliant and makes rrulestr
-    # raise; the item must still be completable.
+def test_completing_with_a_mismatched_until_still_rolls_the_item() -> None:
+    # A floating anchor with a UTC UNTIL is what Google writes. dateutil
+    # refuses the pair outright, so the zone is reconciled before it is asked
+    # and the series keeps rolling instead of quietly closing.
     calendar = FakeTodoCalendar(
         _vtodo("DUE:20260706T090000\r\nRRULE:FREQ=WEEKLY;UNTIL=20260720T090000Z")
     )
     update_todo(calendar, "t1", {"summary": "Water plants", "status": "COMPLETED"})
 
-    assert str(calendar.todo.stored()["STATUS"]) == "COMPLETED"
+    vtodo = calendar.todo.stored()
+    assert str(vtodo["STATUS"]) == "NEEDS-ACTION"
+    assert vtodo["DUE"].dt.day == 13
 
 
 def test_completing_recurring_todo_with_until_rolls_then_closes() -> None:
@@ -175,3 +182,65 @@ def test_update_todo_clears_absent_due_and_description() -> None:
     vtodo = calendar.todo.stored()
     assert "DUE" not in vtodo
     assert "DESCRIPTION" not in vtodo
+
+
+def test_completing_an_item_that_is_already_done_keeps_one_stamp() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DUE:20260706T090000Z\r\nSTATUS:COMPLETED\r\n"
+            "COMPLETED:20260706T100000Z\r\nPERCENT-COMPLETE:100"
+        )
+    )
+
+    update_todo(calendar, "t1", {"summary": "Water plants", "status": "COMPLETED"})
+
+    # icalendar's add turns a second write into a list, and the object would go
+    # back with two COMPLETED properties.
+    vtodo = calendar.todo.stored()
+    assert str(vtodo["STATUS"]) == "COMPLETED"
+    assert not isinstance(vtodo["COMPLETED"], list)
+    assert vtodo["COMPLETED"].dt == datetime(2026, 7, 6, 10, 0, tzinfo=UTC)
+
+
+def test_a_recurring_todo_with_both_anchors_rolls_by_the_start() -> None:
+    # DTSTART is what the rule is anchored on; measuring the step from DUE
+    # instead moves a task with a BYDAY rule backwards.
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DTSTART;VALUE=DATE:20260706\r\nDUE;VALUE=DATE:20260707\r\n"
+            "RRULE:FREQ=WEEKLY;BYDAY=MO"
+        )
+    )
+
+    update_todo(calendar, "t1", COMPLETE)
+
+    vtodo = calendar.todo.stored()
+    assert vtodo["DTSTART"].dt == date(2026, 7, 13)
+    assert vtodo["DUE"].dt == date(2026, 7, 14)
+
+
+def test_a_due_date_cannot_be_moved_in_front_of_the_start() -> None:
+    """RFC 5545 puts DUE after DTSTART.
+
+    Home Assistant shows no start for a to-do, so the DTSTART another client
+    set is invisible here and a due date dragged earlier would sail past.
+    """
+    import pytest
+
+    from custom_components.ha_caldav.errors import Refused
+
+    calendar = FakeTodoCalendar(
+        _vtodo("DTSTART:20260710T090000Z\r\nDUE:20260711T090000Z")
+    )
+
+    with pytest.raises(Refused, match="end_before_start"):
+        update_todo(
+            calendar,
+            "t1",
+            {
+                "summary": "Water plants",
+                "due": datetime(2026, 7, 5, 9, 0, tzinfo=UTC),
+            },
+        )
+
+    assert not calendar.todo.saved

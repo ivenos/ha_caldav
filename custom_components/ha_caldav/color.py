@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import unquote, urlparse
 
 import caldav
 from caldav.elements import ical
@@ -14,7 +13,7 @@ _FULL = (6, 8)
 
 
 def normalize_color(value: object) -> str | None:
-    """Return value as #rrggbb, or None if it is not a color we can use.
+    """Return value as #rrggbb, or None if unusable.
 
     A server hands back whatever a client wrote into calendar-color; the CSS
     shorthand and a trailing alpha pair both occur, and Home Assistant, which
@@ -30,23 +29,10 @@ def normalize_color(value: object) -> str | None:
     return f"#{digits[:6].lower()}"
 
 
-def calendar_key(url: object) -> str:
-    """Return the comparable form of a calendar url.
-
-    A calendar url keeps its percent-encoding, the hrefs it is matched against
-    do not, and the two need not agree on a trailing slash.
-    """
-    path = str(url)
-    if "://" in path:
-        path = urlparse(path).path
-    return unquote(path).rstrip("/")
-
-
 def fetch_colors(client: caldav.DAVClient) -> dict[str, str | None]:
     """Return calendar key -> color for everything the home set reports on.
 
-    A single depth-1 PROPFIND on the calendar home set covers every calendar.
-    Anything answered for is a key, colorless ones included, so that a calendar
+    Anything answered for is a key, colorless ones included, so a calendar
     missing from the result stays distinguishable from one without a color.
     """
     home = client.principal().calendar_home_set

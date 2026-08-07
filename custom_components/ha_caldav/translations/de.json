@@ -3,16 +3,44 @@
     "step": {
       "user": {
         "title": "CalDAV-Konto",
-        "description": "URL des CalDAV-Servers und die Zugangsdaten eingeben.",
+        "description": "Die URL des CalDAV-Servers und die Zugangsdaten eingeben.",
         "data": {
           "url": "Server-URL",
           "username": "Benutzername",
           "password": "Passwort",
-          "verify_ssl": "SSL-Zertifikat prüfen"
+          "verify_ssl": "SSL-Zertifikat prüfen",
+          "ca_bundle": "Pfad zum CA-Bundle",
+          "client_cert": "Pfad zum Client-Zertifikat",
+          "client_key": "Pfad zum Client-Schlüssel"
+        },
+        "data_description": {
+          "url": "Die Adresse des CalDAV-Servers. Bei den meisten Servern reicht der bloße Hostname.",
+          "verify_ssl": "Eingeschaltet lassen, solange kein Grund dagegen spricht. Ist es aus, kann jeder zwischen Home Assistant und dem Server das Passwort mitlesen.",
+          "ca_bundle": "Optional. Prüft den Server gegen diese Datei statt gegen den Zertifikatsspeicher des Systems.",
+          "client_cert": "Optional. Identifiziert Home Assistant gegenüber Servern, die ein Zertifikat verlangen.",
+          "client_key": "Optional. Der private Schlüssel zu diesem Zertifikat."
+        }
+      },
+      "reconfigure": {
+        "title": "CalDAV-Verbindung ändern",
+        "description": "Server-URL oder TLS-Einstellungen anpassen. Das Konto selbst bleibt, wie es ist.",
+        "data": {
+          "url": "Server-URL",
+          "verify_ssl": "SSL-Zertifikat prüfen",
+          "ca_bundle": "Pfad zum CA-Bundle",
+          "client_cert": "Pfad zum Client-Zertifikat",
+          "client_key": "Pfad zum Client-Schlüssel"
+        },
+        "data_description": {
+          "url": "Die Adresse des CalDAV-Servers. Bei den meisten Servern reicht der bloße Hostname.",
+          "verify_ssl": "Eingeschaltet lassen, solange kein Grund dagegen spricht. Ist es aus, kann jeder zwischen Home Assistant und dem Server das Passwort mitlesen.",
+          "ca_bundle": "Optional. Prüft den Server gegen diese Datei statt gegen den Zertifikatsspeicher des Systems.",
+          "client_cert": "Optional. Identifiziert Home Assistant gegenüber Servern, die ein Zertifikat verlangen.",
+          "client_key": "Optional. Der private Schlüssel zu diesem Zertifikat."
         }
       },
       "reauth_confirm": {
-        "title": "CalDAV neu anmelden",
+        "title": "Bei CalDAV neu anmelden",
         "description": "Das Passwort für {username} wird nicht mehr akzeptiert. Bitte das aktuelle eingeben.",
         "data": {
           "password": "Passwort"
@@ -20,25 +48,521 @@
       }
     },
     "error": {
-      "invalid_auth": "Ungültige Anmeldedaten.",
-      "cannot_connect": "Verbindung fehlgeschlagen.",
-      "unknown": "Unerwarteter Fehler."
+      "invalid_auth": "Ungültige Authentifizierung",
+      "cannot_connect": "Verbindung fehlgeschlagen",
+      "unknown": "Unerwarteter Fehler"
     },
     "abort": {
-      "already_configured": "Dieses Konto ist bereits eingerichtet.",
-      "reauth_successful": "Die erneute Anmeldung war erfolgreich."
+      "already_configured": "Konto ist bereits konfiguriert",
+      "reauth_successful": "Die erneute Authentifizierung war erfolgreich",
+      "reconfigure_successful": "Die Verbindung wurde aktualisiert",
+      "already_in_progress": "Konfigurationsablauf wird bereits ausgeführt"
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "CalDAV-Optionen",
+        "menu_options": {
+          "account": "Einstellungen für das ganze Konto",
+          "pick": "Einstellungen für einen einzelnen Kalender"
+        }
+      },
+      "account": {
+        "title": "Konto-Einstellungen",
         "data": {
           "calendars": "Einzubindende Kalender",
-          "scan_interval": "Minuten zwischen Abfragen auf Änderungen außerhalb von Home Assistant",
-          "days": "Tage im Voraus für die Ermittlung des nächsten Termins",
-          "include_all_day": "Ganztägige Termine beim nächsten Termin berücksichtigen",
-          "read_only": "Nur lesen (Anlegen, Bearbeiten und Löschen ausblenden)"
+          "scan_interval": "Minuten zwischen Abfragen",
+          "days": "Tage im Voraus",
+          "include_all_day": "Ganztägige Termine einbeziehen",
+          "read_only": "Schreibgeschützt"
+        },
+        "data_description": {
+          "scan_interval": "Wie oft nach Änderungen außerhalb von Home Assistant gesucht wird.",
+          "days": "Wie weit vorausgeschaut wird, um den nächsten Termin zu bestimmen.",
+          "include_all_day": "Ob ein ganztägiger Termin der nächste Termin sein kann.",
+          "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus."
+        }
+      },
+      "pick": {
+        "title": "Kalender auswählen",
+        "data": {
+          "calendar": "Kalender"
+        }
+      },
+      "calendar": {
+        "title": "Einstellungen für {calendar}",
+        "description": "Diese ersetzen die Konto-Einstellungen nur für {calendar}.",
+        "data": {
+          "days": "Tage im Voraus",
+          "include_all_day": "Ganztägige Termine einbeziehen",
+          "read_only": "Schreibgeschützt",
+          "reset": "Konto-Einstellungen verwenden"
+        },
+        "data_description": {
+          "days": "Wie weit vorausgeschaut wird, um den nächsten Termin zu bestimmen.",
+          "include_all_day": "Ob ein ganztägiger Termin der nächste Termin sein kann.",
+          "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus.",
+          "reset": "Verwirft alles hier Eingestellte und folgt wieder dem Konto."
+        }
+      }
+    },
+    "error": {
+      "no_calendars": "Mindestens einen Kalender auswählen; ein Konto ohne einen hat überhaupt keine Entitäten."
+    }
+  },
+  "issues": {
+    "builtin_caldav_conflict": {
+      "title": "Die eingebaute CalDAV-Integration nutzt dasselbe Konto",
+      "description": "Das Konto {account} ist auch in der eingebauten CalDAV-Integration eingerichtet, sodass jeder Kalender und jede To-do-Liste doppelt erscheint. Eine der beiden entfernen."
+    },
+    "no_sync_collection": {
+      "title": "Der Server kann keine Änderungen melden",
+      "description": "Der Server hinter {account} unterstützt den sync-collection-Report (RFC 6578) nicht. Deshalb muss bei jeder Abfrage der gesamte Zeitraum geladen werden statt nur der Änderungen. Es funktioniert alles, kostet aber mehr. Ein längeres Abfrageintervall hält die Last klein."
+    }
+  },
+  "exceptions": {
+    "allday_timed_switch": {
+      "message": "Eine Serie lässt sich nicht zwischen ganztägig und zeitgebunden umstellen."
+    },
+    "ambiguous_calendar": {
+      "message": "Dieses Konto hat mehrere Kalender namens {name}; zuerst einen davon umbenennen."
+    },
+    "bad_recurrence_id": {
+      "message": "{value} ist weder ein Datum noch ein Zeitpunkt."
+    },
+    "document_empty": {
+      "message": "Das Dokument enthält weder einen Termin noch eine Aufgabe."
+    },
+    "document_no_uid": {
+      "message": "Das Dokument enthält eine Komponente ohne UID."
+    },
+    "end_before_start": {
+      "message": "Das Ende liegt vor dem Start."
+    },
+    "etag_conflict": {
+      "message": "Dieser Eintrag hat sich auf dem Server geändert, seit Home Assistant ihn zuletzt gelesen hat. Den Kalender neu laden und die Änderung erneut vornehmen."
+    },
+    "invalid_rrule": {
+      "message": "Die Wiederholungsregel ist ungültig: {reason}"
+    },
+    "mixed_time_types": {
+      "message": "Start und Ende müssen von derselben Art sein: zwei Datumsangaben für einen ganztägigen Termin oder zwei Zeitpunkte."
+    },
+    "no_event_in_object": {
+      "message": "Das Kalenderobjekt enthält keinen Termin."
+    },
+    "no_scheduling": {
+      "message": "Dieser Server beherrscht kein CalDAV-Scheduling; Einladungen lassen sich hier also nicht beantworten."
+    },
+    "no_start_in_object": {
+      "message": "Dieser Termin hat kein Startdatum und lässt sich hier nicht ändern."
+    },
+    "no_todo_in_object": {
+      "message": "Dieser Eintrag ist nicht als Aufgabe gespeichert und lässt sich hier nicht ändern."
+    },
+    "not_an_attendee": {
+      "message": "Dieser Termin führt das eigene Konto nicht als Teilnehmer."
+    },
+    "not_found": {
+      "message": "Dieser Eintrag liegt nicht mehr auf dem Server."
+    },
+    "not_recurring": {
+      "message": "Dieser Termin ist keine Serie."
+    },
+    "occurrence_not_found": {
+      "message": "Diese Serie hat keine Wiederholung am {recurrence_id}."
+    },
+    "ranged_override": {
+      "message": "Diese Serie enthält eine Ausnahme, die ab einer Wiederholung für alle folgenden gilt. In der App bearbeiten, die sie erstellt hat."
+    },
+    "rdate_split": {
+      "message": "Diese Wiederholung wurde der Serie von Hand hinzugefügt, und dort lässt sich eine Serie nicht teilen."
+    },
+    "read_only": {
+      "message": "{name} ist schreibgeschützt; es lässt sich nichts hineinschreiben."
+    },
+    "refused": {
+      "message": "{reason}"
+    },
+    "rrule_mismatch": {
+      "message": "Der neue Start fällt nicht auf einen Zeitpunkt, den die Wiederholungsregel erzeugt."
+    },
+    "rrule_too_dense": {
+      "message": "Die Wiederholungsregel erzeugt zu viele Wiederholungen, um sie durchzugehen."
+    },
+    "same_calendar": {
+      "message": "Der Termin liegt bereits in {name}. Einen anderen Kalender wählen."
+    },
+    "server_error": {
+      "message": "Der Aufruf an den CalDAV-Server ist fehlgeschlagen ({action}). Einzelheiten stehen im Log."
+    },
+    "uid_clash": {
+      "message": "Bereits in diesem Kalender: {uids}"
+    },
+    "unknown_account": {
+      "message": "{config_entry_id} ist kein geladenes CalDAV-Konto."
+    },
+    "unknown_calendar": {
+      "message": "Dieses Konto hat keinen Kalender namens {name}."
+    },
+    "unknown_target": {
+      "message": "{entity_id} ist kein Kalender eines geladenen CalDAV-Kontos."
+    },
+    "unknown_todo_item": {
+      "message": "Auf dieser Liste gibt es keine Aufgabe {uid}."
+    }
+  },
+  "selector": {
+    "search_field": {
+      "options": {
+        "summary": "Titel",
+        "description": "Beschreibung",
+        "location": "Ort",
+        "category": "Kategorie",
+        "status": "Status",
+        "uid": "UID"
+      }
+    },
+    "invitation_response": {
+      "options": {
+        "accept": "Zusagen",
+        "decline": "Absagen",
+        "tentative": "Unter Vorbehalt"
+      }
+    },
+    "calendar_components": {
+      "options": {
+        "VEVENT": "Termine",
+        "VTODO": "Aufgaben"
+      }
+    },
+    "event_status": {
+      "options": {
+        "TENTATIVE": "Vorläufig",
+        "CONFIRMED": "Bestätigt",
+        "CANCELLED": "Abgesagt"
+      }
+    },
+    "transparency": {
+      "options": {
+        "OPAQUE": "Wird als belegt angezeigt",
+        "TRANSPARENT": "Wird als frei angezeigt"
+      }
+    },
+    "classification": {
+      "options": {
+        "PUBLIC": "Öffentlich",
+        "PRIVATE": "Privat",
+        "CONFIDENTIAL": "Vertraulich"
+      }
+    },
+    "recurrence_range": {
+      "options": {
+        "THISANDFUTURE": "Diese und alle folgenden Wiederholungen"
+      }
+    }
+  },
+  "services": {
+    "search_events": {
+      "name": "Termine suchen",
+      "description": "Durchsucht den Kalender auf dem Server und gibt die Treffer zurück.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "Der gesuchte Text. Server suchen nach Teilzeichenfolgen."
+        },
+        "field": {
+          "name": "Feld",
+          "description": "In welcher Eigenschaft gesucht wird."
+        },
+        "start": {
+          "name": "Start",
+          "description": "Nur Termine, die nach diesem Zeitpunkt enden."
+        },
+        "end": {
+          "name": "Ende",
+          "description": "Nur Termine, die vor diesem Zeitpunkt beginnen."
+        }
+      }
+    },
+    "get_free_busy": {
+      "name": "Frei/Belegt abfragen",
+      "description": "Gibt die belegten Zeiträume zurück, die der Server für ein Zeitfenster meldet.",
+      "fields": {
+        "start": {
+          "name": "Start",
+          "description": "Start des Zeitfensters."
+        },
+        "end": {
+          "name": "Ende",
+          "description": "Ende des Zeitfensters."
+        }
+      }
+    },
+    "create_event": {
+      "name": "Termin anlegen",
+      "description": "Legt einen Termin mit den Eigenschaften an, die die Standard-Kalenderaktion nicht setzen kann.",
+      "fields": {
+        "summary": {
+          "name": "Titel",
+          "description": "Der Titel des Termins."
+        },
+        "start_date_time": {
+          "name": "Start",
+          "description": "Wann der Termin beginnt."
+        },
+        "end_date_time": {
+          "name": "Ende",
+          "description": "Wann der Termin endet."
+        },
+        "start_date": {
+          "name": "Startdatum",
+          "description": "Für einen ganztägigen Termin. Der erste Tag."
+        },
+        "end_date": {
+          "name": "Enddatum",
+          "description": "Für einen ganztägigen Termin. Der Tag nach dem letzten."
+        },
+        "description": {
+          "name": "Beschreibung",
+          "description": "Der Beschreibungstext des Termins."
+        },
+        "location": {
+          "name": "Ort",
+          "description": "Wo der Termin stattfindet."
+        },
+        "rrule": {
+          "name": "Wiederholungsregel",
+          "description": "Eine RRULE nach RFC 5545, ohne den Eigenschaftsnamen."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Ein Link zum Termin, etwa zu einer Videokonferenz."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Ob der Termin bestätigt, vorläufig oder abgesagt ist."
+        },
+        "transparency": {
+          "name": "Transparenz",
+          "description": "Ob der Termin als belegt oder als frei zählt."
+        },
+        "classification": {
+          "name": "Vertraulichkeit",
+          "description": "Wie privat der Termin ist."
+        },
+        "priority": {
+          "name": "Priorität",
+          "description": "0 für undefiniert, 1 ist die höchste, 9 die niedrigste."
+        },
+        "categories": {
+          "name": "Kategorien",
+          "description": "Eine Liste von Kategorienamen."
+        },
+        "organizer": {
+          "name": "Organisator",
+          "description": "Die E-Mail-Adresse, die den Termin organisiert."
+        },
+        "attendees": {
+          "name": "Teilnehmer",
+          "description": "E-Mail-Adressen oder Objekte mit email, name, role, status und rsvp."
+        },
+        "alarms": {
+          "name": "Erinnerungen",
+          "description": "Minuten vor dem Start oder Objekte mit minutes_before, action, related und description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Erweitert",
+          "description": "Eigenschaften über Titel und Zeit hinaus."
+        }
+      }
+    },
+    "update_event": {
+      "name": "Termin ändern",
+      "description": "Ändert beliebige Eigenschaften eines Termins, auch solche, an die die Standard-Kalenderaktion nicht herankommt.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "Die UID des zu ändernden Termins."
+        },
+        "recurrence_id": {
+          "name": "Wiederholungs-ID",
+          "description": "Die einzelne Wiederholung einer Serie, die geändert werden soll."
+        },
+        "recurrence_range": {
+          "name": "Wiederholungsbereich",
+          "description": "THISANDFUTURE ändert diese Wiederholung und alle folgenden."
+        },
+        "summary": {
+          "name": "Titel",
+          "description": "Der Titel des Termins."
+        },
+        "start_date_time": {
+          "name": "Start",
+          "description": "Wann der Termin beginnt."
+        },
+        "end_date_time": {
+          "name": "Ende",
+          "description": "Wann der Termin endet."
+        },
+        "start_date": {
+          "name": "Startdatum",
+          "description": "Für einen ganztägigen Termin. Der erste Tag."
+        },
+        "end_date": {
+          "name": "Enddatum",
+          "description": "Für einen ganztägigen Termin. Der Tag nach dem letzten."
+        },
+        "description": {
+          "name": "Beschreibung",
+          "description": "Der Beschreibungstext des Termins."
+        },
+        "location": {
+          "name": "Ort",
+          "description": "Wo der Termin stattfindet."
+        },
+        "rrule": {
+          "name": "Wiederholungsregel",
+          "description": "Eine RRULE nach RFC 5545, ohne den Eigenschaftsnamen."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Ein Link zum Termin, etwa zu einer Videokonferenz."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Ob der Termin bestätigt, vorläufig oder abgesagt ist."
+        },
+        "transparency": {
+          "name": "Transparenz",
+          "description": "Ob der Termin als belegt oder als frei zählt."
+        },
+        "classification": {
+          "name": "Vertraulichkeit",
+          "description": "Wie privat der Termin ist."
+        },
+        "priority": {
+          "name": "Priorität",
+          "description": "0 für undefiniert, 1 ist die höchste, 9 die niedrigste."
+        },
+        "categories": {
+          "name": "Kategorien",
+          "description": "Eine Liste von Kategorienamen."
+        },
+        "organizer": {
+          "name": "Organisator",
+          "description": "Die E-Mail-Adresse, die den Termin organisiert."
+        },
+        "attendees": {
+          "name": "Teilnehmer",
+          "description": "E-Mail-Adressen oder Objekte mit email, name, role, status und rsvp."
+        },
+        "alarms": {
+          "name": "Erinnerungen",
+          "description": "Minuten vor dem Start oder Objekte mit minutes_before, action, related und description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Erweitert",
+          "description": "Eigenschaften über Titel und Zeit hinaus."
+        }
+      }
+    },
+    "move_event": {
+      "name": "Termin verschieben",
+      "description": "Verschiebt einen Termin in einen anderen Kalender.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "Die UID des zu verschiebenden Termins."
+        },
+        "target_entity_id": {
+          "name": "Zielkalender",
+          "description": "Der Kalender, in den der Termin verschoben wird."
+        },
+        "keep_original": {
+          "name": "Original behalten",
+          "description": "Kopieren statt verschieben, der Termin bleibt im Quellkalender."
+        }
+      }
+    },
+    "import_ics": {
+      "name": "iCalendar importieren",
+      "description": "Schreibt die Termine und Aufgaben eines iCalendar-Dokuments in den Kalender.",
+      "fields": {
+        "ics": {
+          "name": "iCalendar-Dokument",
+          "description": "Der Inhalt einer .ics-Datei."
+        }
+      }
+    },
+    "export_ics": {
+      "name": "iCalendar exportieren",
+      "description": "Gibt einen Eintrag oder den ganzen Kalender als iCalendar-Dokument zurück.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "Nur diesen Eintrag exportieren, Termin oder Aufgabe. Leer lassen für den ganzen Kalender."
+        }
+      }
+    },
+    "set_calendar_color": {
+      "name": "Kalenderfarbe setzen",
+      "description": "Schreibt die Kalenderfarbe zurück auf den Server, wo andere Clients sie übernehmen.",
+      "fields": {
+        "color": {
+          "name": "Farbe",
+          "description": "Eine Hex-Farbe wie #00679e."
+        }
+      }
+    },
+    "respond_to_invitation": {
+      "name": "Auf eine Einladung antworten",
+      "description": "Beantwortet eine Einladung zu einem Termin. Setzt einen Server mit CalDAV-Scheduling voraus.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "Die UID des zu beantwortenden Termins."
+        },
+        "response": {
+          "name": "Antwort",
+          "description": "Zusagen, absagen oder unter Vorbehalt zusagen."
+        }
+      }
+    },
+    "create_calendar": {
+      "name": "Kalender anlegen",
+      "description": "Legt einen neuen Kalender im Konto an.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Konto",
+          "description": "Das CalDAV-Konto, in dem der Kalender angelegt wird."
+        },
+        "name": {
+          "name": "Name",
+          "description": "Der Anzeigename des neuen Kalenders."
+        },
+        "components": {
+          "name": "Komponenten",
+          "description": "Was der Kalender aufnehmen soll. Ohne Angabe entscheidet der Server."
+        }
+      }
+    },
+    "delete_calendar": {
+      "name": "Kalender löschen",
+      "description": "Entfernt einen Kalender samt Inhalt aus dem Konto.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Konto",
+          "description": "Das CalDAV-Konto, zu dem der Kalender gehört."
+        },
+        "name": {
+          "name": "Name",
+          "description": "Der Anzeigename des zu entfernenden Kalenders."
         }
       }
     }

@@ -9,3 +9,5 @@ venv/
 coverage.xml
 htmlcov/
 *.egg-info/
+.claude/
+.hypothesis/

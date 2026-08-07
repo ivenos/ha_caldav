@@ -2,7 +2,10 @@ target-version = "py314"
 line-length = 88
 
 [lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+# BLE among them: this integration catches broadly on purpose in a dozen
+# places, and the rule is what makes each of those noqa markers mean that a
+# reader looked at it rather than that someone typed it.
+select = ["E", "F", "I", "UP", "B", "SIM", "BLE"]
 
 [lint.isort]
 force-sort-within-sections = true

@@ -17,8 +17,10 @@ from custom_components.ha_caldav.api import (
     create_event,
     create_todo,
     delete_todo,
+    object_by_uid,
     update_todo,
 )
+from custom_components.ha_caldav.errors import Refused
 from custom_components.ha_caldav.recurrence import delete_event, update_event
 
 pytestmark = pytest.mark.live
@@ -105,13 +107,29 @@ def todos(calendar) -> dict:
     return found
 
 
+def _expanded(calendar):
+    """Yield every occurrence the way the poll reads them.
+
+    Same call and same reader as coordinator._fetch_events, so these tests
+    cover the unsplit path the integration actually uses.
+    """
+    from custom_components.ha_caldav.coordinator import components_of
+
+    for item in calendar.search(
+        start=RANGE_START,
+        end=RANGE_END,
+        event=True,
+        expand=True,
+        split_expanded=False,
+    ):
+        yield from components_of(item, "vevent")
+
+
 def starts(calendar) -> list:
     """Return the start of every occurrence the server expands for us."""
     found = []
-    for item in calendar.search(
-        start=RANGE_START, end=RANGE_END, event=True, expand=True
-    ):
-        value = item.vobject_instance.vevent.dtstart.value
+    for vevent in _expanded(calendar):
+        value = vevent.dtstart.value
         found.append(
             value
             if isinstance(value, date) and not isinstance(value, datetime)
@@ -122,10 +140,7 @@ def starts(calendar) -> list:
 
 def summaries(calendar) -> dict:
     found = {}
-    for item in calendar.search(
-        start=RANGE_START, end=RANGE_END, event=True, expand=True
-    ):
-        vevent = item.vobject_instance.vevent
+    for vevent in _expanded(calendar):
         value = vevent.dtstart.value
         key = (
             value
@@ -409,12 +424,10 @@ def test_update_refuses_stale_write(calendar) -> None:
         "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
         "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
     }
-    # Writing against the version the user saw must be refused, not overwrite it.
-    with pytest.raises(ValueError, match="changed on the server"):
+    with pytest.raises(Refused, match="etag_conflict"):
         update_event(calendar, uid, my_edit, expected_etag=seen)
     assert "Changed on the server" in summaries(calendar).values()
 
-    # Writing against the current version goes through.
     update_event(calendar, uid, my_edit, expected_etag=etag_of(calendar, uid))
     assert "My edit" in summaries(calendar).values()
 
@@ -439,7 +452,8 @@ def test_calendar_color_round_trips(calendar) -> None:
     """The color the server holds must come back keyed by the calendar's path."""
     from caldav.elements import ical
 
-    from custom_components.ha_caldav.color import calendar_key, fetch_colors
+    from custom_components.ha_caldav.color import fetch_colors
+    from custom_components.ha_caldav.connection import calendar_key
 
     client = calendar.client
     try:
@@ -450,8 +464,12 @@ def test_calendar_color_round_trips(calendar) -> None:
 
         colors = fetch_colors(client)
     finally:
-        # The calendar is shared with every test in this module.
-        calendar.set_properties([ical.CalendarColor("")])
+        # The calendar is shared with every test in this module. Cleared by
+        # writing a color rather than an empty value: SOGo validates the
+        # property and answers 400 for anything that is not #RRGGBBAA, and no
+        # path in the integration writes an empty one — the service field is
+        # required and normalized.
+        calendar.set_properties([ical.CalendarColor("#FFFFFFFF")])
 
     assert colors[calendar_key(calendar.url)] == "#00679e"
     # Two calendars reducing to one key would hand one of them the other's
@@ -459,3 +477,294 @@ def test_calendar_color_round_trips(calendar) -> None:
     # and trashed calendars, which are not calendars() results.
     keys = [calendar_key(found.url) for found in client.principal().calendars()]
     assert len(keys) == len(set(keys))
+
+
+def test_supported_components_come_back_from_the_server(calendar) -> None:
+    from custom_components.ha_caldav.capability import fetch_capabilities
+    from custom_components.ha_caldav.connection import calendar_key
+
+    capabilities = fetch_capabilities(calendar.client)
+
+    capability = capabilities[calendar_key(calendar.url)]
+    assert capability.supports_events
+    # Our own calendar has to come back writable, whatever the server calls it.
+    assert capability.writable
+
+
+def test_completing_a_todo_stamps_it_on_the_server(calendar) -> None:
+    create_todo(calendar, {"summary": "Live done"})
+    uid = next(iter(todos(calendar).values())).uid
+
+    update_todo(calendar, uid, {"summary": "Live done", "status": "COMPLETED"})
+
+    component = object_by_uid(calendar, uid, todo=True).icalendar_component
+    assert str(component["STATUS"]) == "COMPLETED"
+    assert "COMPLETED" in component
+    assert int(component["PERCENT-COMPLETE"]) == 100
+    # And the read path has to surface it again.
+    assert todos(calendar)["Live done"].completed is not None
+
+
+def test_reopening_a_todo_clears_the_stamp_on_the_server(calendar) -> None:
+    create_todo(calendar, {"summary": "Live reopen"})
+    uid = next(iter(todos(calendar).values())).uid
+    update_todo(calendar, uid, {"summary": "Live reopen", "status": "COMPLETED"})
+
+    update_todo(calendar, uid, {"summary": "Live reopen", "status": "NEEDS-ACTION"})
+
+    component = object_by_uid(calendar, uid, todo=True).icalendar_component
+    assert "COMPLETED" not in component
+    assert "PERCENT-COMPLETE" not in component
+
+
+def test_sort_order_survives_a_round_trip(calendar) -> None:
+    from custom_components.ha_caldav.api import reorder_todos
+
+    for summary in ("Live a", "Live b", "Live c"):
+        create_todo(calendar, {"summary": summary})
+    by_summary = todos(calendar)
+    order = [by_summary[name].uid for name in ("Live c", "Live a", "Live b")]
+
+    reorder_todos(calendar, order)
+
+    from custom_components.ha_caldav.coordinator import sort_order
+
+    positions = {}
+    for resource in calendar.search(todo=True, include_completed=True):
+        vtodo = resource.vobject_instance.vtodo
+        positions[str(vtodo.summary.value)] = sort_order(vtodo)
+    assert positions["Live c"] < positions["Live a"] < positions["Live b"]
+
+
+def test_an_event_with_alarms_and_attendees_is_accepted(calendar) -> None:
+    from custom_components.ha_caldav.event import read_extras
+
+    create_event(
+        calendar,
+        {
+            "summary": "Live extras",
+            "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+            "url": "https://meet.example.com/live",
+            "categories": ["work"],
+            "priority": 2,
+            "alarms": [15],
+            "attendees": [{"email": "ann@example.com", "name": "Ann"}],
+        },
+    )
+
+    found = calendar.search(start=RANGE_START, end=RANGE_END, event=True)
+    extras = read_extras(found[0].vobject_instance.vevent)
+    assert extras["url"] == "https://meet.example.com/live"
+    assert extras["categories"] == ["work"]
+    assert extras["priority"] == 2
+    assert extras["alarms"][0]["minutes_before"] == 15
+    assert extras["attendees"][0]["email"] == "ann@example.com"
+
+
+def test_export_and_import_round_trip(calendar) -> None:
+    from custom_components.ha_caldav.api import export_ics, import_ics
+
+    create_event(
+        calendar,
+        {
+            "summary": "Live export",
+            "dtstart": datetime(2026, 7, 7, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 7, 10, 0, tzinfo=UTC),
+        },
+    )
+    document = export_ics(calendar, None)
+    # Re-imported under a new uid rather than after deleting the original:
+    # Nextcloud parks a deleted object in its trash and refuses the uid again
+    # while it sits there, which is its own rule and not the round trip.
+    restored = document.replace("UID:", "UID:restored-", 1)
+
+    import_ics(calendar, restored)
+
+    found = calendar.search(start=RANGE_START, end=RANGE_END, event=True)
+    summaries = sorted(
+        str(item.vobject_instance.vevent.summary.value) for item in found
+    )
+    assert summaries == ["Live export", "Live export"]
+    assert any(
+        str(item.vobject_instance.vevent.uid.value).startswith("restored-")
+        for item in found
+    )
+
+
+def test_moving_an_event_between_calendars(calendar) -> None:
+    from custom_components.ha_caldav.api import move_event
+
+    principal = calendar.client.principal()
+    target_name = f"{CALENDAR_NAME}_target"
+    for existing in principal.calendars():
+        if existing.name == target_name:
+            existing.delete()
+    target = principal.make_calendar(name=target_name)
+    try:
+        create_event(
+            calendar,
+            {
+                "summary": "Live move",
+                "dtstart": datetime(2026, 7, 8, 9, 0, tzinfo=UTC),
+                "dtend": datetime(2026, 7, 8, 10, 0, tzinfo=UTC),
+            },
+        )
+        uid = str(calendar.events()[0].icalendar_component["UID"])
+
+        move_event(calendar, target, uid, keep_original=False)
+
+        assert calendar.events() == []
+        moved = target.search(start=RANGE_START, end=RANGE_END, event=True)
+        assert str(moved[0].vobject_instance.vevent.summary.value) == "Live move"
+    finally:
+        enable_sockets()
+        target.delete()
+
+
+def test_writing_a_calendar_color_back(calendar) -> None:
+    from custom_components.ha_caldav.api import set_calendar_color
+    from custom_components.ha_caldav.color import fetch_colors
+    from custom_components.ha_caldav.connection import calendar_key
+
+    before = fetch_colors(calendar.client).get(calendar_key(calendar.url))
+    try:
+        set_calendar_color(calendar, "#00679e")
+
+        assert fetch_colors(calendar.client)[calendar_key(calendar.url)] == "#00679e"
+    finally:
+        # The calendar is shared with every test in this module.
+        enable_sockets()
+        if before is not None:
+            set_calendar_color(calendar, before)
+
+
+def test_responding_to_an_invitation_sets_our_partstat(calendar) -> None:
+    from custom_components.ha_caldav.api import respond_to_invitation
+    from custom_components.ha_caldav.capability import fetch_address_set
+
+    addresses = fetch_address_set(calendar.client)
+    if not addresses:
+        pytest.skip("server does not do CalDAV scheduling")
+    create_event(
+        calendar,
+        {
+            "summary": "Live invite",
+            "dtstart": datetime(2026, 7, 9, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 9, 10, 0, tzinfo=UTC),
+            "attendees": [addresses[0]],
+        },
+    )
+    uid = str(calendar.events()[0].icalendar_component["UID"])
+
+    respond_to_invitation(calendar, uid, "ACCEPTED", addresses)
+
+    component = calendar.event_by_uid(uid).icalendar_component
+    attendees = component.get("ATTENDEE")
+    attendee = attendees[0] if isinstance(attendees, list) else attendees
+    assert attendee.params["PARTSTAT"] == "ACCEPTED"
+
+
+def test_import_refuses_to_overwrite_what_is_already_there(calendar) -> None:
+    from custom_components.ha_caldav.api import export_ics, import_ics
+
+    create_event(
+        calendar,
+        {
+            "summary": "Live clash",
+            "dtstart": datetime(2026, 7, 10, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 10, 10, 0, tzinfo=UTC),
+        },
+    )
+    document = export_ics(calendar, None)
+
+    with pytest.raises(Refused, match="uid_clash"):
+        import_ics(calendar, document)
+
+    found = calendar.search(start=RANGE_START, end=RANGE_END, event=True)
+    assert len(found) == 1
+
+
+def test_a_stale_todo_edit_is_refused_by_the_server_state(calendar) -> None:
+    from caldav.elements import dav
+
+    from custom_components.ha_caldav.api import update_todo
+
+    create_todo(calendar, {"summary": "Live etag"})
+    uid = next(iter(todos(calendar).values())).uid
+    resource = object_by_uid(calendar, uid, todo=True)
+    resource.load()
+    etag = resource.props.get(dav.GetEtag.tag)
+    assert etag is not None
+
+    # Somebody else edits it in between.
+    update_todo(calendar, uid, {"summary": "Changed elsewhere"})
+
+    with pytest.raises(Refused, match="etag_conflict"):
+        update_todo(calendar, uid, {"summary": "Mine"}, expected_etag=etag)
+    assert todos(calendar)["Changed elsewhere"] is not None
+
+
+def test_creating_an_event_with_extras_is_a_single_write(calendar) -> None:
+    create_event(
+        calendar,
+        {
+            "summary": "Live single",
+            "dtstart": datetime(2026, 7, 11, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 11, 10, 0, tzinfo=UTC),
+            "alarms": [10],
+        },
+    )
+
+    found = calendar.search(start=RANGE_START, end=RANGE_END, event=True)
+    # A two-pass write would leave a second object behind on a retry.
+    assert len(found) == 1
+    assert found[0].icalendar_component.get("SEQUENCE") in (None, 0)
+
+
+def test_an_unfiltered_search_returns_both_kinds(calendar) -> None:
+    """The uid-clash check reads the collection once for events and to-dos.
+
+    A server that answered only one kind without a component filter would make
+    that check quietly find nothing.
+    """
+    from custom_components.ha_caldav.api import _scan
+
+    create_event(
+        calendar,
+        {
+            "summary": "Live both event",
+            "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+        },
+    )
+    create_todo(calendar, {"summary": "Live both todo"})
+
+    summaries = {
+        str(item.icalendar_component.get("SUMMARY"))
+        for item, _uid in _scan(calendar, None)
+    }
+
+    assert {"Live both event", "Live both todo"} <= summaries
+
+
+def test_moving_one_item_leaves_the_others_untouched(calendar) -> None:
+    """Renumbering the whole list is a PUT per item on every drag."""
+    from custom_components.ha_caldav.api import reorder_todos
+
+    for summary in ("Live one", "Live two", "Live three"):
+        create_todo(calendar, {"summary": summary})
+    by_summary = todos(calendar)
+    order = [by_summary[name].uid for name in ("Live one", "Live two", "Live three")]
+    reorder_todos(calendar, order)
+
+    moved = [order[2], order[0], order[1]]
+    reorder_todos(calendar, moved)
+
+    from custom_components.ha_caldav.coordinator import sort_order
+
+    positions = {}
+    for resource in calendar.search(todo=True, include_completed=True):
+        vtodo = resource.vobject_instance.vtodo
+        positions[str(vtodo.summary.value)] = sort_order(vtodo)
+    assert positions["Live three"] < positions["Live one"] < positions["Live two"]

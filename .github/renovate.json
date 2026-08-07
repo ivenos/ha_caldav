@@ -2,7 +2,7 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "description": [
-    "Managed here: GitHub Actions, the pinned ruff version in validate.yml, and the test harness.",
+    "Managed here: GitHub Actions, both pinned ruff versions (validate.yml and requirements_test.txt), and the test harness.",
     "Deliberately not managed: caldav, icalendar and vobject. Home Assistant installs them into the same environment as the built-in caldav integration, so they must match the versions core pins, not the latest release on PyPI. They live in manifest.json (which no manager reads) and are mirrored in requirements_test.txt, where the rule below pins them."
   ],
   "dependencyDashboard": false,
@@ -14,10 +14,6 @@
       "commitMessagePrefix": "ci:"
     },
     {
-      "matchPackageNames": ["ruff"],
-      "commitMessagePrefix": "ci:"
-    },
-    {
       "description": "Mirrors the manifest.json pins, which follow Home Assistant core.",
       "matchManagers": ["pip_requirements"],
       "matchPackageNames": ["caldav", "icalendar", "vobject"],
@@ -26,6 +22,12 @@
     {
       "matchManagers": ["pip_requirements"],
       "groupName": "Test dependencies",
+      "commitMessagePrefix": "ci:"
+    },
+    {
+      "description": "One PR for both ruff pins, so CI and the local venv cannot drift apart. Last of the three, because a later rule wins per field and the catch-all above matches ruff in requirements_test.txt too.",
+      "matchPackageNames": ["ruff"],
+      "groupName": "ruff",
       "commitMessagePrefix": "ci:"
     }
   ],

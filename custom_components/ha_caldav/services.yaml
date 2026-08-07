@@ -1,0 +1,347 @@
+search_events:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: calendar
+  fields:
+    text:
+      required: true
+      example: dentist
+      selector:
+        text:
+    field:
+      default: summary
+      selector:
+        select:
+          translation_key: search_field
+          options:
+            - summary
+            - description
+            - location
+            - category
+            - status
+            - uid
+    start:
+      selector:
+        datetime:
+    end:
+      selector:
+        datetime:
+
+get_free_busy:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: calendar
+  fields:
+    start:
+      required: true
+      selector:
+        datetime:
+    end:
+      required: true
+      selector:
+        datetime:
+
+create_event:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: calendar
+  fields:
+    summary:
+      required: true
+      example: Team meeting
+      selector:
+        text:
+    start_date_time:
+      example: "2026-08-06 20:00:00"
+      selector:
+        datetime:
+    end_date_time:
+      example: "2026-08-06 22:00:00"
+      selector:
+        datetime:
+    start_date:
+      example: "2026-08-06"
+      selector:
+        date:
+    end_date:
+      example: "2026-08-07"
+      selector:
+        date:
+    description:
+      selector:
+        text:
+          multiline: true
+    location:
+      selector:
+        text:
+    rrule:
+      example: FREQ=WEEKLY;BYDAY=MO
+      selector:
+        text:
+    advanced:
+      collapsed: true
+      fields:
+        url:
+          example: https://meet.example.com/standup
+          selector:
+            text:
+        status:
+          selector:
+            select:
+              translation_key: event_status
+              options:
+                - TENTATIVE
+                - CONFIRMED
+                - CANCELLED
+        transparency:
+          selector:
+            select:
+              translation_key: transparency
+              options:
+                - OPAQUE
+                - TRANSPARENT
+        classification:
+          selector:
+            select:
+              translation_key: classification
+              options:
+                - PUBLIC
+                - PRIVATE
+                - CONFIDENTIAL
+        priority:
+          selector:
+            number:
+              min: 0
+              max: 9
+              mode: box
+        categories:
+          example: '["work", "travel"]'
+          selector:
+            text:
+              multiple: true
+        organizer:
+          example: me@example.com
+          selector:
+            text:
+        attendees:
+          example: '[{"email": "a@example.com", "name": "Ann"}]'
+          selector:
+            object:
+        alarms:
+          example: '[{"minutes_before": 15}]'
+          selector:
+            object:
+
+update_event:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: calendar
+  fields:
+    uid:
+      required: true
+      selector:
+        text:
+    recurrence_id:
+      selector:
+        text:
+    recurrence_range:
+      selector:
+        select:
+          translation_key: recurrence_range
+          options:
+            - THISANDFUTURE
+    summary:
+      selector:
+        text:
+    start_date_time:
+      example: "2026-08-06 20:00:00"
+      selector:
+        datetime:
+    end_date_time:
+      example: "2026-08-06 22:00:00"
+      selector:
+        datetime:
+    start_date:
+      example: "2026-08-06"
+      selector:
+        date:
+    end_date:
+      example: "2026-08-07"
+      selector:
+        date:
+    description:
+      selector:
+        text:
+          multiline: true
+    location:
+      selector:
+        text:
+    rrule:
+      example: FREQ=WEEKLY;BYDAY=MO
+      selector:
+        text:
+    advanced:
+      collapsed: true
+      fields:
+        url:
+          example: https://meet.example.com/standup
+          selector:
+            text:
+        status:
+          selector:
+            select:
+              translation_key: event_status
+              options:
+                - TENTATIVE
+                - CONFIRMED
+                - CANCELLED
+        transparency:
+          selector:
+            select:
+              translation_key: transparency
+              options:
+                - OPAQUE
+                - TRANSPARENT
+        classification:
+          selector:
+            select:
+              translation_key: classification
+              options:
+                - PUBLIC
+                - PRIVATE
+                - CONFIDENTIAL
+        priority:
+          selector:
+            number:
+              min: 0
+              max: 9
+              mode: box
+        categories:
+          example: '["work", "travel"]'
+          selector:
+            text:
+              multiple: true
+        organizer:
+          example: me@example.com
+          selector:
+            text:
+        attendees:
+          example: '[{"email": "a@example.com", "name": "Ann"}]'
+          selector:
+            object:
+        alarms:
+          example: '[{"minutes_before": 15}]'
+          selector:
+            object:
+
+move_event:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: calendar
+  fields:
+    uid:
+      required: true
+      selector:
+        text:
+    target_entity_id:
+      required: true
+      selector:
+        entity:
+          integration: ha_caldav
+          domain: calendar
+    keep_original:
+      default: false
+      selector:
+        boolean:
+
+import_ics:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: calendar
+  fields:
+    ics:
+      required: true
+      selector:
+        text:
+          multiline: true
+
+export_ics:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: calendar
+  fields:
+    uid:
+      selector:
+        text:
+
+set_calendar_color:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: calendar
+  fields:
+    color:
+      required: true
+      example: "#00679e"
+      selector:
+        text:
+
+respond_to_invitation:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: calendar
+  fields:
+    uid:
+      required: true
+      selector:
+        text:
+    response:
+      required: true
+      selector:
+        select:
+          translation_key: invitation_response
+          options:
+            - accept
+            - decline
+            - tentative
+
+create_calendar:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: ha_caldav
+    name:
+      required: true
+      example: Holidays
+      selector:
+        text:
+    components:
+      selector:
+        select:
+          multiple: true
+          translation_key: calendar_components
+          options:
+            - VEVENT
+            - VTODO
+
+delete_calendar:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: ha_caldav
+    name:
+      required: true
+      selector:
+        text:

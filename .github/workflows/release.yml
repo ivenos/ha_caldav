@@ -29,3 +29,6 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: ha_caldav.zip
+          # Published by hand once the notes are written; the changelog lives
+          # in the release body.
+          draft: true

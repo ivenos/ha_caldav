@@ -23,13 +23,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # Upstream publishes no tags; @master is the documented usage.
       - uses: home-assistant/actions/hassfest@master
 
   hacs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: hacs/action@main
+      - uses: hacs/action@22.5.0
         with:
           category: integration
           # Custom repositories are not listed in home-assistant/brands.

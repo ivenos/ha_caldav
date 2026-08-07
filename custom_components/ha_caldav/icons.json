@@ -1,0 +1,15 @@
+{
+  "services": {
+    "create_event": "mdi:calendar-plus",
+    "update_event": "mdi:calendar-edit",
+    "search_events": "mdi:calendar-search",
+    "get_free_busy": "mdi:calendar-clock",
+    "move_event": "mdi:calendar-arrow-right",
+    "import_ics": "mdi:calendar-import",
+    "export_ics": "mdi:calendar-export",
+    "set_calendar_color": "mdi:palette",
+    "respond_to_invitation": "mdi:calendar-check",
+    "create_calendar": "mdi:calendar-plus-outline",
+    "delete_calendar": "mdi:calendar-remove-outline"
+  }
+}

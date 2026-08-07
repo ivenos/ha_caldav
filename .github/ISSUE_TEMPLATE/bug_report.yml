@@ -5,7 +5,15 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please fill in as much detail as possible. Logs from `custom_components.ha_caldav` help a lot.
+        Please fill in as much detail as possible.
+
+        Debug logs help a lot. Add this to `configuration.yaml` and restart:
+
+        ```yaml
+        logger:
+          logs:
+            custom_components.ha_caldav: debug
+        ```
 
   - type: textarea
     id: description
@@ -37,14 +45,26 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Paste relevant entries from Settings > System > Logs.
+      description: >-
+        Paste the lines mentioning ha_caldav from Settings > System > Logs.
+        Read them first if you raised the log level yourself: a CalDAV library
+        at debug level writes out whole calendar objects.
       render: text
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: >-
+        Settings > Devices & services > CalDAV Complete > the three-dot menu >
+        Download diagnostics. Credentials and account names are redacted. Drag
+        the file in here, or paste it.
 
   - type: input
     id: ha_version
     attributes:
       label: Home Assistant version
-      placeholder: "e.g. 2025.7.1"
+      placeholder: "e.g. 2026.3.0"
     validations:
       required: true
 
@@ -52,7 +72,7 @@ body:
     id: integration_version
     attributes:
       label: Integration version
-      placeholder: "e.g. 0.1.0"
+      placeholder: "e.g. 1.1.0"
     validations:
       required: true
 
@@ -60,6 +80,6 @@ body:
     id: server
     attributes:
       label: CalDAV server
-      placeholder: "e.g. Nextcloud 30.0.2"
+      placeholder: "e.g. Nextcloud 32.0.1, Radicale 3.3, Baikal 0.10"
     validations:
       required: true

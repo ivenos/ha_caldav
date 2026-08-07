@@ -8,7 +8,35 @@
           "url": "URL del server",
           "username": "Nome utente",
           "password": "Password",
-          "verify_ssl": "Verifica il certificato SSL"
+          "verify_ssl": "Verifica il certificato SSL",
+          "ca_bundle": "Percorso del bundle CA",
+          "client_cert": "Percorso del certificato client",
+          "client_key": "Percorso della chiave client"
+        },
+        "data_description": {
+          "url": "L'indirizzo del tuo server CalDAV. Sulla maggior parte dei server basta il nome host.",
+          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque si trovi tra Home Assistant e il server può leggere la password.",
+          "ca_bundle": "Facoltativo. Verifica il server con questo file anziché con l'archivio di sistema.",
+          "client_cert": "Facoltativo. Identifica Home Assistant presso i server che chiedono un certificato.",
+          "client_key": "Facoltativo. La chiave privata di quel certificato."
+        }
+      },
+      "reconfigure": {
+        "title": "Modifica la connessione CalDAV",
+        "description": "Aggiorna l'URL del server o le impostazioni TLS. L'account resta invariato.",
+        "data": {
+          "url": "URL del server",
+          "verify_ssl": "Verifica il certificato SSL",
+          "ca_bundle": "Percorso del bundle CA",
+          "client_cert": "Percorso del certificato client",
+          "client_key": "Percorso della chiave client"
+        },
+        "data_description": {
+          "url": "L'indirizzo del tuo server CalDAV. Sulla maggior parte dei server basta il nome host.",
+          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque si trovi tra Home Assistant e il server può leggere la password.",
+          "ca_bundle": "Facoltativo. Verifica il server con questo file anziché con l'archivio di sistema.",
+          "client_cert": "Facoltativo. Identifica Home Assistant presso i server che chiedono un certificato.",
+          "client_key": "Facoltativo. La chiave privata di quel certificato."
         }
       },
       "reauth_confirm": {
@@ -20,25 +48,521 @@
       }
     },
     "error": {
-      "invalid_auth": "Autenticazione non valida.",
-      "cannot_connect": "Connessione non riuscita.",
-      "unknown": "Errore imprevisto."
+      "invalid_auth": "Autenticazione non valida",
+      "cannot_connect": "Impossibile connettersi",
+      "unknown": "Errore imprevisto"
     },
     "abort": {
-      "already_configured": "Questo account è già configurato.",
-      "reauth_successful": "La nuova autenticazione è riuscita."
+      "already_configured": "L'account è già configurato",
+      "reauth_successful": "La riautenticazione è avvenuta con successo",
+      "reconfigure_successful": "La connessione è stata aggiornata",
+      "already_in_progress": "Il flusso di configurazione è già in corso"
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Opzioni CalDAV",
+        "menu_options": {
+          "account": "Impostazioni per l'intero account",
+          "pick": "Impostazioni per un singolo calendario"
+        }
+      },
+      "account": {
+        "title": "Impostazioni dell'account",
         "data": {
           "calendars": "Calendari da includere",
-          "scan_interval": "Minuti tra i controlli delle modifiche effettuate al di fuori di Home Assistant",
-          "days": "Giorni di anticipo per determinare il prossimo evento",
-          "include_all_day": "Includi gli eventi per l'intera giornata nel prossimo evento",
-          "read_only": "Sola lettura (nascondi i controlli di creazione, modifica ed eliminazione)"
+          "scan_interval": "Minuti tra le interrogazioni",
+          "days": "Giorni di anticipo",
+          "include_all_day": "Includi gli eventi di tutto il giorno",
+          "read_only": "Sola lettura"
+        },
+        "data_description": {
+          "scan_interval": "Ogni quanto cercare modifiche fatte fuori da Home Assistant.",
+          "days": "Con quanto anticipo cercare il prossimo evento.",
+          "include_all_day": "Se un evento di tutto il giorno può essere il prossimo.",
+          "read_only": "Nasconde i comandi di creazione, modifica ed eliminazione."
+        }
+      },
+      "pick": {
+        "title": "Scegli un calendario",
+        "data": {
+          "calendar": "Calendario"
+        }
+      },
+      "calendar": {
+        "title": "Impostazioni di {calendar}",
+        "description": "Sostituiscono le impostazioni dell'account solo per {calendar}.",
+        "data": {
+          "days": "Giorni di anticipo",
+          "include_all_day": "Includi gli eventi di tutto il giorno",
+          "read_only": "Sola lettura",
+          "reset": "Usa le impostazioni dell'account"
+        },
+        "data_description": {
+          "days": "Con quanto anticipo cercare il prossimo evento.",
+          "include_all_day": "Se un evento di tutto il giorno può essere il prossimo.",
+          "read_only": "Nasconde i comandi di creazione, modifica ed eliminazione.",
+          "reset": "Scarta tutto ciò che è impostato qui e torna a seguire l'account."
+        }
+      }
+    },
+    "error": {
+      "no_calendars": "Seleziona almeno un calendario; un account senza nessuno non ha alcuna entità."
+    }
+  },
+  "issues": {
+    "builtin_caldav_conflict": {
+      "title": "L'integrazione CalDAV nativa usa lo stesso account",
+      "description": "L'account {account} è configurato anche nell'integrazione CalDAV nativa, perciò ogni calendario e ogni elenco di attività compare due volte. Rimuovi una delle due integrazioni."
+    },
+    "no_sync_collection": {
+      "title": "Il server non può segnalare le modifiche",
+      "description": "Il server dietro {account} non supporta il report sync-collection (RFC 6578), quindi ogni interrogazione deve scaricare l'intera finestra invece delle sole modifiche. Funziona tutto, ma costa di più. Un intervallo di interrogazione più lungo riduce il carico."
+    }
+  },
+  "exceptions": {
+    "allday_timed_switch": {
+      "message": "Una serie ricorrente non può passare da evento di tutto il giorno a evento con orario, né viceversa."
+    },
+    "ambiguous_calendar": {
+      "message": "Questo account ha più calendari chiamati {name}; rinominane prima uno."
+    },
+    "bad_recurrence_id": {
+      "message": "{value} non è una data né una data con ora."
+    },
+    "document_empty": {
+      "message": "Il documento non contiene né eventi né attività."
+    },
+    "document_no_uid": {
+      "message": "Il documento contiene un componente senza UID."
+    },
+    "end_before_start": {
+      "message": "La fine precede l'inizio."
+    },
+    "etag_conflict": {
+      "message": "Questo elemento è cambiato sul server dall'ultima lettura di Home Assistant. Ricarica il calendario e ripeti la modifica."
+    },
+    "invalid_rrule": {
+      "message": "La regola di ricorrenza non è valida: {reason}"
+    },
+    "mixed_time_types": {
+      "message": "Inizio e fine devono essere dello stesso tipo: due date per un evento di tutto il giorno, oppure due date con ora."
+    },
+    "no_event_in_object": {
+      "message": "L'oggetto di calendario non contiene alcun evento."
+    },
+    "no_scheduling": {
+      "message": "Questo server non gestisce la pianificazione CalDAV, quindi non è possibile rispondere agli inviti da qui."
+    },
+    "no_start_in_object": {
+      "message": "Questo evento non ha una data di inizio e non può essere modificato qui."
+    },
+    "no_todo_in_object": {
+      "message": "Questo elemento non è salvato come attività e non può essere modificato qui."
+    },
+    "not_an_attendee": {
+      "message": "Questo evento non elenca il tuo account tra i partecipanti."
+    },
+    "not_found": {
+      "message": "Questo elemento non è più sul server."
+    },
+    "not_recurring": {
+      "message": "Questo evento non è una serie ricorrente."
+    },
+    "occurrence_not_found": {
+      "message": "Questa serie non ha alcuna occorrenza il {recurrence_id}."
+    },
+    "ranged_override": {
+      "message": "Questa serie contiene un'eccezione valida da un'occorrenza in poi. Modificala nell'applicazione che l'ha creata."
+    },
+    "rdate_split": {
+      "message": "Questa occorrenza è stata aggiunta alla serie manualmente e in quel punto la serie non si può dividere."
+    },
+    "read_only": {
+      "message": "{name} è in sola lettura, non è possibile scrivervi nulla."
+    },
+    "refused": {
+      "message": "{reason}"
+    },
+    "rrule_mismatch": {
+      "message": "Il nuovo inizio non è una data prodotta dalla regola di ricorrenza."
+    },
+    "rrule_too_dense": {
+      "message": "La regola di ricorrenza produce troppe occorrenze per poterle elaborare."
+    },
+    "same_calendar": {
+      "message": "L'evento è già in {name}. Scegli un altro calendario."
+    },
+    "server_error": {
+      "message": "La chiamata al server CalDAV non è riuscita ({action}). I dettagli sono nel log."
+    },
+    "uid_clash": {
+      "message": "Già in questo calendario: {uids}"
+    },
+    "unknown_account": {
+      "message": "{config_entry_id} non è un account CalDAV caricato."
+    },
+    "unknown_calendar": {
+      "message": "Questo account non ha alcun calendario chiamato {name}."
+    },
+    "unknown_target": {
+      "message": "{entity_id} non è un calendario di un account CalDAV caricato."
+    },
+    "unknown_todo_item": {
+      "message": "In questo elenco non c'è alcuna attività {uid}."
+    }
+  },
+  "selector": {
+    "search_field": {
+      "options": {
+        "summary": "Titolo",
+        "description": "Descrizione",
+        "location": "Luogo",
+        "category": "Categoria",
+        "status": "Stato",
+        "uid": "UID"
+      }
+    },
+    "invitation_response": {
+      "options": {
+        "accept": "Accetta",
+        "decline": "Rifiuta",
+        "tentative": "Con riserva"
+      }
+    },
+    "calendar_components": {
+      "options": {
+        "VEVENT": "Eventi",
+        "VTODO": "Attività"
+      }
+    },
+    "event_status": {
+      "options": {
+        "TENTATIVE": "Provvisorio",
+        "CONFIRMED": "Confermato",
+        "CANCELLED": "Annullato"
+      }
+    },
+    "transparency": {
+      "options": {
+        "OPAQUE": "Risulta occupato",
+        "TRANSPARENT": "Risulta libero"
+      }
+    },
+    "classification": {
+      "options": {
+        "PUBLIC": "Pubblico",
+        "PRIVATE": "Privato",
+        "CONFIDENTIAL": "Riservato"
+      }
+    },
+    "recurrence_range": {
+      "options": {
+        "THISANDFUTURE": "Questa e tutte le successive"
+      }
+    }
+  },
+  "services": {
+    "search_events": {
+      "name": "Cerca eventi",
+      "description": "Cerca nel calendario sul server e restituisce le corrispondenze.",
+      "fields": {
+        "text": {
+          "name": "Testo",
+          "description": "Il testo da cercare. I server cercano sottostringhe."
+        },
+        "field": {
+          "name": "Campo",
+          "description": "In quale proprietà cercare."
+        },
+        "start": {
+          "name": "Inizio",
+          "description": "Solo eventi che finiscono dopo questo momento."
+        },
+        "end": {
+          "name": "Fine",
+          "description": "Solo eventi che iniziano prima di questo momento."
+        }
+      }
+    },
+    "get_free_busy": {
+      "name": "Ottieni libero/occupato",
+      "description": "Restituisce i periodi occupati che il server segnala per una finestra.",
+      "fields": {
+        "start": {
+          "name": "Inizio",
+          "description": "Inizio della finestra."
+        },
+        "end": {
+          "name": "Fine",
+          "description": "Fine della finestra."
+        }
+      }
+    },
+    "create_event": {
+      "name": "Crea evento",
+      "description": "Crea un evento con le proprietà che l'azione standard del calendario non può impostare.",
+      "fields": {
+        "summary": {
+          "name": "Titolo",
+          "description": "Il titolo dell'evento."
+        },
+        "start_date_time": {
+          "name": "Inizio",
+          "description": "Quando inizia l'evento."
+        },
+        "end_date_time": {
+          "name": "Fine",
+          "description": "Quando finisce l'evento."
+        },
+        "start_date": {
+          "name": "Data di inizio",
+          "description": "Per un evento di tutto il giorno. Il primo giorno."
+        },
+        "end_date": {
+          "name": "Data di fine",
+          "description": "Per un evento di tutto il giorno. Il giorno dopo l'ultimo."
+        },
+        "description": {
+          "name": "Descrizione",
+          "description": "Il testo dell'evento."
+        },
+        "location": {
+          "name": "Luogo",
+          "description": "Dove si svolge l'evento."
+        },
+        "rrule": {
+          "name": "Regola di ricorrenza",
+          "description": "Una RRULE secondo RFC 5545, senza il nome della proprietà."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Un collegamento legato all'evento, ad esempio una videochiamata."
+        },
+        "status": {
+          "name": "Stato",
+          "description": "Se l'evento è confermato, provvisorio o annullato."
+        },
+        "transparency": {
+          "name": "Trasparenza",
+          "description": "Se l'evento ti rende occupato o ti lascia libero."
+        },
+        "classification": {
+          "name": "Riservatezza",
+          "description": "Quanto è privato l'evento."
+        },
+        "priority": {
+          "name": "Priorità",
+          "description": "0 per indefinita, 1 è la più alta e 9 la più bassa."
+        },
+        "categories": {
+          "name": "Categorie",
+          "description": "Un elenco di nomi di categoria."
+        },
+        "organizer": {
+          "name": "Organizzatore",
+          "description": "L'indirizzo email che organizza l'evento."
+        },
+        "attendees": {
+          "name": "Partecipanti",
+          "description": "Indirizzi email, oppure oggetti con email, name, role, status e rsvp."
+        },
+        "alarms": {
+          "name": "Promemoria",
+          "description": "Minuti prima dell'inizio, oppure oggetti con minutes_before, action, related e description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Avanzate",
+          "description": "Proprietà oltre al titolo e all'orario."
+        }
+      }
+    },
+    "update_event": {
+      "name": "Modifica evento",
+      "description": "Cambia qualsiasi proprietà di un evento, comprese quelle fuori dalla portata dell'azione standard del calendario.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "L'UID dell'evento da modificare."
+        },
+        "recurrence_id": {
+          "name": "ID ricorrenza",
+          "description": "La singola occorrenza da modificare, in una serie ricorrente."
+        },
+        "recurrence_range": {
+          "name": "Ambito della ricorrenza",
+          "description": "THISANDFUTURE per modificare questa occorrenza e tutte le successive."
+        },
+        "summary": {
+          "name": "Titolo",
+          "description": "Il titolo dell'evento."
+        },
+        "start_date_time": {
+          "name": "Inizio",
+          "description": "Quando inizia l'evento."
+        },
+        "end_date_time": {
+          "name": "Fine",
+          "description": "Quando finisce l'evento."
+        },
+        "start_date": {
+          "name": "Data di inizio",
+          "description": "Per un evento di tutto il giorno. Il primo giorno."
+        },
+        "end_date": {
+          "name": "Data di fine",
+          "description": "Per un evento di tutto il giorno. Il giorno dopo l'ultimo."
+        },
+        "description": {
+          "name": "Descrizione",
+          "description": "Il testo dell'evento."
+        },
+        "location": {
+          "name": "Luogo",
+          "description": "Dove si svolge l'evento."
+        },
+        "rrule": {
+          "name": "Regola di ricorrenza",
+          "description": "Una RRULE secondo RFC 5545, senza il nome della proprietà."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Un collegamento legato all'evento, ad esempio una videochiamata."
+        },
+        "status": {
+          "name": "Stato",
+          "description": "Se l'evento è confermato, provvisorio o annullato."
+        },
+        "transparency": {
+          "name": "Trasparenza",
+          "description": "Se l'evento ti rende occupato o ti lascia libero."
+        },
+        "classification": {
+          "name": "Riservatezza",
+          "description": "Quanto è privato l'evento."
+        },
+        "priority": {
+          "name": "Priorità",
+          "description": "0 per indefinita, 1 è la più alta e 9 la più bassa."
+        },
+        "categories": {
+          "name": "Categorie",
+          "description": "Un elenco di nomi di categoria."
+        },
+        "organizer": {
+          "name": "Organizzatore",
+          "description": "L'indirizzo email che organizza l'evento."
+        },
+        "attendees": {
+          "name": "Partecipanti",
+          "description": "Indirizzi email, oppure oggetti con email, name, role, status e rsvp."
+        },
+        "alarms": {
+          "name": "Promemoria",
+          "description": "Minuti prima dell'inizio, oppure oggetti con minutes_before, action, related e description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Avanzate",
+          "description": "Proprietà oltre al titolo e all'orario."
+        }
+      }
+    },
+    "move_event": {
+      "name": "Sposta evento",
+      "description": "Sposta un evento in un altro calendario.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "L'UID dell'evento da spostare."
+        },
+        "target_entity_id": {
+          "name": "Calendario di destinazione",
+          "description": "Il calendario in cui spostare l'evento."
+        },
+        "keep_original": {
+          "name": "Mantieni l'originale",
+          "description": "Copia invece di spostare, l'evento resta nel calendario di partenza."
+        }
+      }
+    },
+    "import_ics": {
+      "name": "Importa iCalendar",
+      "description": "Scrive nel calendario gli eventi e le attività di un documento iCalendar.",
+      "fields": {
+        "ics": {
+          "name": "Documento iCalendar",
+          "description": "Il contenuto di un file .ics."
+        }
+      }
+    },
+    "export_ics": {
+      "name": "Esporta iCalendar",
+      "description": "Restituisce un elemento, o l'intero calendario, come documento iCalendar.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "Esporta solo questo elemento, evento o attività. Lascia vuoto per l'intero calendario."
+        }
+      }
+    },
+    "set_calendar_color": {
+      "name": "Imposta il colore del calendario",
+      "description": "Riscrive il colore del calendario sul server, dove viene ripreso dagli altri client.",
+      "fields": {
+        "color": {
+          "name": "Colore",
+          "description": "Un colore esadecimale come #00679e."
+        }
+      }
+    },
+    "respond_to_invitation": {
+      "name": "Rispondi a un invito",
+      "description": "Risponde a un evento a cui sei stato invitato. Richiede un server con pianificazione CalDAV.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "L'UID dell'evento a cui rispondere."
+        },
+        "response": {
+          "name": "Risposta",
+          "description": "Accettare, rifiutare o accettare con riserva."
+        }
+      }
+    },
+    "create_calendar": {
+      "name": "Crea calendario",
+      "description": "Crea un nuovo calendario nell'account.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "L'account CalDAV in cui creare il calendario."
+        },
+        "name": {
+          "name": "Nome",
+          "description": "Il nome visualizzato del nuovo calendario."
+        },
+        "components": {
+          "name": "Componenti",
+          "description": "Cosa deve contenere il calendario. Se non indicato, decide il server."
+        }
+      }
+    },
+    "delete_calendar": {
+      "name": "Elimina calendario",
+      "description": "Rimuove dall'account un calendario e tutto il suo contenuto.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "L'account CalDAV a cui appartiene il calendario."
+        },
+        "name": {
+          "name": "Nome",
+          "description": "Il nome visualizzato del calendario da rimuovere."
         }
       }
     }

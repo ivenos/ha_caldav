@@ -22,7 +22,7 @@ env:
 jobs:
   # Nextcloud is tested on the current major and the one behind it, resolved at
   # run time from Docker Hub so the pair stays current without anyone bumping a
-  # pin. Radicale and Xandikos publish rolling images.
+  # pin. Radicale, Xandikos, Baikal and SOGo publish rolling images.
   matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -35,16 +35,22 @@ jobs:
           # the last_updated window by a flood of newer-major variant tags.
           names=""
           for page in 1 2; do
+            # Failures swallowed here, or set -e would abort the step before
+            # the fallback below ever runs.
             names+=$(curl -fsS --retry 3 --retry-all-errors --max-time 30 \
               "https://hub.docker.com/v2/repositories/library/nextcloud/tags/?page_size=100&page=$page&ordering=last_updated" \
-              | jq '.results[].name | select(test("^[0-9]+$")) | tonumber')$'\n'
+              | jq '.results[].name | select(test("^[0-9]+$")) | tonumber' || true)$'\n'
           done
           majors=$(jq -cs 'unique | sort | reverse | .[0:2]' <<<"$names")
-          test "$(jq length <<<"$majors")" -eq 2 \
-            || { echo "::error::could not resolve two Nextcloud majors"; exit 1; }
+          # A rate-limited Docker Hub must not fail a run that broke nothing.
+          if test "$(jq length <<<"$majors")" -ne 2; then
+            echo "::warning::could not resolve two Nextcloud majors, using the fallback"
+            majors='[32, 31]'
+          fi
           include=$(jq -cn --argjson m "$majors" \
             '[$m[] | {server: "nextcloud", tag: (. | tostring)}]
-             + [{server: "radicale", tag: "latest"}, {server: "xandikos", tag: "latest"}]')
+             + [{server: "radicale", tag: "latest"}, {server: "xandikos", tag: "latest"},
+                {server: "baikal", tag: "latest"}, {server: "sogo", tag: "latest"}]')
           echo "include=$include" >> "$GITHUB_OUTPUT"
 
   live:

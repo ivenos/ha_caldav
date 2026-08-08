@@ -24,7 +24,7 @@ import vobject
 from custom_components.ha_caldav.api import zoned_document
 from custom_components.ha_caldav.coordinator import sort_key, to_event
 from custom_components.ha_caldav.errors import Refused
-from custom_components.ha_caldav.event import to_utc
+from custom_components.ha_caldav.event import apply_extras, read_extras, to_utc
 from custom_components.ha_caldav.recurrence import delete_event, update_event
 
 UID = "prop-1"
@@ -657,6 +657,10 @@ def test_repeating_an_occurrence_delete_leaves_the_same_series(
 
         assert twice is not None
         assert occurrences(twice) == occurrences(once)
+        # By line, not by what the series produces: a second EXDATE for a slot
+        # already excluded changes no occurrence, and Home Assistant retries a
+        # failed delete, so every attempt would leave one more behind.
+        assert twice.count("EXDATE") == once.count("EXDATE")
 
 
 @settings(PROPERTY, max_examples=80)
@@ -890,3 +894,86 @@ def test_the_id_the_read_path_publishes_names_the_occurrence_it_came_from(
         assert clipped(listed, horizon) == [
             value for value in clipped(before, horizon) if value != key(target)
         ]
+
+
+# The properties Home Assistant has no field for take a different route: they
+# are read off vobject and written through icalendar, and the two libraries
+# escape a parameter value differently.
+
+_TEXT = st.text(
+    st.one_of(
+        # The characters the escaping of a parameter value turns on.
+        st.sampled_from(list("^\"'\\,;: ä")),
+        st.characters(blacklist_categories=("Cs", "Cc"), max_codepoint=0x2FFF),
+    ),
+    max_size=12,
+).filter(lambda value: value.strip() == value and value != "")
+
+_ATTENDEE = st.fixed_dictionaries(
+    {"email": st.builds(lambda name: f"{name}@example.test", _TEXT)},
+    optional={
+        "name": _TEXT,
+        "status": st.sampled_from(["ACCEPTED", "DECLINED", "NEEDS-ACTION"]),
+        "role": st.sampled_from(["REQ-PARTICIPANT", "CHAIR"]),
+    },
+)
+
+_EXTRAS = st.fixed_dictionaries(
+    {},
+    optional={
+        "url": st.builds(lambda tail: f"https://x.test/{tail}", _TEXT),
+        "status": st.sampled_from(["CONFIRMED", "TENTATIVE", "CANCELLED"]),
+        "transparency": st.sampled_from(["OPAQUE", "TRANSPARENT"]),
+        "classification": st.sampled_from(["PUBLIC", "PRIVATE"]),
+        "priority": st.integers(0, 9),
+        "categories": st.lists(_TEXT, min_size=1, max_size=3, unique=True),
+        "organizer": st.builds(lambda name: f"{name}@example.test", _TEXT),
+        "attendees": st.lists(
+            _ATTENDEE,
+            min_size=1,
+            max_size=3,
+            unique_by=lambda one: one["email"].lower(),
+        ),
+        "alarms": st.lists(
+            st.fixed_dictionaries(
+                {"minutes_before": st.integers(-600, 600)},
+                optional={
+                    "related": st.sampled_from(["START", "END"]),
+                    "action": st.sampled_from(["DISPLAY", "AUDIO"]),
+                    "description": _TEXT,
+                },
+            ),
+            min_size=1,
+            max_size=2,
+        ),
+    },
+)
+
+
+def _published(extras: dict) -> dict:
+    """Return the attributes an entity would show for these properties."""
+    component = ICalEvent()
+    component.add("UID", UID)
+    component.add("SUMMARY", "x")
+    component.add("DTSTART", datetime(2026, 7, 6, 9, 0, tzinfo=UTC))
+    apply_extras(component, extras)
+    document = ICalendar()
+    document.add("prodid", "-//test//test//EN")
+    document.add("version", "2.0")
+    document.add_component(component)
+    return read_extras(vobject.readOne(document.to_ical().decode("utf-8")).vevent)
+
+
+@PROPERTY
+@given(extras=_EXTRAS)
+def test_the_attributes_an_event_publishes_survive_being_written_back(extras) -> None:
+    """A service call is fed the attribute set the entity showed.
+
+    Read through one library and written through the other, an attendee name
+    carrying a quote came back with the escape of the last write still in it,
+    so every run of an automation that re-sent what it had read made the name
+    longer.
+    """
+    once = _published(extras)
+
+    assert _published(once) == once

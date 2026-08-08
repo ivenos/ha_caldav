@@ -38,13 +38,6 @@ place of its install wizard, and gives SOGo a MariaDB container plus the SQL
 view it authenticates against. CI runs the same script against Nextcloud (the
 current major and the one behind), Radicale, Xandikos, Baikal and SOGo.
 
-Test doubles stand in for `caldav` objects, and a forgiving one hides real
-defects: a `save()` that records nothing hid a double SEQUENCE bump, and a
-resource exposing only `icalendar_component` hid an edit landing on the wrong
-subcomponent. Model what the library actually does, or let caldav's own code
-run against `RecordingClient` from `tests/conftest.py`, which captures the PUT
-instead of sending it.
-
 ## Config entry versions
 
 Changing the shape of the account key or of an entity `unique_id` needs

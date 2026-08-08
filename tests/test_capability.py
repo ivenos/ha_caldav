@@ -265,9 +265,53 @@ def test_an_empty_privilege_set_stays_permissive() -> None:
 
 def test_the_address_set_is_read_when_the_server_has_one() -> None:
     client = Mock()
+    client.url = "https://cloud.example.com/remote.php/dav/"
     client.principal.return_value.calendar_user_address_set.return_value = [
         "mailto:iven@example.com",
         "",
+    ]
+
+    assert fetch_address_set(client) == ["mailto:iven@example.com"]
+
+
+def test_a_principal_named_by_path_is_read_as_the_uri_it_stands_for() -> None:
+    """RFC 5545 has a CAL-ADDRESS be a URI, and RFC 6638 lets the set name the
+    principal by its url; sabre/dav and Nextcloud both answer with a bare path
+    for an account carrying no mail address.
+
+    Written onto an ATTENDEE as it stands, sabre reads it as a local principal,
+    fails to resolve it, and answers 500 to every DELETE of that object from
+    then on. Measured against Baikal: the event became impossible to remove at
+    all, and the whole live suite stalled on the leftover.
+    """
+    client = Mock()
+    client.url = "http://localhost:8082/dav.php/"
+    client.principal.return_value.calendar_user_address_set.return_value = [
+        "/dav.php/principals/admin/",
+        "mailto:iven@example.com",
+        "MailTo:Iven@Example.com",
+        "http://elsewhere.test/principals/bob/",
+    ]
+
+    assert fetch_address_set(client) == [
+        "http://localhost:8082/dav.php/principals/admin/",
+        # Anything carrying a scheme of its own is left exactly as it came.
+        "mailto:iven@example.com",
+        "MailTo:Iven@Example.com",
+        "http://elsewhere.test/principals/bob/",
+    ]
+
+
+def test_an_address_the_account_url_cannot_be_joined_to_is_kept() -> None:
+    """A client with no usable url must not cost the account its own address:
+    matched against nothing, no ATTENDEE line is ever recognised as ours and
+    the reply service reports the user is not on their own event."""
+    client = Mock()
+    type(client).url = property(
+        lambda self: (_ for _ in ()).throw(ValueError("no url"))
+    )
+    client.principal.return_value.calendar_user_address_set.return_value = [
+        "mailto:iven@example.com"
     ]
 
     assert fetch_address_set(client) == ["mailto:iven@example.com"]
@@ -458,3 +502,30 @@ def test_a_response_for_another_server_does_not_answer_for_ours() -> None:
     calendar = Mock(url="https://cal.example.com/dav/bob/personal/")
 
     assert capability_for(fetch_capabilities(client), calendar).writable
+
+
+def test_an_absolute_href_is_ignored_when_there_is_nothing_to_check_it_against(
+    hass: HomeAssistant,
+) -> None:
+    """calendar_key drops the scheme and the host, so a response for another
+    server keys onto the same path as a real calendar and the first one seen
+    wins. Without a home-set url there is nothing to tell the two apart, and
+    guessing would hand one calendar the capabilities of another."""
+    import xml.etree.ElementTree as ET
+
+    body = (
+        '<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">'
+        "<D:response>"
+        "<D:href>https://elsewhere.example.com/dav/bob/tasks/</D:href>"
+        "<D:propstat><D:prop><C:supported-calendar-component-set>"
+        '<C:comp name="VTODO"/>'
+        "</C:supported-calendar-component-set></D:prop>"
+        "<D:status>HTTP/1.1 200 OK</D:status></D:propstat>"
+        "</D:response></D:multistatus>"
+    )
+    client = Mock()
+    home = client.principal.return_value.calendar_home_set
+    home.url = None
+    home.get_properties.return_value = Mock(tree=ET.fromstring(body))
+
+    assert fetch_capabilities(client) == {}

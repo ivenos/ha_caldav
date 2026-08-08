@@ -110,11 +110,21 @@ def _date_only(value: Any) -> date:
     return cv.date(value)
 
 
+def _named(values: tuple[str, ...]) -> Any:
+    """Return a field taking an RFC 5545 name in the spelling selectors need.
+
+    hassfest holds a selector's option keys to [a-z0-9-_]+, so the wire form of
+    a value like OPAQUE or THISANDFUTURE cannot be the option itself. Either
+    spelling is accepted and the RFC one is what reaches the write path.
+    """
+    return vol.All(vol.Lower, vol.In(tuple(v.lower() for v in values)), vol.Upper)
+
+
 EXTRA_FIELDS = {
     vol.Optional(ATTR_URL): cv.string,
-    vol.Optional(ATTR_EVENT_STATUS): vol.In(EVENT_STATUSES),
-    vol.Optional(ATTR_TRANSPARENCY): vol.In(EVENT_TRANSPARENCIES),
-    vol.Optional(ATTR_CLASSIFICATION): vol.In(EVENT_CLASSIFICATIONS),
+    vol.Optional(ATTR_EVENT_STATUS): _named(EVENT_STATUSES),
+    vol.Optional(ATTR_TRANSPARENCY): _named(EVENT_TRANSPARENCIES),
+    vol.Optional(ATTR_CLASSIFICATION): _named(EVENT_CLASSIFICATIONS),
     vol.Optional(ATTR_PRIORITY): vol.All(vol.Coerce(int), vol.Range(min=0, max=9)),
     vol.Optional(ATTR_CATEGORIES): vol.All(cv.ensure_list, [cv.string]),
     vol.Optional(ATTR_ORGANIZER): cv.string,
@@ -178,6 +188,14 @@ SPAN_FIELDS = {
 _ONE_START = cv.has_at_most_one_key("start_date_time", "start_date")
 _ONE_END = cv.has_at_most_one_key("end_date_time", "end_date")
 
+
+def _range_needs_occurrence(value: dict[str, Any]) -> dict[str, Any]:
+    """Refuse a recurrence range with no occurrence for it to start at."""
+    if "recurrence_range" in value and "recurrence_id" not in value:
+        raise vol.Invalid("recurrence_range needs recurrence_id")
+    return value
+
+
 CREATE_EVENT_SCHEMA = vol.All(
     cv.make_entity_service_schema(
         {
@@ -200,7 +218,7 @@ UPDATE_EVENT_SCHEMA = vol.All(
         {
             vol.Required("uid"): cv.string,
             vol.Optional("recurrence_id"): cv.string,
-            vol.Optional("recurrence_range"): vol.In((RANGE_THIS_AND_FUTURE,)),
+            vol.Optional("recurrence_range"): _named((RANGE_THIS_AND_FUTURE,)),
             vol.Optional("summary"): cv.string,
             **SPAN_FIELDS,
             vol.Optional("description"): cv.string,
@@ -211,6 +229,11 @@ UPDATE_EVENT_SCHEMA = vol.All(
     ),
     _ONE_START,
     _ONE_END,
+    # A range says where in the series to start, so on its own it has nothing to
+    # start from. Accepted anyway it was dropped without a word, and a call
+    # meaning "this occurrence and the ones after it" rewrote the whole series,
+    # the past included.
+    _range_needs_occurrence,
     # An update naming nothing but the uid still writes: the PUT moves SEQUENCE,
     # and a scheduling server reads that as a new revision and tells every
     # attendee about a change that was never made.
@@ -262,7 +285,7 @@ CREATE_CALENDAR_SCHEMA = vol.Schema(
         vol.Required(ATTR_CONFIG_ENTRY_ID): cv.string,
         vol.Required(ATTR_NAME): cv.string,
         vol.Optional(ATTR_COMPONENTS): vol.All(
-            cv.ensure_list, [vol.In((COMPONENT_EVENT, COMPONENT_TODO))]
+            cv.ensure_list, [_named((COMPONENT_EVENT, COMPONENT_TODO))]
         ),
     }
 )

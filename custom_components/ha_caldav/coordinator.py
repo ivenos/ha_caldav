@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 import logging
+from math import isfinite
 import threading
 from typing import Any
 
@@ -127,6 +128,7 @@ class _WindowRead:
     vevents: list[Any]
     etags: dict[str, str] | None
     rules: dict[str, str | None]
+    epoch: int = 0
 
 
 @dataclass
@@ -134,7 +136,8 @@ class _TodoRead:
     """One read of the to-do list, before any of it is kept."""
 
     items: list[TodoItem]
-    etags: dict[str, str]
+    etags: dict[str, str] | None
+    epoch: int = 0
 
 
 def calendar_unique_id(entry_id: str, url: object) -> str:
@@ -191,6 +194,11 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         # Both the poll and a panel read merge into the etag caches, and both
         # run in the executor, so the read-modify-write needs holding together.
         self.etag_lock = threading.Lock()
+        # Moved by every write that invalidates an etag. A read that started
+        # before it carries the value from before the write, and the lock alone
+        # cannot tell the two apart: it covers the moment the dict is changed,
+        # not the span between a read and the commit that follows it.
+        self._etag_epoch = 0
         self._etag_window: set[str] = set()
         self.rrules: dict[str, str] = {}
         self.todo_etags: dict[str, str] = {}
@@ -201,6 +209,9 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         self._etags_missed = False
         self._fetched_at: datetime | None = None
         self._misses = {"events": 0, "todos": 0}
+        # Per half, because one entity each reads from them. A collection whose
+        # to-do report the server refuses is still a calendar that reads.
+        self.dead = {"events": False, "todos": False}
 
     async def async_get_events(
         self, hass: HomeAssistant, start_date: datetime, end_date: datetime
@@ -227,6 +238,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         second search, and a series that stopped recurring has to be forgotten
         before the occurrences are built from it.
         """
+        epoch = self._etag_epoch
         etags, rules = self._window_index(start_date, end_date)
         self._keep_rules(rules)
         if etags is not None:
@@ -235,8 +247,11 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             # window just read comes first, so a cache at its limit gives up
             # what is furthest out of view rather than these.
             with self.etag_lock:
-                kept = {uid: tag for uid, tag in self.etags.items() if uid not in etags}
-                self.etags = _bounded(etags | kept)
+                if epoch == self._etag_epoch:
+                    kept = {
+                        uid: tag for uid, tag in self.etags.items() if uid not in etags
+                    }
+                    self.etags = _bounded(etags | kept)
         results = self.calendar.search(
             start=start_date,
             end=end_date,
@@ -250,6 +265,19 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             for vevent in components_of(item, "vevent")
             if (event := to_event(vevent, self._rule_for(vevent))) is not None
         ]
+
+    def forget_etags(self, name: str, keys: tuple[str, ...]) -> None:
+        """Drop the etags a write has just made stale.
+
+        The epoch moves with them, so a read already on the wire cannot put back
+        what this took out. The cache is named rather than handed over, because
+        a poll landing meanwhile replaces the dict rather than emptying it.
+        """
+        with self.etag_lock:
+            cache = getattr(self, name)
+            for key in keys:
+                cache.pop(key, None)
+            self._etag_epoch += 1
 
     def _rule_for(self, vevent: Any) -> str | None:
         """Return the recurrence rule recorded for this occurrence's series."""
@@ -325,39 +353,53 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             self.capability.supports_events,
             self._window_events,
             "events",
-            _WindowRead(vevents=[], etags={}, rules={}),
+            _WindowRead(vevents=[], etags={}, rules={}, epoch=self._etag_epoch),
         )
         todos, todos_error = await self._async_half(
             self._fetch_todos,
             self.capability.supports_todos,
             self._todos,
             "todos",
-            _TodoRead(items=[], etags={}),
+            _TodoRead(items=[], etags={}, epoch=self._etag_epoch),
         )
         errors = [error for error in (events_error, todos_error) if error is not None]
-        for result, error in ((events, events_error), (todos, todos_error)):
-            if result is _DEAD:
-                raise error
-        if errors and len(errors) == self._halves:
-            raise errors[0]
-        # Kept only past the two raises above. A half reads its etags in the
-        # same request as its data, and committing them on the way out left
-        # them describing a revision whose data was then thrown away: the next
-        # edit of one of those objects was checked against an etag that matched
-        # the server, passed, and overwrote the change that had come in with it.
+        # A half commits its data and its etags together, so neither can end up
+        # describing a revision the other never saw. Committed before the raises
+        # below, because a half that read cleanly must not be thrown away over
+        # the other one failing: its entity would sit unavailable on frozen data
+        # for as long as the broken half stays broken, and pay for the read that
+        # is discarded on every poll.
         if isinstance(events, _WindowRead):
             self._window_events = events.vevents
             self._keep_rules(events.rules)
-            if events.etags is None:
-                # The window was read, its etags were not. Committing the token
-                # on that would leave every etag here frozen with no later poll
-                # to repair them, and each of them refuses the next edit.
+            # The window was read, its etags were not, or a write overtook them.
+            # Committing the token on that would leave every etag here frozen
+            # with no later poll to repair them, and each refuses the next edit.
+            if events.etags is None or not self._merge_etags(
+                events.etags, events.epoch
+            ):
                 self._etags_missed = True
-            else:
-                self._merge_etags(events.etags)
         if isinstance(todos, _TodoRead):
             self._todos = todos.items
-            self.todo_etags = todos.etags
+            with self.etag_lock:
+                if todos.etags is None or todos.epoch != self._etag_epoch:
+                    self._etags_missed = True
+                else:
+                    self.todo_etags = todos.etags
+        for half, result, error in (
+            ("events", events, events_error),
+            ("todos", todos, todos_error),
+        ):
+            self.dead[half] = result is _DEAD
+            # Rejected credentials belong in reauth however few halves saw them.
+            if result is _DEAD and isinstance(error, AuthorizationError):
+                raise error
+        # Only when nothing at all came back. A half that keeps failing takes
+        # its own entity down through HaCaldavEntity.available; failing the poll
+        # over it would take the other half's entity with it, on data that then
+        # freezes for as long as this one stays broken.
+        if errors and len(errors) == self._halves:
+            raise errors[0]
         return not errors
 
     @property
@@ -392,6 +434,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
 
     def _fetch_events(self, start: datetime, end: datetime) -> Any:
         def fetch() -> _WindowRead:
+            epoch = self._etag_epoch
             # Unsplit: caldav's split copies and reparses the whole expanded
             # object once per occurrence, which is quadratic in their number.
             results = self.calendar.search(
@@ -411,6 +454,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
                 ],
                 etags=etags,
                 rules=rules,
+                epoch=epoch,
             )
 
         return fetch
@@ -421,15 +465,21 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         found = {uid: rule for uid, rule in rules.items() if rule is not None}
         self.rrules = _bounded(found | outside)
 
-    def _merge_etags(self, etags: dict[str, str]) -> None:
-        """Take in the etags of a freshly read window.
+    def _merge_etags(self, etags: dict[str, str], epoch: int) -> bool:
+        """Take in the etags of a freshly read window, unless a write beat it.
 
         Kept rather than replaced: a panel window the user paged to need not
         overlap the polled one, and dropping its etags would let a write from
         it overwrite a change made elsewhere without noticing. Only a uid this
         same window carried before and no longer does is gone for certain.
+
+        False when the read is older than the last write: it holds the etag from
+        before that write, and putting it back would have the user's own next
+        edit of the object refused as somebody else's change.
         """
         with self.etag_lock:
+            if epoch != self._etag_epoch:
+                return False
             gone = self._etag_window - set(etags)
             self._etag_window = set(etags)
             kept = {
@@ -438,6 +488,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
                 if uid not in gone and uid not in etags
             }
             self.etags = _bounded(etags | kept)
+            return True
 
     def _next_event(self) -> tuple[Any, CalendarEvent] | None:
         # The server is not required to return results in any order.
@@ -460,6 +511,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
 
         Nothing expands a to-do, so this search can carry the etags.
         """
+        epoch = self._etag_epoch
         results = self.calendar.search(
             todo=True, include_completed=True, props=[dav.GetEtag()]
         )
@@ -475,7 +527,11 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
                 etags[item.uid] = etag
         return _TodoRead(
             items=[item for _, item in sorted(found, key=lambda pair: pair[0])],
-            etags=etags,
+            # The list held items and the server put an etag on none of them.
+            # Taken at face value that empties the cache, and the next edit of
+            # every one of those items goes out with nothing to check against.
+            etags=etags if etags or not found else None,
+            epoch=epoch,
         )
 
     def _sync_changed(self) -> tuple[bool, str | None]:
@@ -585,9 +641,15 @@ def sort_order(vtodo: Any) -> tuple[int, float]:
     if value is None:
         return (1, 0.0)
     try:
-        return (0, float(value))
+        position = float(value)
     except TypeError, ValueError:
         return (1, 0.0)
+    # nan compares false against everything, so one item carrying it decides
+    # nothing consistently and the whole list comes out in an order that
+    # depends on where the sort happened to meet it. The write path already
+    # refuses one; the read path has to agree, or a drag reorders around a
+    # position it will not store.
+    return (0, position) if isfinite(position) else (1, 0.0)
 
 
 def to_todo(vtodo: Any) -> TodoItem | None:
@@ -807,5 +869,13 @@ def to_event(vevent: Any, rrule: str | None = None) -> CalendarEvent | None:
             ),
         )
     except _UNMAPPABLE as err:
+        if rrule is not None:
+            # Home Assistant validates the rule it is handed against what its own
+            # editor can offer, and FREQ=HOURLY or FREQ=MINUTELY is RFC 5545 and
+            # writable from every other client. Passing it on took the whole
+            # occurrence off the panel; the event is the data, the rule only
+            # decides what the recurrence editor opens with.
+            _LOGGER.debug("Keeping an event whose rule was refused: %s", err)
+            return to_event(vevent)
         _LOGGER.debug("Skipping an event that cannot be mapped: %s", err)
         return None

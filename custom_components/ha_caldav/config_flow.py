@@ -229,6 +229,8 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
     ) -> ConfigFlowResult:
         """Manage which calendars are used and how the next event is picked."""
         errors: dict[str, str] = {}
+        options = self.config_entry.options
+        choices = await self._async_calendar_choices()
         if user_input is not None:
             # Checked here rather than in the schema: voluptuous hands its own
             # message straight to the frontend, so a bound broken in the form
@@ -239,11 +241,8 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
                 # Merge: the calendars field is absent while the server is
                 # unreachable, and plain user_input would drop the selection.
                 return self.async_create_entry(
-                    data={**self.config_entry.options, **user_input}
+                    data={**options, **_selection(options, choices, user_input)}
                 )
-
-        options = self.config_entry.options
-        choices = await self._async_calendar_choices()
 
         fields: dict[Any, Any] = {}
         if choices:
@@ -432,6 +431,35 @@ def _selected_keys(options: Mapping[str, Any], choices: dict[str, str]) -> list[
     if stored is None:
         return list(choices)
     return [key for key, name in choices.items() if key in stored or name in stored]
+
+
+def _selection(
+    options: Mapping[str, Any], choices: dict[str, str], user_input: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return the submitted settings with the calendar list made safe to store.
+
+    The form can only offer what one listing turned up, and what it does not
+    offer cannot be ticked. Stored as submitted, a calendar the server left out
+    of that one listing reads as deselected on the next setup, and its entity is
+    removed from the registry with its history and everything pointing at it.
+
+    An entry that never had a selection follows the server, and every box being
+    ticked is what that looks like in the form. Written down it would freeze,
+    and a calendar made later would silently never be loaded.
+    """
+    submitted = user_input.get(CONF_CALENDARS)
+    if submitted is None:
+        return dict(user_input)
+    stored = options.get(CONF_CALENDARS)
+    if stored is None:
+        if set(submitted) == set(choices):
+            return {
+                key: value for key, value in user_input.items() if key != CONF_CALENDARS
+            }
+        return dict(user_input)
+    names = set(choices.values())
+    unlisted = [item for item in stored if item not in choices and item not in names]
+    return {**user_input, CONF_CALENDARS: [*submitted, *unlisted]}
 
 
 def _cleaned(user_input: Mapping[str, Any]) -> dict[str, Any]:

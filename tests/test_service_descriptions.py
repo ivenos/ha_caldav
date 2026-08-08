@@ -175,9 +175,13 @@ def test_declared_defaults_match_the_schema(service: str) -> None:
     ],
 )
 def test_selector_options_match_the_constants(service, field, options) -> None:
+    """The picker offers the RFC names lowercased: hassfest holds a selector's
+    option keys to [a-z0-9-_]+, so the wire form cannot be the RFC value
+    itself. The schema takes either spelling and hands the write path the RFC
+    one; what must not drift is which values exist."""
     selector = _fields(service)[field]["selector"]["select"]
 
-    assert selector["options"] == list(options)
+    assert selector["options"] == [value.lower() for value in options]
 
 
 @pytest.mark.parametrize("service", sorted(SCHEMAS))

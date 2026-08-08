@@ -93,6 +93,41 @@ def test_attendees_keep_their_parameters() -> None:
     ]
 
 
+def test_an_attendee_name_is_read_through_the_escaping_of_its_parameter() -> None:
+    """RFC 6868 escapes what a parameter value cannot hold literally.
+
+    icalendar writes them and resolves them again; vobject, which is what the
+    read path is, hands them back as they stand. A name with a quote in it
+    reached the dashboard, the templates and the notifications as ^'.
+    """
+    extras = read_extras(
+        _vevent("ATTENDEE;CN=\"Jane ^'JJ^' Doe^nHead of ^^\":mailto:jane@example.com")
+    )
+
+    assert extras["attendees"] == [
+        {"email": "jane@example.com", "name": 'Jane "JJ" Doe\nHead of ^'}
+    ]
+
+
+def test_an_attendee_name_does_not_grow_each_time_it_is_written_back() -> None:
+    """The attributes an entity publishes are what a service call feeds back in.
+
+    Read without resolving the escaping, the ^ of the stored name was escaped
+    again on the way out, so an automation that re-sent the attendee list it
+    had just read doubled the escapes on every run.
+    """
+    once = read_extras(_vevent("ATTENDEE;CN=\"Jane ^'JJ^' Doe\":mailto:j@e.test"))
+
+    twice = once
+    for _ in range(3):
+        component = _component()
+        apply_extras(component, twice)
+        twice = read_extras(vobject.readOne(_written(component)).vevent)
+
+    assert twice["attendees"][0]["name"] == once["attendees"][0]["name"]
+    assert twice["attendees"][0]["name"] == 'Jane "JJ" Doe'
+
+
 def test_relative_alarms_are_reported_as_minutes_before() -> None:
     vevent = vobject.readOne(
         "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\nBEGIN:VEVENT\n"
@@ -585,3 +620,39 @@ def test_a_line_break_in_the_url_does_not_reach_the_content_line() -> None:
         "URL:https://meet.example.com/x END:VEVENT",
         "END:VEVENT",
     ]
+
+
+def test_a_line_break_in_an_attendee_does_not_reach_the_content_line() -> None:
+    """Same hazard as the organizer, and a YAML folded scalar is enough on its
+    own: `attendees: >` leaves a trailing newline on the address. icalendar
+    asserts on a line feed, and a bare carriage return it does not catch at all
+    and writes into the document that is PUT."""
+    from custom_components.ha_caldav.event import apply_extras
+
+    component = ICalEvent()
+
+    apply_extras(component, {"attendees": ["guest@example.com\r\nEND:VEVENT"]})
+
+    # Unfolded, so a break that RFC 5545 continuation hid still shows up.
+    document = component.to_ical().decode("utf-8")
+    lines = document.replace("\r\n ", "").splitlines()
+    assert lines == [
+        "BEGIN:VEVENT",
+        "ATTENDEE;PARTSTAT=NEEDS-ACTION;ROLE=REQ-PARTICIPANT;RSVP=TRUE:"
+        "guest@example.com END:VEVENT",
+        "END:VEVENT",
+    ]
+
+
+def test_an_organizer_named_by_principal_url_stays_a_url() -> None:
+    """RFC 6638 lets calendar-user-address-set name a principal by its url, and
+    that is what sabre/dav, Baikal and Nextcloud return for an account with no
+    mail address on it. Prefixed with mailto: it matches no principal, so the
+    scheduling server the organizer exists to appease reads the object as an
+    invitation from somebody it has never heard of."""
+    component = _component()
+    component.add("ATTENDEE", "mailto:ann@example.com")
+
+    apply_extras(component, {}, "/remote.php/dav/principals/users/iven/")
+
+    assert str(component["ORGANIZER"]) == "/remote.php/dav/principals/users/iven/"

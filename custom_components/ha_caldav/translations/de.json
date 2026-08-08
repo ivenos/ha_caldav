@@ -233,33 +233,33 @@
     },
     "calendar_components": {
       "options": {
-        "VEVENT": "Termine",
-        "VTODO": "Aufgaben"
+        "vevent": "Termine",
+        "vtodo": "Aufgaben"
       }
     },
     "event_status": {
       "options": {
-        "TENTATIVE": "Vorläufig",
-        "CONFIRMED": "Bestätigt",
-        "CANCELLED": "Abgesagt"
+        "tentative": "Vorläufig",
+        "confirmed": "Bestätigt",
+        "cancelled": "Abgesagt"
       }
     },
     "transparency": {
       "options": {
-        "OPAQUE": "Wird als belegt angezeigt",
-        "TRANSPARENT": "Wird als frei angezeigt"
+        "opaque": "Wird als belegt angezeigt",
+        "transparent": "Wird als frei angezeigt"
       }
     },
     "classification": {
       "options": {
-        "PUBLIC": "Öffentlich",
-        "PRIVATE": "Privat",
-        "CONFIDENTIAL": "Vertraulich"
+        "public": "Öffentlich",
+        "private": "Privat",
+        "confidential": "Vertraulich"
       }
     },
     "recurrence_range": {
       "options": {
-        "THISANDFUTURE": "Diese und alle folgenden Wiederholungen"
+        "thisandfuture": "Diese und alle folgenden Wiederholungen"
       }
     }
   },

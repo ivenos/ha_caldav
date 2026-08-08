@@ -3,7 +3,6 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from caldav.lib.error import ReportError
 from caldav.lib.url import URL
 import pytest
 
@@ -19,22 +18,35 @@ class RecordingClient:
     """
 
     def __init__(self) -> None:
+        # A resource built against this client resolves its url through here.
+        self.url = URL("https://dav.test/")
         self.puts: list[tuple[str, str]] = []
         self.deletes: list[str] = []
         # Index of the first PUT to refuse, for the rollback paths.
         self.fail_from: int | None = None
+        # Status the refused DELETE answers with, for the rollback that fails.
+        self.delete_status: int = 204
 
     def put(self, url, body, headers=None):
-        """Record the write and answer the way a server accepting it would."""
-        if self.fail_from is not None and len(self.puts) >= self.fail_from:
-            raise ReportError("no room left")
+        """Record the write and answer the way a server would."""
         self.puts.append((str(url), body))
+        if self.fail_from is not None and len(self.puts) > self.fail_from:
+            # A status rather than an exception. caldav answers anything outside
+            # (201, 204, 302) by reserializing through vobject and putting a
+            # second time before it gives up, so a double that raises here hides
+            # both that retry and the body it sends, which is vobject's and not
+            # the one the write path built.
+            return SimpleNamespace(
+                status=507, reason="Insufficient Storage", headers=[], raw=""
+            )
         return SimpleNamespace(status=201, headers=[], raw="")
 
     def delete(self, url):
         """Record the removal a rollback makes."""
         self.deletes.append(str(url))
-        return SimpleNamespace(status=204, headers=[], raw="")
+        return SimpleNamespace(
+            status=self.delete_status, reason="Locked", headers=[], raw=""
+        )
 
     @property
     def bodies(self) -> list[str]:

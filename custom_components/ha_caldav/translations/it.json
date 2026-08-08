@@ -233,33 +233,33 @@
     },
     "calendar_components": {
       "options": {
-        "VEVENT": "Eventi",
-        "VTODO": "Attività"
+        "vevent": "Eventi",
+        "vtodo": "Attività"
       }
     },
     "event_status": {
       "options": {
-        "TENTATIVE": "Provvisorio",
-        "CONFIRMED": "Confermato",
-        "CANCELLED": "Annullato"
+        "tentative": "Provvisorio",
+        "confirmed": "Confermato",
+        "cancelled": "Annullato"
       }
     },
     "transparency": {
       "options": {
-        "OPAQUE": "Risulta occupato",
-        "TRANSPARENT": "Risulta libero"
+        "opaque": "Risulta occupato",
+        "transparent": "Risulta libero"
       }
     },
     "classification": {
       "options": {
-        "PUBLIC": "Pubblico",
-        "PRIVATE": "Privato",
-        "CONFIDENTIAL": "Riservato"
+        "public": "Pubblico",
+        "private": "Privato",
+        "confidential": "Riservato"
       }
     },
     "recurrence_range": {
       "options": {
-        "THISANDFUTURE": "Questa e tutte le successive"
+        "thisandfuture": "Questa e tutte le successive"
       }
     }
   },

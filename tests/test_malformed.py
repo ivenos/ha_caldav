@@ -30,8 +30,8 @@ from typing import Any
 from unittest.mock import Mock
 
 from caldav.davclient import DAVResponse
-from caldav.lib.error import NotFoundError
-from caldav.lib.url import URL
+from caldav.lib.error import DAVError, NotFoundError
+from conftest import dav_calendar as shared_dav_calendar
 from homeassistant.components.todo import TodoItem
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
@@ -211,6 +211,7 @@ class WriteTarget:
 
     def __init__(self, ics: str, url: str = "https://dav.test/cal/a.ics") -> None:
         self._ics = ics
+        self._server_ics = ics
         self._instance: Any = None
         self.url = url
         self.props: dict[str, Any] = {}
@@ -233,6 +234,14 @@ class WriteTarget:
             self._instance = ICalCalendar.from_ical(self._ics)
         return self._instance
 
+    @icalendar_instance.setter
+    def icalendar_instance(self, value: Any) -> None:
+        # caldav keeps the document handed to it and serializes it only on the
+        # way out. Writes go through here rather than through data because a
+        # string is put through vcal.fix, which rewrites the object.
+        self._instance = value
+        self._ics = value.to_ical().decode("utf-8")
+
     @property
     def icalendar_component(self) -> Any:
         return next(
@@ -252,27 +261,19 @@ class WriteTarget:
 
     def load(self) -> None:
         self.loads += 1
-
-
-class RecordingClient:
-    """Records what would be PUT so caldav's own save path runs for real."""
-
-    def __init__(self) -> None:
-        self.puts: list[tuple[str, str]] = []
-
-    def put(self, url: Any, body: str, headers: Any = None) -> Any:
-        self.puts.append((str(url), body))
-        return Mock(status=201, headers=[], raw="")
-
-    def delete(self, url: Any) -> Any:
-        return Mock(status=204, headers=[], raw="")
+        # caldav replaces the document from the GET before it records the etag,
+        # so a load is where a stale parse would be thrown away.
+        self.data = self._server_ics
 
 
 def dav_calendar() -> Mock:
-    """Return a calendar that answers every uid lookup with nothing."""
-    calendar = Mock()
-    calendar.client = RecordingClient()
-    calendar.url = URL("https://dav.test/cal/")
+    """Return a calendar that answers every uid lookup with nothing.
+
+    On the shared client rather than a second one: a local double that could
+    only accept a PUT left the write paths untestable against a server that
+    refuses one, which is where the order of a write and a delete shows.
+    """
+    calendar = shared_dav_calendar()
     calendar.name = "Personal"
     calendar.object_by_uid.side_effect = NotFoundError("nope")
     calendar.event_by_uid.side_effect = NotFoundError("nope")
@@ -1214,6 +1215,10 @@ def test_a_write_onto_a_malformed_series_refuses_rather_than_breaks(
     still readable: a document with no VEVENT left in it is one the next poll
     drops and no later edit can reach, which is the same as having deleted the
     event without saying so.
+
+    A delete is the exception, and only in what it may take away. It clears the
+    events by design, but a resource may hold a to-do beside them, and going
+    back empty would take that to-do off a list nobody asked about.
     """
     calendar = dav_calendar()
     stored = WriteTarget(case.ics)
@@ -1231,7 +1236,10 @@ def test_a_write_onto_a_malformed_series_refuses_rather_than_breaks(
     except NotFoundError, ValueError:
         return
     if stored.saves:
-        assert ICalCalendar.from_ical(stored.data).walk("VEVENT")
+        document = ICalCalendar.from_ical(stored.data)
+        assert [item for item in document.subcomponents if item.name != "VTIMEZONE"]
+        if not mode.startswith("delete_"):
+            assert document.walk("VEVENT")
 
 
 # --------------------------------------------------------------------------
@@ -1532,6 +1540,18 @@ def test_moving_a_malformed_object_refuses_or_keeps_the_original(case: Case) -> 
     assert stored.deletes == 1
     assert len(target.client.puts) == 1
 
+    # Again onto a target that refuses the write, which is the only way the
+    # order of the two shows: a copy that landed and one that never happened
+    # look alike on the source unless the PUT can fail.
+    refusing, keeper = dav_calendar(), WriteTarget(case.ics)
+    refusing.client.fail_from = 0
+    source.event_by_uid.return_value = keeper
+
+    with pytest.raises((DAVError, ValueError)):
+        within(_BUDGET, lambda: move_event(source, refusing, "uid-1", False))
+
+    assert keeper.deletes == 0
+
 
 # --------------------------------------------------------------------------
 # The remaining write entry points.
@@ -1757,8 +1777,8 @@ def test_creating_from_hostile_text_writes_exactly_one_component(text: str) -> N
     )
     create_todo(calendar, {"summary": text or "x", "description": text})
 
-    event_body = ICalCalendar.from_ical(calendar.save_event.call_args.args[0])
-    todo_body = ICalCalendar.from_ical(calendar.save_todo.call_args.args[0])
+    event_body = calendar.save_event.call_args.args[0]
+    todo_body = calendar.save_todo.call_args.args[0]
     assert len(event_body.walk("VEVENT")) == 1
     assert len(todo_body.walk("VTODO")) == 1
 

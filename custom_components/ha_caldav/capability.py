@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from typing import Any, ClassVar
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import caldav
 from caldav.elements import cdav, dav
@@ -166,12 +166,30 @@ def fetch_address_set(client: caldav.DAVClient) -> list[str]:
     """
     try:
         addresses = client.principal().calendar_user_address_set()
-        return [str(address) for address in addresses if address]
+        return [_absolute(client, str(address)) for address in addresses if address]
     except Exception as err:  # noqa: BLE001
         # Anything from NotFoundError to a parse failure on servers that answer
         # the property with a shape caldav does not expect.
         _LOGGER.debug("No calendar user address set: %s", err)
         return []
+
+
+def _absolute(client: caldav.DAVClient, address: str) -> str:
+    """Return a calendar user address as the URI a CAL-ADDRESS has to be.
+
+    RFC 6638 lets the set name the principal by its url, and sabre/dav and
+    Nextcloud both answer with a bare path for an account carrying no mail
+    address. Written onto an ATTENDEE as it stands, sabre reads it as a local
+    principal, cannot resolve it, and answers 500 to every DELETE of the object
+    from then on: the event cannot be removed at all, from here or from any
+    other client. Resolved against the account it is a principal both ends can
+    follow. An address that carries a scheme of its own keeps it.
+    """
+    try:
+        return urljoin(str(client.url), address)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Leaving a calendar user address as it stands: %s", err)
+        return address
 
 
 def supports_sync_collection(calendar: caldav.Calendar) -> bool:

@@ -642,16 +642,18 @@ async def test_a_date_paired_with_a_datetime_is_refused(hass: HomeAssistant) -> 
 async def test_a_misspelled_recurrence_range_is_refused(hass: HomeAssistant) -> None:
     await _setup(hass)
 
-    # Accepting it would silently edit the single occurrence instead.
-    with pytest.raises(vol.Invalid):
+    # Accepting it would silently edit the single occurrence instead. Every
+    # other part of the call is valid, so only the spelling can refuse it.
+    with pytest.raises(vol.Invalid, match="recurrence_range"):
         await hass.services.async_call(
             DOMAIN,
             "update_event",
             {
                 "entity_id": "calendar.iven_personal",
                 "uid": "uid-1",
+                "summary": "Renamed",
                 "recurrence_id": "2026-07-13 09:00:00+00:00",
-                "recurrence_range": "thisandfuture",
+                "recurrence_range": "this_and_future",
             },
             blocking=True,
         )
@@ -1206,3 +1208,362 @@ async def test_a_target_named_by_a_user_who_no_longer_exists_is_refused(
 
     with pytest.raises(UnknownUser):
         await _async_check_control(entity, call, "calendar.iven_work")
+
+
+@pytest.mark.parametrize(
+    ("field", "sent", "written"),
+    [
+        ("status", "tentative", "TENTATIVE"),
+        ("transparency", "transparent", "TRANSPARENT"),
+        ("classification", "confidential", "CONFIDENTIAL"),
+    ],
+)
+async def test_a_lowercase_option_reaches_the_write_path_as_its_rfc_name(
+    hass: HomeAssistant, field: str, sent: str, written: str
+) -> None:
+    """hassfest holds a selector's option keys to [a-z0-9-_]+, so the picker
+    cannot offer OPAQUE or THISANDFUTURE as the value itself. What the schema
+    takes and what RFC 5545 wants stored are therefore two spellings of one
+    thing, and only the second may reach the object."""
+    await _setup(hass)
+
+    with patch("custom_components.ha_caldav.calendar.create_event") as create:
+        await hass.services.async_call(
+            DOMAIN,
+            "create_event",
+            {
+                "entity_id": "calendar.iven_personal",
+                "summary": "Standup",
+                "start_date_time": "2026-07-06 09:00:00",
+                "end_date_time": "2026-07-06 10:00:00",
+                field: sent,
+            },
+            blocking=True,
+        )
+
+    assert create.call_args.args[1][field] == written
+
+
+async def test_the_rfc_spelling_is_still_accepted(hass: HomeAssistant) -> None:
+    # An automation written before the picker offered lowercase keeps working.
+    await _setup(hass)
+
+    with patch("custom_components.ha_caldav.calendar.create_event") as create:
+        await hass.services.async_call(
+            DOMAIN,
+            "create_event",
+            {
+                "entity_id": "calendar.iven_personal",
+                "summary": "Standup",
+                "start_date_time": "2026-07-06 09:00:00",
+                "end_date_time": "2026-07-06 10:00:00",
+                "status": "CONFIRMED",
+            },
+            blocking=True,
+        )
+
+    assert create.call_args.args[1]["status"] == "CONFIRMED"
+
+
+async def test_a_recurrence_range_without_an_occurrence_is_refused(
+    hass: HomeAssistant,
+) -> None:
+    """A range says where in the series to start, so on its own it has nothing
+    to start from. Accepted anyway it was dropped without a word, and a call
+    meaning "this occurrence and the ones after it" rewrote the whole series,
+    the past included."""
+    await _setup(hass)
+
+    with (
+        patch("custom_components.ha_caldav.calendar.update_event") as update,
+        pytest.raises(vol.Invalid),
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "update_event",
+            {
+                "entity_id": "calendar.iven_personal",
+                "uid": "uid-1",
+                "summary": "Renamed",
+                # The RFC spelling, which the schema took before this check
+                # existed: a lowercase one would be refused for its case alone
+                # and prove nothing about the missing occurrence.
+                "recurrence_range": "THISANDFUTURE",
+            },
+            blocking=True,
+        )
+
+    assert update.call_count == 0
+
+
+async def test_a_search_window_that_ends_before_it_starts_is_refused(
+    hass: HomeAssistant,
+) -> None:
+    """The server answers one with nothing, and an automation reads that as
+    "nothing matched" rather than as a window it asked for backwards."""
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    calendar.search.reset_mock()
+
+    with pytest.raises(ServiceValidationError) as refusal:
+        await hass.services.async_call(
+            DOMAIN,
+            "search_events",
+            {
+                "entity_id": "calendar.iven_personal",
+                "text": "dent",
+                "start": "2026-07-07 00:00:00",
+                "end": "2026-07-06 00:00:00",
+            },
+            blocking=True,
+            return_response=True,
+        )
+
+    assert refusal.value.translation_key == "end_before_start"
+    calendar.search.assert_not_called()
+
+
+async def test_a_free_busy_window_that_ends_before_it_starts_is_refused(
+    hass: HomeAssistant,
+) -> None:
+    """Nothing back from a free/busy report reads as "the whole window is
+    free", which is what an automation books a meeting on top of."""
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+
+    with pytest.raises(ServiceValidationError) as refusal:
+        await hass.services.async_call(
+            DOMAIN,
+            "get_free_busy",
+            {
+                "entity_id": "calendar.iven_personal",
+                "start": "2026-07-07 00:00:00",
+                "end": "2026-07-06 00:00:00",
+            },
+            blocking=True,
+            return_response=True,
+        )
+
+    assert refusal.value.translation_key == "end_before_start"
+    calendar.freebusy_request.assert_not_called()
+
+
+async def test_an_event_created_with_attendees_names_the_account_as_organizer(
+    hass: HomeAssistant,
+) -> None:
+    """RFC 5546 3 requires it, and sabre/dav answers 500 on deleting an object
+    that lists attendees without one: the event becomes impossible to remove."""
+    calendar = _calendar("Personal")
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        principal = client.return_value.principal.return_value
+        principal.calendars.return_value = [calendar]
+        principal.calendar_user_address_set.return_value = [
+            "mailto:iven@example.com",
+            "/remote.php/dav/principals/users/iven/",
+        ]
+        entry = MockConfigEntry(
+            domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x"
+        )
+        entry.add_to_hass(hass)
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        DOMAIN,
+        "create_event",
+        {
+            "entity_id": "calendar.iven_personal",
+            "summary": "Review",
+            "start_date_time": "2026-07-06 09:00:00",
+            "end_date_time": "2026-07-06 10:00:00",
+            "attendees": ["bob@example.com"],
+        },
+        blocking=True,
+    )
+
+    body = calendar.save_event.call_args.args[0].to_ical().decode("utf-8")
+    assert "ORGANIZER:mailto:iven@example.com" in body
+    assert "ATTENDEE" in body
+
+
+async def test_a_search_hit_the_read_path_cannot_place_is_left_out(
+    hass: HomeAssistant,
+) -> None:
+    """A server matches on the resource, not on the component, so a text search
+    comes back with the to-do sharing a uid with an event as well. Passed on,
+    the answer would carry an entry with no start, no end and no summary."""
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    todo_only = Mock()
+    todo_only.vobject_instance = vobject.readOne(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n"
+        "BEGIN:VTODO\r\nUID:uid-2\r\nDTSTAMP:20260101T000000Z\r\n"
+        "SUMMARY:Slides\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+    calendar.search.return_value = [todo_only, _search_item("Dentist")]
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "search_events",
+        {"entity_id": "calendar.iven_personal", "text": "dent"},
+        blocking=True,
+        return_response=True,
+    )
+
+    events = result["calendar.iven_personal"]["events"]
+    assert [event["summary"] for event in events] == ["Dentist"]
+
+
+async def test_free_busy_periods_written_on_one_line_are_all_reported(
+    hass: HomeAssistant,
+) -> None:
+    """RFC 5545 3.8.2.6 lets one FREEBUSY line carry several periods, comma
+    separated, and icalendar hands the line back as a list of them where a
+    single period comes back bare. Read as one, a server that writes its whole
+    day on one line would report a single busy slot and an automation would
+    book a meeting into the rest of it."""
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    calendar.freebusy_request.return_value = Mock(
+        icalendar_instance=icalendar.Calendar.from_ical(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n"
+            "BEGIN:VFREEBUSY\r\nDTSTART:20260706T000000Z\r\nDTEND:20260707T000000Z\r\n"
+            "FREEBUSY:20260706T090000Z/20260706T100000Z,20260706T140000Z/PT1H\r\n"
+            "END:VFREEBUSY\r\nEND:VCALENDAR\r\n"
+        )
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "get_free_busy",
+        {
+            "entity_id": "calendar.iven_personal",
+            "start": "2026-07-06 00:00:00",
+            "end": "2026-07-07 00:00:00",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    periods = result["calendar.iven_personal"]["periods"]
+    assert [period["end"] for period in periods] == [
+        "2026-07-06T10:00:00+00:00",
+        "2026-07-06T15:00:00+00:00",
+    ]
+
+
+async def test_an_update_carries_the_window_it_was_given(hass: HomeAssistant) -> None:
+    """The service names its start and end in fields of its own, and an update
+    may set either, both or neither."""
+    entry = await _setup(hass)
+
+    with (
+        patch.object(_managed(entry, "Personal").coordinator, "async_request_refresh"),
+        patch("custom_components.ha_caldav.calendar.update_event") as write,
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "update_event",
+            {
+                "entity_id": "calendar.iven_personal",
+                "uid": "uid-1",
+                "start_date_time": "2026-07-06 11:00:00",
+                "end_date_time": "2026-07-06 12:00:00",
+            },
+            blocking=True,
+        )
+
+    data = write.call_args.args[2]
+    assert data["dtstart"] == dt_util.as_local(
+        dt_util.parse_datetime("2026-07-06 11:00:00")
+    )
+    assert data["dtend"] == dt_util.as_local(
+        dt_util.parse_datetime("2026-07-06 12:00:00")
+    )
+
+
+async def test_moving_an_event_onto_its_own_calendar_is_refused(
+    hass: HomeAssistant,
+) -> None:
+    """Nothing to do, and the write path would put the copy where the original
+    is and then delete it."""
+    await _setup(hass)
+
+    with pytest.raises(ServiceValidationError) as refusal:
+        await hass.services.async_call(
+            DOMAIN,
+            "move_event",
+            {
+                "entity_id": "calendar.iven_personal",
+                "uid": "uid-1",
+                "target_entity_id": "calendar.iven_personal",
+            },
+            blocking=True,
+        )
+
+    assert refusal.value.translation_key == "same_calendar"
+
+
+async def test_moving_into_an_account_that_is_not_loaded_is_refused(
+    hass: HomeAssistant,
+) -> None:
+    """Its calendars are not in reach, so there is nothing to write onto."""
+    await _setup(hass)
+    asleep = MockConfigEntry(
+        domain=DOMAIN,
+        title="work",
+        data={**ENTRY_DATA, CONF_URL: "https://nc.work.example/remote.php/dav"},
+        unique_id="y",
+    )
+    asleep.add_to_hass(hass)
+    er.async_get(hass).async_get_or_create(
+        "calendar",
+        DOMAIN,
+        f"{asleep.entry_id}-/remote.php/dav/Personal",
+        suggested_object_id="work_personal",
+        config_entry=asleep,
+    )
+    assert asleep.state is not ConfigEntryState.LOADED
+
+    with pytest.raises(ServiceValidationError) as refusal:
+        await hass.services.async_call(
+            DOMAIN,
+            "move_event",
+            {
+                "entity_id": "calendar.iven_personal",
+                "uid": "uid-1",
+                "target_entity_id": "calendar.work_personal",
+            },
+            blocking=True,
+        )
+
+    assert refusal.value.translation_key == "unknown_target"
+
+
+async def test_moving_onto_a_calendar_the_account_no_longer_holds_is_refused(
+    hass: HomeAssistant,
+) -> None:
+    """A registry entry outlives the calendar it was made for: one deleted on
+    the server, or taken out of the selection, leaves its entity behind."""
+    entry = await _setup(hass)
+    er.async_get(hass).async_get_or_create(
+        "calendar",
+        DOMAIN,
+        f"{entry.entry_id}-/remote.php/dav/Gone",
+        suggested_object_id="iven_gone",
+        config_entry=entry,
+    )
+
+    with pytest.raises(ServiceValidationError) as refusal:
+        await hass.services.async_call(
+            DOMAIN,
+            "move_event",
+            {
+                "entity_id": "calendar.iven_personal",
+                "uid": "uid-1",
+                "target_entity_id": "calendar.iven_gone",
+            },
+            blocking=True,
+        )
+
+    assert refusal.value.translation_key == "unknown_target"

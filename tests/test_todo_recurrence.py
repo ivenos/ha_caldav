@@ -17,12 +17,21 @@ def _vtodo(body: str) -> str:
 
 class FakeTodo:
     def __init__(self, ics: str) -> None:
+        self.data = ics
         self._cal = ICalendar.from_ical(ics)
         self.saved = False
 
     @property
     def icalendar_instance(self):
         return self._cal
+
+    @icalendar_instance.setter
+    def icalendar_instance(self, value) -> None:
+        # caldav keeps the document handed to it and serializes it only on the
+        # way out. Writes go through here rather than through data because a
+        # string is put through vcal.fix, which rewrites the object.
+        self._cal = value
+        self.data = value.to_ical().decode("utf-8")
 
     @property
     def icalendar_component(self):
@@ -38,7 +47,17 @@ class FakeTodo:
         self.saved = True
 
     def stored(self):
-        return self.icalendar_component
+        """Return the to-do out of the document that would reach the server.
+
+        Off the wire rather than off the component still in memory: the write
+        path builds what it sends through zoned_document, and read from the
+        object it mutated, an assertion here would never see what that made.
+        """
+        return next(
+            item
+            for item in ICalendar.from_ical(self.data).walk()
+            if item.name == "VTODO"
+        )
 
 
 class FakeTodoCalendar:
@@ -244,3 +263,54 @@ def test_a_due_date_cannot_be_moved_in_front_of_the_start() -> None:
         )
 
     assert not calendar.todo.saved
+
+
+DOUBLED = (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//test//EN\r\n"
+    "BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260101T000000Z\r\nSUMMARY:Water plants\r\n"
+    "{}"
+    "END:VTODO\r\nEND:VCALENDAR\r\n"
+)
+
+
+def test_a_todo_written_with_two_rules_can_still_be_completed() -> None:
+    """RFC 2445 let some properties repeat and old clients still write them so.
+
+    icalendar hands a repeated property back as a list, which has no .get, so
+    the roll died on it: the item renamed and re-dated perfectly well and could
+    never be ticked off again, with the refusal reaching the user as a server
+    error that named neither the item nor the property.
+    """
+    calendar = FakeTodoCalendar(
+        DOUBLED.format(
+            "DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY\r\nRRULE:FREQ=DAILY\r\n"
+        )
+    )
+
+    update_todo(calendar, "t1", {"summary": "Water plants", "status": "COMPLETED"})
+
+    vtodo = calendar.todo.stored()
+    # The first of the two, as everything else that reduces one does.
+    assert str(vtodo["STATUS"]) == "NEEDS-ACTION"
+    assert vtodo["DUE"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+    assert not isinstance(vtodo["RRULE"], list)
+
+
+def test_a_todo_written_with_two_starts_can_still_be_dated() -> None:
+    """_check_todo_span reads DTSTART.dt, which a list does not have either."""
+    calendar = FakeTodoCalendar(
+        DOUBLED.format(
+            "DTSTART:20260706T090000Z\r\nDTSTART:20260707T090000Z\r\n"
+            "DUE:20260710T090000Z\r\n"
+        )
+    )
+
+    update_todo(
+        calendar,
+        "t1",
+        {"summary": "Water plants", "due": datetime(2026, 7, 11, 9, 0, tzinfo=UTC)},
+    )
+
+    vtodo = calendar.todo.stored()
+    assert vtodo["DTSTART"].dt == datetime(2026, 7, 6, 9, 0, tzinfo=UTC)
+    assert vtodo["DUE"].dt == datetime(2026, 7, 11, 9, 0, tzinfo=UTC)

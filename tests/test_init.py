@@ -690,3 +690,50 @@ async def test_the_migration_tells_the_two_halves_apart_by_platform(
     kept = f"{entry.entry_id}-/remote.php/dav/personal"
     assert registry.async_get(calendar.entity_id).unique_id == kept
     assert registry.async_get(todo.entity_id).unique_id == f"{kept}-todo"
+
+
+async def test_the_migration_leaves_a_key_that_is_not_ours_alone(
+    hass: HomeAssistant,
+) -> None:
+    """An entity registered under this entry need not be one of ours: a helper
+    or a template built on the account carries a key of its own shape, and
+    rebuilding one would point it at a calendar."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, data=ENTRY_DATA, unique_id="stale", minor_version=1
+    )
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    foreign = registry.async_get_or_create(
+        "calendar", DOMAIN, "something-else-entirely", config_entry=entry
+    )
+
+    assert await async_migrate_entry(hass, entry)
+
+    assert registry.async_get(foreign.entity_id).unique_id == "something-else-entirely"
+
+
+async def test_the_migration_keeps_a_duplicate_visible_rather_than_failing(
+    hass: HomeAssistant,
+) -> None:
+    """Two urls differing only in what the normalization drops land on one key.
+    Raising there would fail the whole setup for an account whose other
+    calendars are fine, and every entity on it would go with them."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, data=ENTRY_DATA, unique_id="stale", minor_version=1
+    )
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    url = "https://cloud.example.com/remote.php/dav/personal"
+    first = registry.async_get_or_create(
+        "calendar", DOMAIN, f"{entry.entry_id}-{url}", config_entry=entry
+    )
+    second = registry.async_get_or_create(
+        "calendar", DOMAIN, f"{entry.entry_id}-{url}/", config_entry=entry
+    )
+
+    assert await async_migrate_entry(hass, entry)
+
+    normalized = f"{entry.entry_id}-/remote.php/dav/personal"
+    assert registry.async_get(first.entity_id).unique_id == normalized
+    # Left where it was, and still in the registry for the user to see.
+    assert registry.async_get(second.entity_id).unique_id == f"{entry.entry_id}-{url}/"

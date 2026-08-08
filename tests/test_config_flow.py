@@ -17,6 +17,7 @@ from homeassistant.data_entry_flow import FlowResultType
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.ha_caldav.config_flow import _labelled
 from custom_components.ha_caldav.const import (
     CONF_CA_BUNDLE,
     CONF_CALENDAR_OPTIONS,
@@ -809,3 +810,139 @@ async def test_a_401_everywhere_is_still_reported_as_bad_credentials(
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_auth"}
+
+
+async def test_a_calendar_one_listing_left_out_stays_selected(
+    hass: HomeAssistant,
+) -> None:
+    """The form can only offer what one listing turned up, and what it does not
+    offer cannot be ticked. Stored as submitted, a calendar the server left out
+    of that listing reads as deselected on the next setup, and its entity goes
+    from the registry with its history and everything pointing at it."""
+    entry = await _setup_entry(
+        hass,
+        options={CONF_CALENDARS: ["/remote.php/dav/Personal", "/remote.php/dav/Work"]},
+    )
+    # The one bad minute: Work is missing from this listing only.
+    entry.runtime_data.client.principal.return_value.calendars.return_value = [
+        _dav_calendar("Personal")
+    ]
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "account"}
+    )
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.return_value.calendars.return_value = []
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_CALENDARS: ["/remote.php/dav/Personal"],
+                CONF_SCAN_INTERVAL: 30,
+                CONF_DAYS: 14,
+                CONF_INCLUDE_ALL_DAY: False,
+                CONF_READ_ONLY: False,
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert entry.options[CONF_CALENDARS] == [
+        "/remote.php/dav/Personal",
+        "/remote.php/dav/Work",
+    ]
+
+
+async def test_an_account_tracking_everything_is_not_frozen_by_a_visit(
+    hass: HomeAssistant,
+) -> None:
+    """An entry that never had a selection follows the server, and every box
+    being ticked is what that looks like in the form. Written down it freezes,
+    and a calendar made later is silently never loaded."""
+    entry = await _setup_entry(hass)
+    assert CONF_CALENDARS not in entry.options
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "account"}
+    )
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.return_value.calendars.return_value = []
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_CALENDARS: [
+                    "/remote.php/dav/Personal",
+                    "/remote.php/dav/Work",
+                ],
+                CONF_SCAN_INTERVAL: 30,
+                CONF_DAYS: 14,
+                CONF_INCLUDE_ALL_DAY: False,
+                CONF_READ_ONLY: False,
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert CONF_CALENDARS not in entry.options
+    assert entry.options[CONF_SCAN_INTERVAL] == 30
+
+
+async def test_every_probed_candidate_hands_its_connection_back(
+    hass: HomeAssistant,
+) -> None:
+    """One flow walks several bootstrap candidates, and each keeps a pooled
+    connection open until it is closed. Left to the garbage collector they pile
+    up for as long as the user keeps retrying the form."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+
+    with patch(
+        "custom_components.ha_caldav.config_flow.caldav.DAVClient"
+    ) as client_class:
+        client_class.return_value.principal.side_effect = requests.ConnectionError(
+            "refused"
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**USER_INPUT, CONF_URL: "https://cloud.example.com"}
+        )
+
+    assert result["errors"] == {"base": "cannot_connect"}
+    assert client_class.call_count > 1
+    assert client_class.return_value.close.call_count == client_class.call_count
+
+
+async def test_the_options_of_an_entry_that_never_loaded_still_open(
+    hass: HomeAssistant,
+) -> None:
+    """An account whose server was down at startup has no runtime data, and the
+    calendar list is read off it. Reaching for it there would leave the one
+    dialog the user needs to fix the settings raising on open."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="iven", data=USER_INPUT, options={}, unique_id="x"
+    )
+    entry.add_to_hass(hass)
+    assert not hasattr(entry, "runtime_data")
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert result["type"] is FlowResultType.FORM
+
+
+def test_two_calendars_whose_paths_nest_still_get_a_label_each() -> None:
+    """A label is the shortest tail of the path no other calendar shares, and a
+    path that is wholly the tail of another has none: every depth down to the
+    whole key still matches the longer one. Without the fallback the loop runs
+    out and the calendar comes back labelled with nothing to tell it apart."""
+    nested = Mock(name="a")
+    nested.name = "Personal"
+    nested.calendar.url = "https://cloud.example.com/personal"
+    outer = Mock(name="b")
+    outer.name = "Personal"
+    outer.calendar.url = "https://cloud.example.com/remote.php/dav/iven/personal"
+
+    labels = _labelled([nested, outer])
+
+    assert labels == {
+        "/personal": "Personal (/personal)",
+        "/remote.php/dav/iven/personal": "Personal (iven/personal)",
+    }

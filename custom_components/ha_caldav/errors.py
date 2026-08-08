@@ -63,7 +63,11 @@ def as_reported(err: Exception, action: str) -> HomeAssistantError:
             translation_key="refused",
             translation_placeholders={"reason": str(err)},
         )
-    _LOGGER.debug("CalDAV %s failed: %s", action, err)
+    # At error level, because the message this returns tells the user the log
+    # has the details and a write that failed is one they have to know about.
+    # The url the library prints belongs here rather than in what they are then
+    # asked to paste into an issue.
+    _LOGGER.error("CalDAV %s failed: %s", action, err)
     return HomeAssistantError(
         translation_domain=DOMAIN,
         translation_key="server_error",

@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from caldav.elements import dav
+from caldav.lib.error import DAVError
 from homeassistant.util import dt as dt_util
 from icalendar import Calendar as ICalendar
 import pytest
@@ -252,6 +253,40 @@ END:VEVENT
 END:VCALENDAR
 """
 
+# The extra and excluded dates straddle the cut, so both halves rebuild the
+# line from what they keep rather than carrying the stored one over.
+ALL_DAY_DATED_SERIES = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//EN
+BEGIN:VEVENT
+UID:allday-dated-1
+DTSTAMP:20260101T000000Z
+DTSTART;VALUE=DATE:20260706
+DTEND;VALUE=DATE:20260707
+RRULE:FREQ=WEEKLY
+RDATE;VALUE=DATE:20260709,20260723
+EXDATE;VALUE=DATE:20260713,20260727
+SUMMARY:Bins
+END:VEVENT
+END:VCALENDAR
+"""
+
+# RFC 2445 allowed a repeated UID and old clients still write one.
+DOUBLED_UID_SERIES = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//EN
+BEGIN:VEVENT
+UID:timed-1
+UID:timed-1-copy
+DTSTAMP:20260101T000000Z
+DTSTART:20260706T090000Z
+DTEND:20260706T100000Z
+RRULE:FREQ=WEEKLY
+SUMMARY:Standup
+END:VEVENT
+END:VCALENDAR
+"""
+
 # Berlin leaves CEST on 2026-10-25. The RDATE is in UTC while DTSTART carries a
 # TZID, which is what makes a wall-clock shift differ from an absolute one.
 DST_SERIES = """BEGIN:VCALENDAR
@@ -278,7 +313,11 @@ class FakeEvent:
     """Stand-in for a caldav.Event backed by a real icalendar object."""
 
     def __init__(
-        self, ics: str, save_error: Exception | None = None, etag: str | None = None
+        self,
+        ics: str,
+        save_error: Exception | None = None,
+        etag: str | None = None,
+        server_ics: str | None = None,
     ) -> None:
         self.data = ics
         self.saved = False
@@ -286,14 +325,29 @@ class FakeEvent:
         self.deleted = False
         self.props: dict = {}
         self._save_error = save_error
+        self._delete_error: Exception | None = None
         self._etag = etag
         self._instance = ICalendar.from_ical(ics)
+        # What a fresh GET answers with, which need not be what the poll read.
+        self._server_ics = ics if server_ics is None else server_ics
 
     @property
     def icalendar_instance(self) -> ICalendar:
         return self._instance
 
+    @icalendar_instance.setter
+    def icalendar_instance(self, value: ICalendar) -> None:
+        # caldav keeps the document handed to it and serializes it only on the
+        # way out. Writes go through here rather than through data because a
+        # string is put through vcal.fix, which rewrites the object.
+        self._instance = value
+        self.data = value.to_ical().decode("utf-8")
+
     def load(self) -> None:
+        # caldav replaces the document before it records the etag. A fake that
+        # only set props hid which copy the code around the check writes back.
+        self.data = self._server_ics
+        self._instance = ICalendar.from_ical(self.data)
         if self._etag is not None:
             self.props = {dav.GetEtag.tag: self._etag}
 
@@ -315,6 +369,8 @@ class FakeEvent:
             raise self._save_error
 
     def delete(self) -> None:
+        if self._delete_error is not None:
+            raise self._delete_error
         self.deleted = True
 
     def stored(self) -> ICalendar:
@@ -332,11 +388,14 @@ class FakeCalendar:
         refetch_ics: str | None = None,
         etag: str | None = None,
         refetch_error: Exception | None = None,
+        server_ics: str | None = None,
+        created_delete_error: Exception | None = None,
     ) -> None:
-        self.event = FakeEvent(ics, save_error, etag)
+        self.event = FakeEvent(ics, save_error, etag, server_ics)
         self.created: list[FakeEvent] = []
         self._refetch_ics = refetch_ics
         self._refetch_error = refetch_error
+        self._created_delete_error = created_delete_error
         self._fetches = 0
 
     def event_by_uid(self, uid: str) -> FakeEvent:
@@ -355,8 +414,11 @@ class FakeCalendar:
             raise self._refetch_error
         return [self.event]
 
-    def save_event(self, ics: str) -> FakeEvent:
-        created = FakeEvent(ics)
+    def save_event(self, document: ICalendar) -> FakeEvent:
+        # caldav takes the document and serializes it itself; handed a string
+        # it would put it through vcal.fix first.
+        created = FakeEvent(document.to_ical().decode("utf-8"))
+        created._delete_error = self._created_delete_error
         self.created.append(created)
         return created
 
@@ -2069,6 +2131,44 @@ def test_a_series_edit_moves_its_version_on_by_one() -> None:
     assert int(_master(calendar.event.stored())["SEQUENCE"]) == 1
 
 
+TODO_AHEAD_OF_EVENT = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//EN
+BEGIN:VTODO
+UID:mixed-1
+DTSTAMP:20260101T000000Z
+SUMMARY:File the contract
+SEQUENCE:5
+END:VTODO
+BEGIN:VEVENT
+UID:mixed-1
+DTSTAMP:20260101T000000Z
+DTSTART:20260706T090000Z
+DTEND:20260706T100000Z
+SUMMARY:Contract review
+SEQUENCE:2
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def test_an_edit_moves_the_version_of_the_component_it_touched() -> None:
+    """caldav bumps the first component that is not a timezone, not the first
+    VEVENT, and RFC 4791 does not stop a VTODO from sitting ahead of one under
+    the same uid. Held on the VEVENT, the untouched task went out announcing a
+    revision nobody made, while the edit itself announced none and every
+    attendee client was entitled to drop it as stale."""
+    calendar = FakeCalendar(TODO_AHEAD_OF_EVENT)
+
+    update_event(calendar, "mixed-1", {"summary": "Renamed"})
+
+    stored = calendar.event.stored()
+    vevent = next(item for item in stored.walk("VEVENT"))
+    vtodo = next(item for item in stored.walk("VTODO"))
+    assert int(vevent["SEQUENCE"]) == 3
+    assert int(vtodo["SEQUENCE"]) == 5
+
+
 TAIL_OVERRIDE_SERIES = """BEGIN:VCALENDAR
 VERSION:2.0
 PRODID:-//test//test//EN
@@ -2248,8 +2348,11 @@ END:VCALENDAR
 """
 
 
-def test_an_until_without_a_zone_is_read_in_local_time(berlin) -> None:
-    """08:00 local is 06:00Z, so the 09:00 occurrence is past the end."""
+def test_an_until_without_a_zone_is_read_in_utc(berlin) -> None:
+    """RFC 5545 3.3.10 gives a zoned start a UTC UNTIL, and the expansion the
+    panel is filled from reads one written without a zone that way. 08:00Z is
+    past the 07:00Z occurrence, so it is the last of the series and splitting
+    there has a tail to write."""
     calendar = FakeCalendar(ZONED_FLOATING_UNTIL)
 
     update_event(
@@ -2260,23 +2363,25 @@ def test_an_until_without_a_zone_is_read_in_local_time(berlin) -> None:
         this_and_future=True,
     )
 
-    assert calendar.created == []
-    assert not calendar.event.saved
+    assert str(_master(calendar.created[0].stored())["SUMMARY"]) == "Onwards"
 
 
-def test_an_occurrence_past_a_floating_until_is_not_in_the_series(berlin) -> None:
-    """The rule expansion has to read that UNTIL the same way the checks do."""
+def test_an_occurrence_before_a_floating_until_stays_editable(berlin) -> None:
+    """The rule expansion has to read that UNTIL the same way the checks do,
+    or the panel lists an occurrence every edit refuses as not being there."""
     calendar = FakeCalendar(ZONED_FLOATING_UNTIL)
 
-    with pytest.raises(Refused) as refusal:
-        update_event(
-            calendar,
-            "until-1",
-            {"summary": "Renamed"},
-            recurrence_id="2026-07-20T09:00:00+02:00",
-        )
+    update_event(
+        calendar,
+        "until-1",
+        {"summary": "Renamed"},
+        recurrence_id="2026-07-20T09:00:00+02:00",
+    )
 
-    assert refusal.value.key == "occurrence_not_found"
+    override = next(
+        v for v in calendar.event.stored().walk("VEVENT") if "RECURRENCE-ID" in v
+    )
+    assert str(override["SUMMARY"]) == "Renamed"
 
 
 def test_a_split_tail_puts_the_master_before_the_exceptions_it_carries() -> None:
@@ -2973,3 +3078,329 @@ def test_stripping_the_zone_off_a_local_time_stays_an_exact_inverse(
     walled = dt_util.as_local(instant).replace(tzinfo=None)
 
     assert to_utc(walled) == instant
+
+
+ALL_DAY_WITH_EXTRAS = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//EN
+BEGIN:VEVENT
+UID:allday-2
+DTSTAMP:20260101T000000Z
+DTSTART;VALUE=DATE:20260706
+DTEND;VALUE=DATE:20260707
+RRULE:FREQ=WEEKLY
+EXDATE;VALUE=DATE:20260720
+SUMMARY:Water plants
+END:VEVENT
+BEGIN:VEVENT
+UID:allday-2
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID;VALUE=DATE:20260713
+DTSTART;VALUE=DATE:20260713
+DTEND;VALUE=DATE:20260714
+SUMMARY:Water the big one
+END:VEVENT
+END:VCALENDAR
+"""
+
+TIMED_WITH_EXTRAS = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//EN
+BEGIN:VEVENT
+UID:timed-2
+DTSTAMP:20260101T000000Z
+DTSTART:20260706T090000Z
+DTEND:20260706T100000Z
+RRULE:FREQ=WEEKLY
+RDATE:20260709T090000Z
+EXDATE:20260720T090000Z
+SUMMARY:Standup
+END:VEVENT
+BEGIN:VEVENT
+UID:timed-2
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID:20260713T090000Z
+DTSTART:20260713T110000Z
+DTEND:20260713T120000Z
+SUMMARY:Moved one
+END:VEVENT
+END:VCALENDAR
+"""
+
+ORPHANS_LATE_FIRST = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//EN
+BEGIN:VEVENT
+UID:orphan-2
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID:20260727T090000Z
+DTSTART:20260727T110000Z
+DTEND:20260727T120000Z
+SUMMARY:Third
+END:VEVENT
+BEGIN:VEVENT
+UID:orphan-2
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID:20260713T090000Z
+DTSTART:20260713T110000Z
+DTEND:20260713T120000Z
+SUMMARY:First
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def test_moving_an_all_day_series_shifts_its_dates_by_the_days_asked_for(
+    berlin,
+) -> None:
+    """The old start read as an instant is the day before in every zone east of
+    UTC, and the delta taken from that moved every exception a day too far."""
+    calendar = FakeCalendar(ALL_DAY_WITH_EXTRAS)
+
+    update_event(
+        calendar,
+        "allday-2",
+        {"dtstart": date(2026, 7, 13), "dtend": date(2026, 7, 14)},
+    )
+
+    stored = calendar.event.stored()
+    master = _master(stored)
+    override = next(v for v in stored.walk("VEVENT") if "RECURRENCE-ID" in v)
+    assert master["DTSTART"].dt == date(2026, 7, 13)
+    assert master["EXDATE"].dts[0].dt == date(2026, 7, 27)
+    assert override["RECURRENCE-ID"].dt == date(2026, 7, 20)
+
+
+def test_this_and_future_at_the_first_occurrence_keeps_what_the_series_carries(
+    berlin,
+) -> None:
+    """That range covers every occurrence there is, so it is the whole-series
+    edit under another name. Its own path dropped every exception and every
+    extra and cancelled date, which no other path over the same range does."""
+    calendar = FakeCalendar(TIMED_WITH_EXTRAS)
+
+    update_event(
+        calendar,
+        "timed-2",
+        {"summary": "Renamed"},
+        recurrence_id="2026-07-06 09:00:00+00:00",
+        this_and_future=True,
+    )
+
+    stored = calendar.event.stored()
+    master = _master(stored)
+    assert str(master["SUMMARY"]) == "Renamed"
+    assert master["RDATE"].dts[0].dt == datetime(2026, 7, 9, 9, 0, tzinfo=UTC)
+    assert master["EXDATE"].dts[0].dt == datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
+    assert [v for v in stored.walk("VEVENT") if "RECURRENCE-ID" in v]
+
+
+def test_this_and_future_at_the_first_occurrence_moves_the_dates_with_it() -> None:
+    """A start moved over that range has to carry them, not clear them."""
+    calendar = FakeCalendar(TIMED_WITH_EXTRAS)
+
+    update_event(
+        calendar,
+        "timed-2",
+        {
+            "dtstart": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 11, 0, tzinfo=UTC),
+        },
+        recurrence_id="2026-07-06 09:00:00+00:00",
+        this_and_future=True,
+    )
+
+    master = _master(calendar.event.stored())
+    assert master["RDATE"].dts[0].dt == datetime(2026, 7, 9, 10, 0, tzinfo=UTC)
+    assert master["EXDATE"].dts[0].dt == datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_deleting_from_an_occurrence_onwards_needs_a_series_head(swapped) -> None:
+    """_master falls back to whichever detached instance the server listed
+    first. Read as the series start, an instance after the cut took the whole
+    resource down with it, the instances before the cut included."""
+    lines = ORPHANS_LATE_FIRST.splitlines(keepends=True)
+    body = (
+        "".join(lines[:3] + lines[11:19] + lines[3:11] + lines[19:])
+        if swapped
+        else ORPHANS_LATE_FIRST
+    )
+    calendar = FakeCalendar(body)
+
+    with pytest.raises(Refused) as refusal:
+        delete_event(
+            calendar,
+            "orphan-2",
+            recurrence_id="2026-07-20 09:00:00+00:00",
+            this_and_future=True,
+        )
+
+    assert refusal.value.key == "not_recurring"
+    assert not calendar.event.deleted
+
+
+def test_a_saved_edit_carries_a_fresh_dtstamp() -> None:
+    """RFC 5545 3.8.7.2: with no METHOD on the object, DTSTAMP is when the
+    information was last revised, so it cannot stay on the previous client's."""
+    calendar = FakeCalendar(TIMED_SERIES)
+
+    update_event(calendar, "timed-1", {"summary": "Renamed"})
+
+    master = _master(calendar.event.stored())
+    assert master["DTSTAMP"].dt > datetime(2026, 1, 1, tzinfo=UTC)
+    assert master["DTSTAMP"].dt == master["LAST-MODIFIED"].dt
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "FREQ=DAILY;INTERVAL=0",
+        "FREQ=DAILY;BYMONTHDAY=99",
+        "FREQ=MONTHLY;BYMONTHDAY=30;BYMONTH=2",
+    ],
+)
+def test_a_rule_nothing_can_expand_is_refused_before_it_is_stored(rule) -> None:
+    """Stored, it is unreachable: the poll that would have to read it back is
+    the one that never returns, and setup waits on that poll."""
+    calendar = FakeCalendar(TIMED_SERIES)
+
+    with pytest.raises(Refused) as refusal:
+        update_event(calendar, "timed-1", {"rrule": rule})
+
+    assert refusal.value.key == "invalid_rrule"
+    assert not calendar.event.saved
+
+
+@pytest.mark.parametrize(
+    ("half", "kept"),
+    [("head", "20260709"), ("tail", "20260723")],
+)
+def test_a_split_keeps_the_parameters_of_the_dates_it_rebuilds(half, kept) -> None:
+    """VALUE=DATE and TZID live in those parameters. Dropped, an all-day extra
+    occurrence becomes a floating midnight and a zoned one a different instant
+    — the very thing filtering the values one line at a time exists to avoid."""
+    calendar = FakeCalendar(ALL_DAY_DATED_SERIES)
+
+    update_event(
+        calendar,
+        "allday-dated-1",
+        {"summary": "Bins moved"},
+        recurrence_id="2026-07-20",
+        this_and_future=True,
+    )
+
+    body = calendar.event.data if half == "head" else calendar.created[0].data
+    assert f"RDATE;VALUE=DATE:{kept}" in body
+    assert "\r\nRDATE:" not in body
+
+
+def test_moving_a_dated_series_keeps_the_parameters_of_the_shifted_dates() -> None:
+    calendar = FakeCalendar(ALL_DAY_DATED_SERIES)
+
+    update_event(
+        calendar,
+        "allday-dated-1",
+        {"dtstart": date(2026, 7, 7), "dtend": date(2026, 7, 8)},
+    )
+
+    body = calendar.event.data
+    assert "RDATE;VALUE=DATE:20260710,20260724" in body
+    assert "EXDATE;VALUE=DATE:20260714,20260728" in body
+
+
+def test_moving_a_zoned_series_keeps_it_anchored_to_its_own_zone() -> None:
+    """Re-anchored to UTC the series looks right until Berlin leaves CEST, and
+    then every occurrence after that is an hour out."""
+    calendar = FakeCalendar(TZID_SERIES)
+
+    update_event(
+        calendar,
+        "tz-1",
+        {
+            "dtstart": datetime(2026, 7, 6, 11, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 12, 0, tzinfo=UTC),
+        },
+    )
+
+    assert "DTSTART;TZID=Europe/Berlin:20260706T130000" in calendar.event.data
+
+
+def test_a_split_of_an_object_with_a_repeated_uid_names_the_tail_once() -> None:
+    """icalendar hands a repeated property back as a list, and the derived uid
+    built out of one is a resource nothing can find again — while the retry the
+    derived shape exists for writes a second."""
+    calendar = FakeCalendar(DOUBLED_UID_SERIES)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"summary": "Standup moved"},
+        recurrence_id=SECOND_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    tail = _only_vevent(calendar.created[0].data)
+    assert str(tail["UID"]) == "timed-1-20260713T090000Z"
+
+
+def test_an_empty_rule_removes_the_recurrence() -> None:
+    """Otherwise a series is a one-way door: expand strips RRULE from what the
+    frontend echoes back, so nothing else can ever ask for it to go."""
+    calendar = FakeCalendar(TIMED_SERIES)
+
+    update_event(calendar, "timed-1", {"summary": "Once", "rrule": ""})
+
+    assert "RRULE" not in _master(calendar.event.stored())
+
+
+def test_a_repeated_occurrence_delete_adds_one_exdate() -> None:
+    """Home Assistant retries a failed delete, and a second line for the same
+    slot accumulates on every attempt."""
+    calendar = FakeCalendar(TIMED_SERIES)
+    delete_event(calendar, "timed-1", recurrence_id=SECOND_OCCURRENCE)
+    again = FakeCalendar(calendar.event.data)
+
+    delete_event(again, "timed-1", recurrence_id=SECOND_OCCURRENCE)
+
+    assert again.event.data.count("EXDATE") == 1
+
+
+def test_the_conflict_check_reads_the_document_the_write_is_built_on() -> None:
+    """caldav's load() replaces the document before it records the etag. Parsed
+    first and checked after, the write goes out built on the copy the poll read,
+    and whatever the check just fetched is silently reverted."""
+    fresh = DETAILED_SERIES.replace("LOCATION:Room 1", "LOCATION:Room 5")
+    calendar = FakeCalendar(DETAILED_SERIES, etag='"unchanged"', server_ics=fresh)
+
+    update_event(
+        calendar, "detailed-1", {"summary": "Renamed"}, expected_etag='"unchanged"'
+    )
+
+    assert "LOCATION:Room 5" in calendar.event.data
+
+
+def test_a_split_that_cannot_take_its_tail_back_still_reports_the_real_failure(
+    caplog,
+) -> None:
+    """Replacing the failed update with the failed cleanup would leave the user
+    chasing the wrong error, and hide that a duplicate series is now on the
+    server."""
+    calendar = FakeCalendar(
+        TIMED_SERIES,
+        save_error=DAVError("head write refused"),
+        # The head comes back uncapped, so the tail is one to take away again.
+        refetch_ics=TIMED_SERIES,
+        created_delete_error=DAVError("and the tail will not go either"),
+    )
+
+    with pytest.raises(DAVError, match="head write refused"):
+        update_event(
+            calendar,
+            "timed-1",
+            {"summary": "From here on"},
+            recurrence_id=SECOND_OCCURRENCE,
+            this_and_future=True,
+        )
+
+    assert "duplicate events" in caplog.text

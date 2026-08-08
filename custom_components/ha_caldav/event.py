@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from datetime import UTC, date, datetime, time, timedelta
+import re
 from typing import Any
 
 from dateutil.rrule import rrulestr
@@ -69,6 +70,20 @@ _BY_RANGES = {
 }
 
 
+def check_rule(recur: Any, dtstart: datetime | date) -> None:
+    """Refuse a rule before it is stored rather than after.
+
+    rule_from's guards only run where something reads a rule back, and by then
+    the object is on the server: the poll that would have to load it is the one
+    that never returns, so the event cannot be deleted from Home Assistant
+    either. A rule that produces nothing at all is refused with them, because
+    dateutil looks for its first occurrence as far as the year 9999 and pays
+    that on every poll, for a series no client will ever show.
+    """
+    if next(iter(rule_from(recur, dtstart)), None) is None:
+        raise Refused("invalid_rrule", reason=recur.to_ical().decode("utf-8"))
+
+
 def _check_ranges(recur: Any) -> None:
     """Refuse a rule whose BY parts name something no calendar has.
 
@@ -116,7 +131,12 @@ def until_frame(dtstart: datetime | date, until: datetime | date) -> datetime | 
     if not isinstance(until, datetime):
         return until
     if isinstance(dtstart, datetime) and dtstart.tzinfo is not None:
-        return to_utc(until)
+        # RFC 5545 3.3.10 has a zoned start take its UNTIL in UTC, and that is
+        # how the expansion behind the read path resolves one written without a
+        # zone anyway. Read in Home Assistant's zone instead, the series ended
+        # on a different occurrence on every installation, and the panel listed
+        # one that every edit and delete then refused as not being there.
+        return until.replace(tzinfo=UTC) if until.tzinfo is None else to_utc(until)
     if until.tzinfo is None:
         return until
     if isinstance(dtstart, datetime):
@@ -204,17 +224,38 @@ def _categories(vevent: Any) -> list[str]:
     return [str(item).strip() for item in found if str(item).strip()]
 
 
+# RFC 6868. A ^ in front of anything but these is not an escape, and both
+# characters stand.
+_PARAM_ESCAPES = {"^^": "^", "^n": "\n", "^'": '"'}
+_PARAM_ESCAPE = re.compile(r"\^[\^n']")
+
+
+def _param(params: dict[str, Any], name: str) -> str | None:
+    """Return the first value of a vobject parameter, RFC 6868 decoded.
+
+    Reading is vobject and writing is icalendar, and only one of the pair
+    implements the escaping: an attendee named with a quote in it reached the
+    dashboard as ^', and every edit that wrote the name back escaped the ^ of
+    the last one again, so the name grew on each one.
+    """
+    values = params.get(name)
+    if not values:
+        return None
+    text = str(values[0])
+    return _PARAM_ESCAPE.sub(lambda found: _PARAM_ESCAPES[found.group()], text)
+
+
 def _read_attendees(vevent: Any) -> list[dict[str, Any]]:
     attendees = []
     for holder in getattr(vevent, "attendee_list", []) or []:
         params = getattr(holder, "params", {}) or {}
         entry: dict[str, Any] = {"email": strip_scheme(str(holder.value))}
-        if names := params.get("CN"):
-            entry["name"] = names[0]
-        if statuses := params.get("PARTSTAT"):
-            entry["status"] = statuses[0]
-        if roles := params.get("ROLE"):
-            entry["role"] = roles[0]
+        if name := _param(params, "CN"):
+            entry["name"] = name
+        if status := _param(params, "PARTSTAT"):
+            entry["status"] = status
+        if role := _param(params, "ROLE"):
+            entry["role"] = role
         attendees.append(entry)
     return attendees
 
@@ -235,8 +276,8 @@ def _read_alarms(vevent: Any) -> list[dict[str, Any]]:
         alarm: dict[str, Any] = {
             "minutes_before": -int(trigger.value.total_seconds() // 60)
         }
-        related = (getattr(trigger, "params", {}) or {}).get("RELATED")
-        if related and str(related[0]).upper() == "END":
+        related = _param(getattr(trigger, "params", {}) or {}, "RELATED")
+        if related and related.upper() == "END":
             # Written back as-is; reporting it as an offset from the start
             # would move the alarm by the length of the event.
             alarm["related"] = "END"
@@ -375,8 +416,9 @@ def _set_attendees(component: Any, attendees: list[Any]) -> None:
         del component["ATTENDEE"]
     for attendee in attendees:
         spec = {"email": attendee} if isinstance(attendee, str) else dict(attendee)
-        kept = held.get(comparable_address(spec["email"]))
-        address = kept or vCalAddress(_mailto(spec["email"]))
+        email = _one_line(spec["email"])
+        kept = held.get(comparable_address(email))
+        address = kept or vCalAddress(_mailto(email))
         _set_param(address, "CN", spec.get("name"), None)
         _set_param(address, "ROLE", spec.get("role"), "REQ-PARTICIPANT")
         _set_param(address, "PARTSTAT", spec.get("status"), "NEEDS-ACTION")
@@ -438,8 +480,13 @@ def _is_relative(valarm: Any) -> bool:
 
 
 def _mailto(address: str) -> str:
-    # A CAL-ADDRESS is a URI; anything already carrying a scheme is left alone.
-    return address if ":" in address else f"{_MAILTO}{address}"
+    # A CAL-ADDRESS is a URI; anything already carrying a scheme is left alone,
+    # and so is a path. RFC 6638 lets the address set name a principal by its
+    # url, which is what sabre/dav and Nextcloud return for an account with no
+    # mail address on it, and mailto: in front of one addresses nobody.
+    if ":" in address or address.startswith("/"):
+        return address
+    return f"{_MAILTO}{address}" if "@" in address else address
 
 
 def replace(component: Any, key: str, value: Any) -> None:

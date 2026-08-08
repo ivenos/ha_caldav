@@ -25,8 +25,10 @@ from .errors import Refused
 from .event import (
     apply_extras,
     as_datetime,
+    check_rule,
     comparable_address,
     hold_sequence,
+    replace,
     rule_from,
     to_utc,
 )
@@ -111,7 +113,11 @@ def _scan(calendar: caldav.Calendar, todo: bool | None) -> Iterator[tuple[Any, s
             yield item, _raw_uid(item)
             continue
         if component is not None:
-            yield item, str(component.get("UID", ""))
+            # One value of a uid an RFC 2445-era client wrote twice. The list
+            # icalendar hands back for that stringifies to its own repr, which
+            # matches no uid at all, so the clash check reported the collection
+            # empty of it and an import overwrote the stored object.
+            yield item, str(_first(component.get("UID", "")))
 
 
 _UID_LINE = re.compile(r"^UID:(.*)$", re.MULTILINE)
@@ -152,6 +158,8 @@ def create_event(
     extras = {key: value for key, value in data.items() if key in EXTRA_KEYS}
     instance = ICalCalendar.from_ical(vcal.create_ical(objtype="VEVENT", **core))
     vevent = next(iter(instance.walk("VEVENT")))
+    if (recur := vevent.get("RRULE")) is not None:
+        check_rule(recur, vevent["DTSTART"].dt)
     if extras:
         apply_extras(vevent, extras, own_address)
     calendar.save_event(_zoned(instance, vevent))
@@ -170,13 +178,16 @@ def create_todo(calendar: caldav.Calendar, data: dict[str, Any]) -> None:
     calendar.save_todo(_zoned(instance, vtodo))
 
 
-def _zoned(instance: ICalCalendar, component: Any) -> str:
+def _zoned(instance: ICalCalendar, component: Any) -> ICalCalendar:
     """Return the document with a definition for every TZID it references.
 
     The library writes the reference and leaves the definition out, which
     RFC 5545 does not allow and strict parsers reject.
+
+    The document itself, not its text: caldav puts a string handed to it
+    through :func:`caldav.lib.vcal.fix`, which rewrites the object.
     """
-    return _document([component], {}, instance.get("PRODID")).to_ical().decode("utf-8")
+    return _document([component], {}, instance.get("PRODID"))
 
 
 def update_todo(
@@ -188,7 +199,7 @@ def update_todo(
     """Apply changed fields to an existing to-do item."""
     todo = object_by_uid(calendar, uid, todo=True)
     check_etag(todo, expected_etag)
-    vtodo = vtodo_of(todo)
+    vtodo = collapse_repeated(vtodo_of(todo))
     if data.get("status") == "COMPLETED" and "RRULE" in vtodo and _roll_todo(vtodo):
         # The roll owns DUE and DTSTART; a rename made in the same call does not.
         _set_text(vtodo, data)
@@ -198,10 +209,14 @@ def update_todo(
     _set_text(vtodo, data)
     if status := data.get("status"):
         _set_status(vtodo, status)
-    # set_due mutates the same component and drops DURATION, which RFC 5545
-    # forbids alongside DUE.
+    # Written here rather than through caldav's set_due, which puts it on
+    # whichever component is not a timezone first: on a resource holding an
+    # event beside the to-do that is the event, so the meeting lost its DURATION
+    # and gained a DUE while the item the user dated kept the old one.
     if (due := data.get("due")) is not None:
-        todo.set_due(due)
+        # RFC 5545 forbids DURATION alongside DUE.
+        replace(vtodo, "duration", None)
+        replace(vtodo, "due", due)
     else:
         vtodo.pop("DUE", None)
     _check_todo_span(vtodo)
@@ -243,6 +258,39 @@ def vtodo_of(resource: Any) -> Any:
     raise Refused("no_todo_in_object")
 
 
+# RFC 5545 3.6.1 and 3.6.2 allow each of these at most once per component.
+# RFC 2445-era clients wrote some of them twice all the same, and icalendar
+# hands a repeated property back as a list.
+_SINGLE = (
+    "COMPLETED",
+    "DTEND",
+    "DTSTART",
+    "DUE",
+    "DURATION",
+    "PERCENT-COMPLETE",
+    "RECURRENCE-ID",
+    "RRULE",
+    "SEQUENCE",
+    "STATUS",
+    "UID",
+)
+
+
+def collapse_repeated(component: Any) -> Any:
+    """Reduce every repeated single-value property of a component to its first.
+
+    A list has neither the ``.dt`` nor the ``.get`` the readers around it
+    expect: a to-do carrying two RRULE lines could be renamed and re-dated but
+    never completed, for good, and the refusal reached the user as a server
+    error naming nothing.
+    """
+    for key in _SINGLE:
+        if isinstance(value := component.get(key), list) and value:
+            _LOGGER.debug("Keeping the first of %s repeated %s", len(value), key)
+            component[key] = value[0]
+    return component
+
+
 def _save_todo(todo: Any) -> None:
     """Write a to-do back to the resource it was read from.
 
@@ -259,6 +307,11 @@ def _save_todo(todo: Any) -> None:
     # the untouched meeting announced a new revision to its attendees and the
     # item the user edited announced none.
     hold_sequence(todo.icalendar_component)
+    # Through the same wrapper the create path and the event writes use: a due
+    # date given a zone the stored item never referenced would otherwise go out
+    # as a TZID with no definition beside it. Assigned as the document rather
+    # than as its text, which caldav would run through vcal.fix.
+    todo.icalendar_instance = zoned_document(todo.icalendar_instance)
     # only_this_recurrence would have caldav refetch and splice back just the
     # first component, which on an object holding nothing but a detached
     # instance recurses until the stack runs out, one server lookup per turn.
@@ -403,13 +456,42 @@ def _sort_position(vtodo: Any) -> float | None:
     return position if isfinite(position) else None
 
 
+def delete_components(resource: Any, kind: str) -> None:
+    """Remove the components of one kind, and the resource once none is left.
+
+    RFC 4791 gives a resource a single component type, but one holding a VEVENT
+    beside a VTODO under one uid does occur; :func:`vtodo_of` exists because it
+    was met. Both halves of the collection then list their own, and removing
+    the resource on behalf of one of them took the other with it, silently and
+    with nothing to undo it from: ticking off a task deleted the meeting
+    standing beside it.
+    """
+    instance = resource.icalendar_instance
+    kept = [item for item in instance.subcomponents if item.name != kind]
+    if not any(item.name != "VTIMEZONE" for item in kept):
+        resource.delete()
+        return
+    _LOGGER.debug("Removing the %s of a resource that holds more than one kind", kind)
+    instance.subcomponents = kept
+    # Through the wrapper the writes use, so a zone the removed component was
+    # the only one referencing does not stay behind as an orphan definition.
+    document = zoned_document(instance)
+    # Nothing here revises what stays, and caldav moves a SEQUENCE on the way
+    # out whatever increase_seqno says.
+    hold_sequence(
+        next(item for item in document.subcomponents if item.name != "VTIMEZONE")
+    )
+    resource.icalendar_instance = document
+    resource.save(increase_seqno=False, only_this_recurrence=False)
+
+
 def delete_todo(
     calendar: caldav.Calendar, uid: str, expected_etag: str | None = None
 ) -> None:
     """Delete a to-do item."""
     todo = object_by_uid(calendar, uid, todo=True)
     check_etag(todo, expected_etag)
-    todo.delete()
+    delete_components(todo, "VTODO")
 
 
 def delete_todos(
@@ -427,7 +509,7 @@ def delete_todos(
     for uid, todo in found.items():
         check_etag(todo, etags.get(uid))
     for todo in found.values():
-        todo.delete()
+        delete_components(todo, "VTODO")
 
 
 def _todos_by_uid(calendar: caldav.Calendar, uids: list[str]) -> dict[str, Any]:
@@ -513,20 +595,27 @@ def move_event(
         # Written to the target as an event and deleted from the source: the
         # to-do it actually held would come back as neither.
         raise Refused("no_event_in_object")
-    _strip_relations(instance)
     # RFC 4791 gives one uid one resource, and caldav names that resource after
     # the uid, so writing onto a collection that already holds it overwrites
     # the other copy. Onto the source collection that is the very object being
     # moved, and the delete below would then take the only copy left.
     if _already_there(target, {uid}):
         raise Refused("uid_clash", uids=uid)
-    save_document(target, instance.to_ical().decode("utf-8"), as_todo=False)
+    save_document(target, instance, as_todo=False)
     if not keep_original:
         event.delete()
 
 
-def save_document(calendar: caldav.Calendar, body: str, as_todo: bool) -> Any:
+def save_document(
+    calendar: caldav.Calendar, document: ICalCalendar, as_todo: bool
+) -> Any:
     """Write a whole document to a collection as one resource.
+
+    The document itself, not its text. caldav puts a string handed to it
+    through :func:`caldav.lib.vcal.fix`, whose COMPLETED rule is not anchored
+    to the start of a line, so a description reading "Deal COMPLETED:20260101 -
+    archive" went on the wire with the user's own text rewritten. Handed the
+    object, caldav serializes it and leaves it alone.
 
     save_event and save_todo leave caldav's only_this_recurrence at its default,
     and it reads that decision off whichever component is not a timezone first.
@@ -535,9 +624,13 @@ def save_document(calendar: caldav.Calendar, body: str, as_todo: bool) -> Any:
     looking on the target for a uid the target does not carry yet, and it dies
     on the None that comes back. The flag cannot be handed to save_event: it
     lands among the properties it would build an event out of instead.
+
+    Saving the resource itself also leaves RELATED-TO alone. Only
+    Calendar.save_object follows it and rewrites the objects it names, so what
+    goes through here carries the subtask links of a task hierarchy over.
     """
     objclass = caldav.Todo if as_todo else caldav.Event
-    stored = objclass(calendar.client, data=body, parent=calendar)
+    stored = objclass(calendar.client, data=document, parent=calendar)
     stored.save(only_this_recurrence=False)
     return stored
 
@@ -551,13 +644,6 @@ def _first(value: Any) -> Any:
     reported and the import wrote straight over the object that did.
     """
     return value[0] if isinstance(value, list) and value else value
-
-
-def _strip_relations(instance: Any) -> None:
-    """Drop RELATED-TO, which caldav follows and writes into on save."""
-    for component in instance.walk():
-        if component.name in ("VEVENT", "VTODO"):
-            component.pop("RELATED-TO", None)
 
 
 def _tzids(component: Any) -> set[str]:
@@ -670,7 +756,8 @@ def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
         uid = str(_first(component.get("UID", "")))
         if not uid:
             raise Refused("document_no_uid")
-        component.pop("RELATED-TO", None)
+        if (recur := component.get("RRULE")) is not None and "DTSTART" in component:
+            check_rule(_first(recur), component["DTSTART"].dt)
         groups.setdefault(uid, []).append(component)
     if not groups:
         raise Refused("document_empty")
@@ -685,9 +772,13 @@ def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
     written: list[Any] = []
     try:
         for uid, components in groups.items():
-            text = _document(components, zones, document.get("PRODID")).to_ical()
-            body = text.decode("utf-8")
-            written.append(save_document(calendar, body, as_todo[uid]))
+            written.append(
+                save_document(
+                    calendar,
+                    _document(components, zones, document.get("PRODID")),
+                    as_todo[uid],
+                )
+            )
     except Exception:
         # A half-written import leaves objects behind that the retry then
         # refuses as clashes, though they are its own. Taken back as far as
@@ -741,7 +832,12 @@ def export_ics(calendar: caldav.Calendar, uid: str | None) -> str:
         # Whatever kind it is stored as: the whole-calendar export below covers
         # to-dos too, and the two modes disagreeing on that would mean a to-do
         # could not be exported on its own at all.
-        return str(object_by_uid(calendar, uid, todo=None).data)
+        body = str(object_by_uid(calendar, uid, todo=None).data)
+        # caldav normalizes the line endings of what it read to LF, and RFC 5545
+        # 3.1 breaks a document by CRLF. Handed back as it comes, one object
+        # exports as something strict importers refuse, while the whole-calendar
+        # branch below serializes its own and is correct.
+        return body.replace("\r\n", "\n").replace("\n", "\r\n")
     components: list[Any] = []
     zones: dict[str, Any] = {}
     seen: set[str] = set()
@@ -792,7 +888,8 @@ def respond_to_invitation(
             changed = True
     if not changed:
         raise Refused("not_an_attendee")
-    event.data = instance.to_ical().decode("utf-8")
+    # The document, not its text, which caldav would run through vcal.fix.
+    event.icalendar_instance = instance
     hold_sequence(event.icalendar_component)
     # only_this_recurrence would have caldav refetch and splice back just the
     # first component, which on an orphan-override object never terminates.

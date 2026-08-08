@@ -18,6 +18,19 @@ class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
     # Names stay scoped to the account device, so two accounts can both expose
     # a calendar called "Personal" without colliding.
     _attr_has_entity_name = True
+    # Which half of the collection this entity reads.
+    _half: str
+
+    @property
+    def available(self) -> bool:
+        """Whether this entity's own half of the collection is being read.
+
+        Both halves share one poll, and one of them failing for good must not
+        take the other down with it: a collection whose to-do report a server
+        refuses left the calendar beside it unavailable on frozen data, for as
+        long as the refusal lasted.
+        """
+        return super().available and not self.coordinator.dead[self._half]
 
     def __init__(self, managed: ManagedCalendar, entry: HaCaldavConfigEntry) -> None:
         """Initialize the entity."""
@@ -47,12 +60,6 @@ class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
         would leave the next edit of the same object with nothing to check
         against and overwrite whatever landed in between.
 
-        The cache is named rather than handed over, because a poll landing
-        while the write is on the wire replaces the dict rather than emptying
-        it. Dropping the key from the one captured beforehand would leave the
-        pre-write etag in the live cache and refuse the next edit of the same
-        object over a conflict that never happened.
-
         One write at a time per collection. PARALLEL_UPDATES only reaches the
         service path, and the calendar and to-do panels call their entity
         directly over the websocket, so two edits of one series read the same
@@ -71,13 +78,5 @@ class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
                 # new is disclosed.
                 raise as_reported(err, action) from err
             if forget is not None:
-                name, keys = forget
-                # Under the lock a poll merges into: without it, a merge that
-                # read its etags before the PUT landed can put the stale one
-                # back after the pop, and the next edit of the same object is
-                # refused over a conflict the user caused themselves.
-                with self.coordinator.etag_lock:
-                    cache = getattr(self.coordinator, name)
-                    for key in keys:
-                        cache.pop(key, None)
+                self.coordinator.forget_etags(*forget)
         await self.coordinator.async_request_refresh()

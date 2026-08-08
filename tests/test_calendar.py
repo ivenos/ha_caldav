@@ -1,6 +1,8 @@
 """Tests for the CalDAV calendar entity."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+import time
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
@@ -14,6 +16,7 @@ from homeassistant.const import (
     CONF_URL,
     CONF_USERNAME,
     CONF_VERIFY_SSL,
+    STATE_UNAVAILABLE,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -547,7 +550,12 @@ async def test_the_panel_window_caches_its_own_etags(hass: HomeAssistant) -> Non
     assert coordinator.etags == {"Retro": '"etag-far"'}
 
 
-async def test_a_half_that_never_answered_fails_the_poll(hass: HomeAssistant) -> None:
+async def test_a_half_that_never_answered_takes_only_its_own_entity_down(
+    hass: HomeAssistant,
+) -> None:
+    """Reporting an empty calendar here would be a lie the user has no way of
+    noticing, and failing the whole entry over it takes the to-do list that
+    answered perfectly well down with it."""
     calendar = _calendar("Personal")
 
     def search(**kwargs):
@@ -559,9 +567,9 @@ async def test_a_half_that_never_answered_fails_the_poll(hass: HomeAssistant) ->
     calendar.search.side_effect = search
     entry = await _setup(hass, [calendar])
 
-    # Half a poll is not a poll: reporting an empty calendar here would be a
-    # lie the user has no way of noticing.
-    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert entry.state is ConfigEntryState.LOADED
+    assert hass.states.get("calendar.iven_personal").state == STATE_UNAVAILABLE
+    assert hass.states.get("todo.iven_personal").state != STATE_UNAVAILABLE
 
 
 async def test_a_half_that_answered_before_keeps_its_last_result(
@@ -1042,11 +1050,17 @@ async def test_a_half_that_keeps_failing_stops_looking_healthy(
     )
     for _ in range(3):
         await coordinator.async_refresh()
-        assert coordinator.last_update_success
+        assert not coordinator.dead["todos"]
 
     await coordinator.async_refresh()
 
-    assert not coordinator.last_update_success
+    # The list stops claiming to be a list; the calendar beside it, which the
+    # server answers about perfectly well, carries on.
+    assert coordinator.dead["todos"]
+    assert not coordinator.dead["events"]
+    await hass.async_block_till_done()
+    assert hass.states.get("todo.iven_personal").state == STATE_UNAVAILABLE
+    assert hass.states.get("calendar.iven_personal").state != STATE_UNAVAILABLE
 
 
 def _raise(err: Exception):
@@ -1193,8 +1207,8 @@ async def test_the_recorded_rule_comes_off_the_master_of_the_object(
 async def test_a_dead_half_still_lets_the_other_one_read(
     hass: HomeAssistant,
 ) -> None:
-    """The poll still fails, but the healthy half is fetched first, so its
-    cache and etags do not freeze at whatever they held when the other broke."""
+    """The healthy half is fetched and kept, so its cache and etags do not
+    freeze at whatever they held when the other broke."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.iven_personal").coordinator
@@ -1215,20 +1229,18 @@ async def test_a_dead_half_still_lets_the_other_one_read(
     for _ in range(4):
         await coordinator.async_refresh()
 
-    assert not coordinator.last_update_success
+    assert coordinator.dead["events"]
     # Reached on the failing poll too, not only on the tolerated ones.
     assert len(seen) == 4
 
 
-async def test_a_dead_half_does_not_leave_the_other_ones_etags_behind(
+async def test_a_dead_half_keeps_the_other_ones_data_and_etags_together(
     hass: HomeAssistant,
 ) -> None:
-    """A half reads its etags in the same request as its data. Committed on the
-    way out, they described a revision whose data the failing other half then
-    threw away: the next edit of one of those objects was checked against an
-    etag that did match the server, passed, and overwrote the change that had
-    arrived with it.
-    """
+    """A half reads its etags in the same request as its data, and the two are
+    kept or dropped as one. Committing an etag whose data was then thrown away
+    let the next edit of that object pass a check against a revision the entity
+    never showed, and overwrite the change that had arrived with it."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.iven_personal").coordinator
@@ -1242,17 +1254,28 @@ async def test_a_dead_half_does_not_leave_the_other_ones_etags_behind(
     def search(**kwargs):
         if kwargs.get("todo") is None:
             raise DAVError("event report failed")
-        return [_etag_item("todo-1", next(etags))]
+        return [_todo_etag_item("todo-1", next(etags))]
 
     calendar.search.side_effect = search
     for _ in range(4):
         await coordinator.async_refresh()
 
-    assert not coordinator.last_update_success
-    # Nothing kept: the to-do list the user sees was never updated either, so
-    # an etag from those reads would validate a write against data the entity
-    # never showed.
-    assert coordinator.todo_etags == {}
+    assert coordinator.dead["events"]
+    # The list itself was read four times and is current, so the etag describing
+    # it is the one the next edit has to be checked against.
+    assert coordinator.todo_etags == {"todo-1": '"t4"'}
+    assert [item.uid for item in coordinator.data.todos] == ["todo-1"]
+
+
+def _todo_etag_item(uid: str, etag: str) -> Mock:
+    item = Mock()
+    item.vobject_instance = vobject.readOne(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
+        f"BEGIN:VTODO\nUID:{uid}\nDTSTAMP:20260101T000000Z\nSUMMARY:x\n"
+        "END:VTODO\nEND:VCALENDAR\n"
+    )
+    item.props = {dav.GetEtag.tag: etag}
+    return item
 
 
 async def test_a_half_that_recovers_starts_counting_again(
@@ -1339,7 +1362,215 @@ async def test_a_polled_window_survives_an_etag_cache_at_its_limit(
     # limit has to give up, and the fresh ones are what it has to keep.
     coordinator._etag_window = set()
 
-    coordinator._merge_etags({"fresh-1": '"f1"', "fresh-2": '"f2"'})
+    coordinator._merge_etags(
+        {"fresh-1": '"f1"', "fresh-2": '"f2"'}, coordinator._etag_epoch
+    )
 
     assert coordinator.etags["fresh-1"] == '"f1"'
     assert coordinator.etags["fresh-2"] == '"f2"'
+
+
+async def test_a_todo_report_without_etags_does_not_empty_the_cache(
+    hass: HomeAssistant,
+) -> None:
+    """Taken at face value it empties the cache, and the next edit of every one
+    of those items goes out with nothing to check against — silently."""
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+
+    tokens = iter(f"t{n}" for n in range(99))
+    calendar.objects_by_sync_token.side_effect = lambda _token: Mock(
+        sync_token=next(tokens)
+    )
+    with_etag = [True]
+
+    def search(**kwargs):
+        if kwargs.get("todo") is None:
+            return []
+        item = _todo_etag_item("todo-1", '"v1"')
+        if not with_etag[0]:
+            item.props = {}
+        return [item]
+
+    calendar.search.side_effect = search
+    await coordinator.async_refresh()
+    assert coordinator.todo_etags == {"todo-1": '"v1"'}
+
+    with_etag[0] = False
+    await coordinator.async_refresh()
+
+    assert coordinator.todo_etags == {"todo-1": '"v1"'}
+
+
+async def test_a_poll_already_reading_cannot_restore_an_etag_a_write_dropped(
+    hass: HomeAssistant,
+) -> None:
+    """The lock covers the moment the dict is changed, not the span between a
+    read and the commit that follows it. The pre-write etag put back that way
+    has the user's own next edit refused as somebody else's change."""
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+
+    read_at = coordinator._etag_epoch
+    coordinator.etags = {"uid-1": '"v1"'}
+    coordinator.forget_etags("etags", ("uid-1",))
+    assert coordinator.etags == {}
+
+    # The poll that was already on the wire when the write landed commits here.
+    assert not coordinator._merge_etags({"uid-1": '"v1"'}, read_at)
+    assert coordinator.etags == {}
+
+
+def test_an_event_keeps_its_place_when_home_assistant_refuses_its_rule() -> None:
+    """FREQ=HOURLY and FREQ=MINUTELY are RFC 5545 and writable from every other
+    client, and Home Assistant validates the rule it is handed against what its
+    own editor can offer. Passed on, it took the whole occurrence off the panel
+    and out of the state."""
+    from custom_components.ha_caldav.coordinator import to_event
+
+    vevent = vobject.readOne(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//t//EN\n"
+        "BEGIN:VEVENT\nUID:hourly-1\nDTSTAMP:20260101T000000Z\n"
+        "DTSTART:20260706T090000Z\nDTEND:20260706T100000Z\nSUMMARY:Medication\n"
+        "END:VEVENT\nEND:VCALENDAR\n"
+    ).vevent
+
+    event = to_event(vevent, "FREQ=HOURLY")
+
+    assert event is not None
+    assert event.summary == "Medication"
+    assert event.rrule is None
+
+
+async def test_two_edits_of_one_collection_do_not_run_at_the_same_time(
+    hass: HomeAssistant,
+) -> None:
+    """The panels call the entity directly over the websocket, so PARALLEL_UPDATES
+    does not reach them. Overlapping, two edits of one series read the same
+    object, both pass the etag check against the same value, and the second PUT
+    drops what the first wrote with nothing reported.
+
+    Patched with a real function rather than a Mock: the Home Assistant test
+    plugin runs a mocked executor job inline on the loop, and inline jobs cannot
+    overlap, so a mock here reports no conflict whatever the lock does.
+    """
+    await _setup(hass, [_calendar("Personal")])
+    entity = _entity(hass, "calendar.iven_personal")
+    inside = 0
+    overlapped = False
+
+    def slow_write(*args, **kwargs) -> None:
+        nonlocal inside, overlapped
+        inside += 1
+        overlapped = overlapped or inside > 1
+        time.sleep(0.05)
+        inside -= 1
+
+    with patch("custom_components.ha_caldav.calendar.update_event", slow_write):
+        await asyncio.gather(
+            entity.async_update_full_event("uid-1", {"summary": "One"}),
+            entity.async_update_full_event("uid-1", {"summary": "Two"}),
+        )
+
+    assert not overlapped
+
+
+async def test_the_panel_creates_an_event_through_the_platform_call(
+    hass: HomeAssistant,
+) -> None:
+    """calendar.create_event is what the panel and every automation reach; the
+    service beside it takes another route, and only that one was covered."""
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+
+    with patch("custom_components.ha_caldav.calendar.create_event") as write:
+        await hass.services.async_call(
+            "calendar",
+            "create_event",
+            {
+                "entity_id": "calendar.iven_personal",
+                "summary": "Standup",
+                "start_date_time": "2026-07-06 09:00:00",
+                "end_date_time": "2026-07-06 10:00:00",
+                "description": "Daily sync",
+                "location": "Room 1",
+            },
+            blocking=True,
+        )
+
+    data = write.call_args.args[1]
+    assert data["summary"] == "Standup"
+    assert data["description"] == "Daily sync"
+    assert data["location"] == "Room 1"
+
+
+async def test_an_edit_from_the_panel_carries_the_rule_it_was_given(
+    hass: HomeAssistant,
+) -> None:
+    """Home Assistant strips RRULE from the event it echoes back for an
+    occurrence, so the mapping only forwards a rule that is really there. One
+    the recurrence editor did set has to reach the write path all the same."""
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    entity = _entity(hass, "calendar.iven_personal")
+
+    with patch("custom_components.ha_caldav.calendar.update_event") as write:
+        await entity.async_update_event(
+            "uid-1",
+            {
+                "summary": "Standup",
+                "dtstart": datetime(2026, 7, 6, 9, tzinfo=UTC),
+                "dtend": datetime(2026, 7, 6, 10, tzinfo=UTC),
+                "rrule": "FREQ=WEEKLY",
+            },
+        )
+
+    assert write.call_args.args[2]["rrule"] == "FREQ=WEEKLY"
+
+
+async def test_a_colour_hook_that_arrives_before_registration_is_ignored(
+    hass: HomeAssistant,
+) -> None:
+    """Both hooks read the registry entry, and an entity has none until it is
+    registered. Home Assistant calls neither of them that early, but a write
+    made from a service against a freshly built entity would."""
+    calendar = _calendar("Personal")
+    entry = await _setup(hass, [calendar])
+    entity = _entity(hass, "calendar.iven_personal")
+    entity.registry_entry = None
+
+    entity.async_registry_entry_updated()
+    entity.async_follow_server_color()
+
+    assert entity.registry_entry is None
+    assert entry.state is ConfigEntryState.LOADED
+
+
+async def test_a_collection_that_holds_no_events_is_not_searched(
+    hass: HomeAssistant,
+) -> None:
+    """A to-do collection has a calendar entity only until the prune runs, and
+    the panel asks any entity it can see for a window. Passed on, the search
+    would be a request per view onto a collection that answers none of them."""
+    from custom_components.ha_caldav.capability import Capability
+    from custom_components.ha_caldav.const import COMPONENT_TODO
+
+    calendar = _calendar("Tasks")
+    with patch(
+        "custom_components.ha_caldav.capability_for",
+        return_value=Capability(frozenset({COMPONENT_TODO}), writable=True),
+    ):
+        await _setup(hass, [calendar])
+    coordinator = (
+        hass.data["entity_components"]["todo"].get_entity("todo.iven_tasks").coordinator
+    )
+    calendar.search.reset_mock()
+
+    found = await coordinator.async_get_events(
+        hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=1)
+    )
+
+    assert found == []
+    calendar.search.assert_not_called()

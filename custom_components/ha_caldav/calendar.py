@@ -62,6 +62,7 @@ async def async_setup_entry(
 class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
     """A CalDAV calendar with full create, update and delete support."""
 
+    _half = "events"
     # Templatable, but not worth keeping for the whole recorder retention.
     _unrecorded_attributes = frozenset(EVENT_ATTRIBUTES)
 

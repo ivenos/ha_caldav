@@ -348,14 +348,18 @@ async def _async_check_for_issues(
 ) -> None:
     """Raise the repair issues for this entry."""
     _async_check_builtin_conflict(hass, entry)
+    issue_id = f"{ISSUE_NO_SYNC_COLLECTION}_{entry.entry_id}"
     if not managed:
+        # Nothing left to ask, so nothing left to warn about: an issue raised
+        # while there was would otherwise stand for good, with no calendar left
+        # for the user to see it about.
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
         return
     # sync-collection is a property of the server, not of a collection, and
     # the issue is worded for the account, so one calendar is enough to ask.
     supported = await hass.async_add_executor_job(
         supports_sync_collection, managed[0].calendar
     )
-    issue_id = f"{ISSUE_NO_SYNC_COLLECTION}_{entry.entry_id}"
     if supported:
         ir.async_delete_issue(hass, DOMAIN, issue_id)
         return

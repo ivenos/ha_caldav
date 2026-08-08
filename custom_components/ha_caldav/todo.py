@@ -46,6 +46,8 @@ async def async_setup_entry(
 class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
     """The VTODO items of a CalDAV calendar."""
 
+    _half = "todos"
+
     def __init__(
         self,
         managed: ManagedCalendar,

@@ -10,9 +10,13 @@ from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VER
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.ha_caldav.capability import Capability
 from custom_components.ha_caldav.const import (
+    CONF_CA_BUNDLE,
     CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
+    CONF_CLIENT_CERT,
+    CONF_CLIENT_KEY,
     DOMAIN,
 )
 from custom_components.ha_caldav.coordinator import HaCaldavRuntimeData, ManagedCalendar
@@ -245,3 +249,51 @@ async def test_the_selected_calendars_carry_no_account_name(
     assert diag["options"][CONF_CALENDARS] == ["personal", "therapy"]
     assert diag["options"][CONF_CALENDAR_OPTIONS] == {"personal": {"days": 30}}
     assert "iven" not in json.dumps(diag)
+
+
+async def test_diagnostics_redacts_the_tls_material(hass: HomeAssistant) -> None:
+    """Those are filesystem paths naming the account's own client private key,
+    in a file the issue template asks people to attach to a public report."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            **ENTRY_DATA,
+            CONF_CLIENT_CERT: "/etc/ssl/iven-client.pem",
+            CONF_CLIENT_KEY: "/etc/ssl/private/iven-client.key",
+            CONF_CA_BUNDLE: "/etc/ssl/house-ca.pem",
+        },
+        unique_id="x",
+    )
+    entry.add_to_hass(hass)
+    entry.runtime_data = _runtime(_client([]))
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert diag["data"][CONF_CLIENT_CERT] == REDACTED
+    assert diag["data"][CONF_CLIENT_KEY] == REDACTED
+    assert diag["data"][CONF_CA_BUNDLE] == REDACTED
+    assert "/etc/ssl" not in json.dumps(diag)
+
+
+async def test_diagnostics_report_a_managed_calendar_from_what_was_read(
+    hass: HomeAssistant,
+) -> None:
+    """A calendar the entry manages is reported from the capability the setup
+    already read, not from a fresh probe of the server."""
+    calendar = _calendar("Personal", ["VEVENT", "VTODO"])
+    calendar.get_supported_components.side_effect = DAVError("asked again")
+    managed = ManagedCalendar(
+        calendar=calendar,
+        capability=Capability(frozenset({"VEVENT"}), writable=False),
+        coordinator=Mock(),
+        read_only=True,
+    )
+    entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    entry.runtime_data = _runtime(_client([calendar]), [managed])
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert diag["calendars"][0]["components"] == ["VEVENT"]
+    assert diag["calendars"][0]["writable"] is False
+    assert diag["calendars"][0]["read_only_option"] is True

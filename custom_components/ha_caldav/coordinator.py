@@ -34,7 +34,7 @@ _KEEP = object()
 
 # Returned by a half with nothing left to serve: it never answered, or it has
 # been failing long enough that its snapshot cannot be told apart from a fresh
-# one. Such a half fails the whole poll, but only once both have been tried.
+# one. The poll fails once every half the calendar has is one of these.
 _DEAD = object()
 
 # How long a half may go on serving that previous result before the entity says
@@ -213,6 +213,30 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         # to-do report the server refuses is still a calendar that reads.
         self.dead = {"events": False, "todos": False}
 
+    @property
+    def poll_health(self) -> dict[str, Any]:
+        """Report how far behind each half of this collection is.
+
+        A half that failed goes on serving its last result for a few polls, and
+        nothing else in a diagnostics dump would show that it did. The time is
+        of the last poll that came back whole, which a half still on a kept
+        result leaves behind, and which is None until one ever did.
+        """
+        halves = [
+            half
+            for half, supported in (
+                ("events", self.capability.supports_events),
+                ("todos", self.capability.supports_todos),
+            )
+            if supported
+        ]
+        fetched = self._fetched_at
+        return {
+            "last_full_read": fetched.isoformat() if fetched else None,
+            "kept_polls": {half: self._misses[half] for half in halves},
+            "dead": {half: self.dead[half] for half in halves},
+        }
+
     async def async_get_events(
         self, hass: HomeAssistant, start_date: datetime, end_date: datetime
     ) -> list[CalendarEvent]:
@@ -346,7 +370,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
     async def _async_fetch(self, start: datetime, end: datetime) -> bool:
         """Refresh both halves; a half that failed before keeps its last result.
 
-        A poll where no half came back at all still fails.
+        A poll where no half has a result left to keep still fails.
         """
         events, events_error = await self._async_half(
             self._fetch_events(start, end),
@@ -386,20 +410,28 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
                     self._etags_missed = True
                 else:
                     self.todo_etags = todos.etags
-        for half, result, error in (
-            ("events", events, events_error),
-            ("todos", todos, todos_error),
-        ):
+        halves = (("events", events, events_error), ("todos", todos, todos_error))
+        for half, result, _ in halves:
             self.dead[half] = result is _DEAD
-            # Rejected credentials belong in reauth however few halves saw them.
-            if result is _DEAD and isinstance(error, AuthorizationError):
-                raise error
-        # Only when nothing at all came back. A half that keeps failing takes
-        # its own entity down through HaCaldavEntity.available; failing the poll
-        # over it would take the other half's entity with it, on data that then
-        # freezes for as long as this one stays broken.
-        if errors and len(errors) == self._halves:
-            raise errors[0]
+        # Only when every half saw one, whether or not they still have something
+        # to serve. A 401 beside a half that read cleanly, or beside one that
+        # timed out, says nothing about the password: that is the server having
+        # a bad minute. Only 401, caldav raises this for a transient 403 too.
+        rejected = [
+            error
+            for error in errors
+            if isinstance(error, AuthorizationError) and error.reason == "Unauthorized"
+        ]
+        if rejected and len(rejected) == self._halves:
+            raise rejected[0]
+        # Only when no half has anything left. On a collection of one component
+        # type that is one half, and anything stricter fails on every timeout.
+        lost = [error for _, result, error in halves if result is _DEAD]
+        if lost and len(lost) == self._halves:
+            # Never a 401 the rule above declined to reauth on: raised here it
+            # reaches reauth anyway, and which half holds it is an ordering
+            # accident rather than anything the server said.
+            raise next((error for error in lost if error not in rejected), lost[0])
         return not errors
 
     @property
@@ -418,12 +450,11 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         try:
             result = await self.hass.async_add_executor_job(job)
         except Exception as err:  # noqa: BLE001
-            # Nothing read before is nothing to fall back on: a failed poll, not
-            # a stale one, or the entity would look healthy and empty forever.
-            # The same goes for one that keeps failing, which serves a snapshot
-            # nobody can tell is old and validates writes against it. Reported
-            # rather than raised, so the other half is still fetched before the
-            # poll gives up and its cache does not freeze along with this one.
+            # Nothing read before is nothing to fall back on, and neither is a
+            # snapshot so old nobody can tell, which would go on validating
+            # writes against it. Either takes this half's own entity down, and
+            # the poll with it only once no half has anything left. Reported
+            # rather than raised, so the other half is still fetched first.
             if cached is None or self._misses[half] >= _MAX_KEPT_POLLS:
                 return _DEAD, err
             self._misses[half] += 1

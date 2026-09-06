@@ -101,6 +101,7 @@ def _calendars(data: HaCaldavRuntimeData) -> Any:
             info["components"] = sorted(item.capability.components)
             info["writable"] = item.capability.writable
             info["read_only_option"] = item.read_only
+            info["poll"] = item.coordinator.poll_health
         else:
             info.update(_probe(calendar))
         calendars.append(info)

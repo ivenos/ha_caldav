@@ -82,6 +82,17 @@
           "days": "Con cuánta antelación se busca el próximo evento.",
           "include_all_day": "Si un evento de todo el día puede ser el próximo evento.",
           "read_only": "Oculta los controles de crear, editar y eliminar."
+        },
+        "sections": {
+          "advanced": {
+            "name": "Avanzado",
+            "data": {
+              "timeout": "Segundos por petición"
+            },
+            "data_description": {
+              "timeout": "Cuánto tiempo se espera la respuesta del servidor a una sola petición."
+            }
+          }
         }
       },
       "pick": {

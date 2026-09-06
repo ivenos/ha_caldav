@@ -82,6 +82,17 @@
           "days": "Con quanto anticipo cercare il prossimo evento.",
           "include_all_day": "Se un evento di tutto il giorno può essere il prossimo.",
           "read_only": "Nasconde i comandi di creazione, modifica ed eliminazione."
+        },
+        "sections": {
+          "advanced": {
+            "name": "Avanzate",
+            "data": {
+              "timeout": "Secondi per richiesta"
+            },
+            "data_description": {
+              "timeout": "Quanto tempo attendere la risposta del server a una singola richiesta."
+            }
+          }
         }
       },
       "pick": {

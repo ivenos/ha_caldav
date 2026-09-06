@@ -11,7 +11,7 @@ import caldav
 from caldav.davclient import requests
 from homeassistant.const import CONF_VERIFY_SSL
 
-from .const import CONF_CA_BUNDLE, CONF_CLIENT_CERT, CONF_CLIENT_KEY, REQUEST_TIMEOUT
+from .const import CONF_CA_BUNDLE, CONF_CLIENT_CERT, CONF_CLIENT_KEY, DEFAULT_TIMEOUT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,11 +57,15 @@ def account_key(url: str, username: str) -> str:
     return f"{normalized}#{username}"
 
 
-def connection_kwargs(data: Mapping[str, Any]) -> dict[str, Any]:
+def connection_kwargs(
+    data: Mapping[str, Any], timeout: float = DEFAULT_TIMEOUT
+) -> dict[str, Any]:
     """Return the DAVClient keyword arguments for these connection details.
 
     A CA bundle path takes the place of the verify flag, which is the same
     argument in requests: a string there means "verify against this bundle".
+    The timeout is one number for both the connect and the read budget, which
+    is what requests makes of a scalar.
     """
     verify: bool | str = data.get(CONF_VERIFY_SSL, True)
     if bundle := data.get(CONF_CA_BUNDLE):
@@ -73,7 +77,7 @@ def connection_kwargs(data: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "ssl_verify_cert": verify,
         "ssl_cert": cert,
-        "timeout": REQUEST_TIMEOUT,
+        "timeout": timeout,
     }
 
 
@@ -147,7 +151,7 @@ def _resolve_bootstrap(probe: str, kwargs: Mapping[str, Any]) -> str | None:
             allow_redirects=True,
             verify=kwargs.get("ssl_verify_cert", True),
             cert=kwargs.get("ssl_cert"),
-            timeout=kwargs.get("timeout", REQUEST_TIMEOUT),
+            timeout=kwargs.get("timeout", DEFAULT_TIMEOUT),
         )
     except Exception:  # noqa: BLE001
         _LOGGER.debug("Could not reach %s", WELL_KNOWN)

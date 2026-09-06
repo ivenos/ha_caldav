@@ -17,11 +17,13 @@ from homeassistant.config_entries import (
 from homeassistant.const import (
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
+    CONF_TIMEOUT,
     CONF_URL,
     CONF_USERNAME,
     CONF_VERIFY_SSL,
 )
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import section
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.selector import (
     NumberSelector,
@@ -40,6 +42,7 @@ from .connection import (
     without_userinfo,
 )
 from .const import (
+    CONF_ADVANCED,
     CONF_CA_BUNDLE,
     CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
@@ -52,10 +55,11 @@ from .const import (
     DEFAULT_INCLUDE_ALL_DAY,
     DEFAULT_READ_ONLY,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_TIMEOUT,
     DOMAIN,
 )
 from .errors import CONNECTION_ERRORS
-from .options import account_settings
+from .options import account_settings, request_timeout
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -139,7 +143,7 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_PASSWORD: entry.data[CONF_PASSWORD],
             }
             error, url = await self.hass.async_add_executor_job(
-                _test_connection, cleaned
+                _test_connection, cleaned, request_timeout(entry)
             )
             if error is None:
                 unique_id = account_key(url, cleaned[CONF_USERNAME])
@@ -182,7 +186,7 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reauth_entry()
         if user_input is not None:
             error, _ = await self.hass.async_add_executor_job(
-                _test_connection, {**entry.data, **user_input}
+                _test_connection, {**entry.data, **user_input}, request_timeout(entry)
             )
             if error is None:
                 return self.async_update_reload_and_abort(
@@ -271,6 +275,16 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
                 CONF_READ_ONLY, default=options.get(CONF_READ_ONLY, DEFAULT_READ_ONLY)
             )
         ] = cv.boolean
+        fields[vol.Required(CONF_ADVANCED)] = section(
+            vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_TIMEOUT, default=request_timeout(self.config_entry)
+                    ): _seconds()
+                }
+            ),
+            {"collapsed": True},
+        )
 
         return self.async_show_form(
             step_id="account", data_schema=vol.Schema(fields), errors=errors
@@ -413,6 +427,21 @@ def _minutes() -> Any:
     )
 
 
+def _seconds() -> Any:
+    """Return the request-timeout field, bounded by the frontend itself.
+
+    The ceiling is well under what a request may take because caldav retries a
+    failed one unauthenticated until the account has authenticated once, so a
+    server that accepts the connection and never answers costs twice this per
+    request, and three times it for a whole connection attempt.
+    """
+    return NumberSelector(
+        NumberSelectorConfig(
+            min=5, max=120, step=1, mode=NumberSelectorMode.BOX, unit_of_measurement="s"
+        )
+    )
+
+
 def _days() -> Any:
     """Return the look-ahead field, bounded by the frontend itself."""
     return NumberSelector(
@@ -530,9 +559,11 @@ def _distinctive(key: str, managed: list[Any]) -> str:
     return key
 
 
-def _test_connection(user_input: Mapping[str, Any]) -> tuple[str | None, str]:
+def _test_connection(
+    user_input: Mapping[str, Any], timeout: float = DEFAULT_TIMEOUT
+) -> tuple[str | None, str]:
     """Return (error key or None, the url that worked)."""
-    kwargs = connection_kwargs(user_input)
+    kwargs = connection_kwargs(user_input, timeout)
     entered = user_input[CONF_URL]
     error = "cannot_connect"
     for url in url_candidates(entered, kwargs):

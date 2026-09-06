@@ -82,6 +82,17 @@
           "days": "Wie weit vorausgeschaut wird, um den nächsten Termin zu bestimmen.",
           "include_all_day": "Ob ein ganztägiger Termin der nächste Termin sein kann.",
           "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus."
+        },
+        "sections": {
+          "advanced": {
+            "name": "Erweitert",
+            "data": {
+              "timeout": "Sekunden pro Anfrage"
+            },
+            "data_description": {
+              "timeout": "Wie lange auf die Antwort des Servers auf eine einzelne Anfrage gewartet wird."
+            }
+          }
         }
       },
       "pick": {

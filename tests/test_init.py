@@ -5,7 +5,13 @@ from unittest.mock import Mock, patch
 from caldav.davclient import requests
 from caldav.lib.error import AuthorizationError
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
+from homeassistant.const import (
+    CONF_PASSWORD,
+    CONF_TIMEOUT,
+    CONF_URL,
+    CONF_USERNAME,
+    CONF_VERIFY_SSL,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.entity_component import EntityComponent
@@ -13,6 +19,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ha_caldav import async_migrate_entry
 from custom_components.ha_caldav.const import (
+    CONF_ADVANCED,
     CONF_CALENDARS,
     DOMAIN,
     ISSUE_BUILTIN_CALDAV,
@@ -737,3 +744,33 @@ async def test_the_migration_keeps_a_duplicate_visible_rather_than_failing(
     assert registry.async_get(first.entity_id).unique_id == normalized
     # Left where it was, and still in the registry for the user to see.
     assert registry.async_get(second.entity_id).unique_id == f"{entry.entry_id}-{url}/"
+
+
+async def test_the_timeout_option_is_what_a_request_gets(hass: HomeAssistant) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="iven",
+        data=ENTRY_DATA,
+        options={CONF_ADVANCED: {CONF_TIMEOUT: 90}},
+        unique_id="x",
+    )
+    entry.add_to_hass(hass)
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.return_value.calendars.return_value = []
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert client.call_args.kwargs["timeout"] == 90
+
+
+async def test_an_account_without_the_option_gets_the_default(
+    hass: HomeAssistant,
+) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="y")
+    entry.add_to_hass(hass)
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.return_value.calendars.return_value = []
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert client.call_args.kwargs["timeout"] == 30

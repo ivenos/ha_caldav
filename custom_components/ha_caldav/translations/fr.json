@@ -82,6 +82,17 @@
           "days": "Sur combien de jours chercher pour déterminer le prochain événement.",
           "include_all_day": "Si un événement sur toute la journée peut être le prochain.",
           "read_only": "Masque les commandes de création, de modification et de suppression."
+        },
+        "sections": {
+          "advanced": {
+            "name": "Avancé",
+            "data": {
+              "timeout": "Secondes par requête"
+            },
+            "data_description": {
+              "timeout": "Combien de temps attendre la réponse du serveur à une seule requête."
+            }
+          }
         }
       },
       "pick": {

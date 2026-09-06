@@ -18,7 +18,7 @@ from custom_components.ha_caldav.const import (
     CONF_CA_BUNDLE,
     CONF_CLIENT_CERT,
     CONF_CLIENT_KEY,
-    REQUEST_TIMEOUT,
+    DEFAULT_TIMEOUT,
 )
 
 
@@ -26,7 +26,7 @@ def test_plain_account_verifies_against_the_system_store() -> None:
     assert connection_kwargs({CONF_VERIFY_SSL: True}) == {
         "ssl_verify_cert": True,
         "ssl_cert": None,
-        "timeout": REQUEST_TIMEOUT,
+        "timeout": DEFAULT_TIMEOUT,
     }
 
 
@@ -256,7 +256,7 @@ def test_the_bootstrap_lookup_always_has_a_timeout() -> None:
     with _probe("https://cloud.example.com/.well-known/caldav") as request:
         list(url_candidates("https://cloud.example.com", {}))
 
-    assert request.call_args.kwargs["timeout"] == REQUEST_TIMEOUT
+    assert request.call_args.kwargs["timeout"] == DEFAULT_TIMEOUT
 
 
 def test_defaults_apply_when_nothing_was_configured() -> None:
@@ -390,3 +390,7 @@ def test_stored_connection_details_carry_no_userinfo() -> None:
 
     assert cleaned["url"] == "https://dav.example.com/dav/"
     assert "secret" not in cleaned["url"]
+
+
+def test_the_configured_timeout_is_what_the_client_gets() -> None:
+    assert connection_kwargs({CONF_VERIFY_SSL: True}, 90)["timeout"] == 90

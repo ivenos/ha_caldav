@@ -8,14 +8,17 @@ from homeassistant.config_entries import SOURCE_RECONFIGURE, SOURCE_USER
 from homeassistant.const import (
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
+    CONF_TIMEOUT,
     CONF_URL,
     CONF_USERNAME,
     CONF_VERIFY_SSL,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import config_validation as cv
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+import voluptuous_serialize
 
 from custom_components.ha_caldav.config_flow import _labelled
 from custom_components.ha_caldav.const import (
@@ -27,6 +30,7 @@ from custom_components.ha_caldav.const import (
     CONF_DAYS,
     CONF_INCLUDE_ALL_DAY,
     CONF_READ_ONLY,
+    DEFAULT_TIMEOUT,
     DOMAIN,
 )
 
@@ -53,7 +57,7 @@ async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.FORM
 
     with (
-        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient"),
+        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client,
         patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
     ):
         result = await hass.config_entries.flow.async_configure(
@@ -64,6 +68,7 @@ async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "iven"
     assert result["data"] == USER_INPUT
+    assert client.call_args.kwargs["timeout"] == DEFAULT_TIMEOUT
 
 
 @pytest.mark.parametrize(
@@ -193,6 +198,7 @@ async def test_options_flow_saves_the_selection(hass: HomeAssistant) -> None:
         CONF_DAYS: 14,
         CONF_INCLUDE_ALL_DAY: False,
         CONF_READ_ONLY: True,
+        CONF_TIMEOUT: DEFAULT_TIMEOUT,
     }
 
 
@@ -946,3 +952,99 @@ def test_two_calendars_whose_paths_nest_still_get_a_label_each() -> None:
         "/personal": "Personal (/personal)",
         "/remote.php/dav/iven/personal": "Personal (iven/personal)",
     }
+
+
+async def test_reauth_asks_with_the_timeout_the_account_was_given(
+    hass: HomeAssistant,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data=USER_INPUT,
+        options={CONF_TIMEOUT: 90},
+        unique_id=f"{USER_INPUT[CONF_URL]}#{USER_INPUT[CONF_USERNAME]}",
+    )
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reauth_flow(hass)
+    with (
+        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client,
+        # Or the reload that follows builds the client this assertion reads.
+        patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
+    ):
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_PASSWORD: "new"}
+        )
+
+    assert client.call_args.kwargs["timeout"] == 90
+
+
+async def test_reconfigure_asks_with_the_timeout_the_account_was_given(
+    hass: HomeAssistant,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data=USER_INPUT,
+        options={CONF_TIMEOUT: 90},
+        unique_id=f"{USER_INPUT[CONF_URL]}#{USER_INPUT[CONF_USERNAME]}",
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    with (
+        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client,
+        patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
+    ):
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_URL: USER_INPUT[CONF_URL], CONF_VERIFY_SSL: True}
+        )
+
+    assert client.call_args.kwargs["timeout"] == 90
+
+
+async def test_a_timeout_set_in_the_options_reaches_the_client(
+    hass: HomeAssistant,
+) -> None:
+    entry = await _setup_entry(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "account"}
+    )
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.return_value.calendars.return_value = []
+        await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_SCAN_INTERVAL: 15,
+                CONF_DAYS: 7,
+                CONF_INCLUDE_ALL_DAY: True,
+                CONF_READ_ONLY: False,
+                CONF_TIMEOUT: 90,
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert entry.options[CONF_TIMEOUT] == 90
+    assert client.call_args.kwargs["timeout"] == 90
+
+
+async def test_the_account_form_opens_on_the_stored_timeout(
+    hass: HomeAssistant,
+) -> None:
+    entry = await _setup_entry(hass, options={CONF_TIMEOUT: 90})
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "account"}
+    )
+
+    fields = voluptuous_serialize.convert(
+        result["data_schema"], custom_serializer=cv.custom_serializer
+    )
+    timeout = next(item for item in fields if item["name"] == CONF_TIMEOUT)
+
+    assert timeout["default"] == 90
+    number = timeout["selector"]["number"]
+    assert (number["min"], number["max"]) == (5, 120)

@@ -73,12 +73,14 @@
         "data": {
           "calendars": "Calendriers à inclure",
           "scan_interval": "Minutes entre les interrogations",
+          "timeout": "Secondes par requête",
           "days": "Jours à l'avance",
           "include_all_day": "Inclure les événements sur toute la journée",
           "read_only": "Lecture seule"
         },
         "data_description": {
           "scan_interval": "À quelle fréquence rechercher les modifications effectuées en dehors de Home Assistant.",
+          "timeout": "Combien de temps attendre la réponse du serveur à une seule requête.",
           "days": "Sur combien de jours chercher pour déterminer le prochain événement.",
           "include_all_day": "Si un événement sur toute la journée peut être le prochain.",
           "read_only": "Masque les commandes de création, de modification et de suppression."

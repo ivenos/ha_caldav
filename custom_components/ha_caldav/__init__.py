@@ -57,7 +57,7 @@ from .coordinator import (
     calendar_unique_id,
     todo_unique_id,
 )
-from .options import calendar_settings
+from .options import calendar_settings, request_timeout
 from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -218,7 +218,7 @@ async def _async_connect(
     hass: HomeAssistant, entry: HaCaldavConfigEntry
 ) -> tuple[caldav.DAVClient, list[caldav.Calendar]]:
     """Connect and list the calendars, trying the RFC 6764 bootstrap url too."""
-    kwargs = connection_kwargs(entry.data)
+    kwargs = connection_kwargs(entry.data, request_timeout(entry))
     last_error: Exception | None = None
     # Driven from the executor: reaching the bootstrap url asks the server.
     candidates = url_candidates(entry.data[CONF_URL], kwargs)

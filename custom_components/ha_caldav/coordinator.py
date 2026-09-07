@@ -34,7 +34,7 @@ _KEEP = object()
 
 # Returned by a half with nothing left to serve: it never answered, or it has
 # been failing long enough that its snapshot cannot be told apart from a fresh
-# one. Such a half fails the whole poll, but only once both have been tried.
+# one. A poll fails only when every half of the collection is one of these.
 _DEAD = object()
 
 # How long a half may go on serving that previous result before the entity says
@@ -213,6 +213,28 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         # to-do report the server refuses is still a calendar that reads.
         self.dead = {"events": False, "todos": False}
 
+    @property
+    def poll_health(self) -> dict[str, Any]:
+        """Return how far behind each half of this collection is.
+
+        The time is of the last poll where every half read, which a half still
+        serving a kept result leaves behind, and which is None until one did.
+        """
+        halves = [
+            half
+            for half, supported in (
+                ("events", self.capability.supports_events),
+                ("todos", self.capability.supports_todos),
+            )
+            if supported
+        ]
+        fetched = self._fetched_at
+        return {
+            "last_full_read": fetched.isoformat() if fetched else None,
+            "kept_polls": {half: self._misses[half] for half in halves},
+            "dead": {half: self.dead[half] for half in halves},
+        }
+
     async def async_get_events(
         self, hass: HomeAssistant, start_date: datetime, end_date: datetime
     ) -> list[CalendarEvent]:
@@ -328,14 +350,11 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         self._etags_missed = False
         # Committed only after a complete fetch; a half that failed, or a window
         # whose etags did not arrive, leaves the token behind for the next poll.
-        if (
-            (stale or moved or aged)
-            and await self._async_fetch(start, end)
-            and not self._etags_missed
-        ):
-            self._window = (start, end)
-            self._sync_token = token
+        if (stale or moved or aged) and await self._async_fetch(start, end):
             self._fetched_at = dt_util.utcnow()
+            if not self._etags_missed:
+                self._window = (start, end)
+                self._sync_token = token
         upcoming = self._next_event()
         return CalendarSnapshot(
             next_event=upcoming[1] if upcoming is not None else None,
@@ -346,7 +365,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
     async def _async_fetch(self, start: datetime, end: datetime) -> bool:
         """Refresh both halves; a half that failed before keeps its last result.
 
-        A poll where no half came back at all still fails.
+        A poll where no half has a result left to keep still fails.
         """
         events, events_error = await self._async_half(
             self._fetch_events(start, end),
@@ -386,20 +405,27 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
                     self._etags_missed = True
                 else:
                     self.todo_etags = todos.etags
-        for half, result, error in (
-            ("events", events, events_error),
-            ("todos", todos, todos_error),
-        ):
+        halves = (("events", events, events_error), ("todos", todos, todos_error))
+        for half, result, _ in halves:
             self.dead[half] = result is _DEAD
-            # Rejected credentials belong in reauth however few halves saw them.
-            if result is _DEAD and isinstance(error, AuthorizationError):
-                raise error
-        # Only when nothing at all came back. A half that keeps failing takes
-        # its own entity down through HaCaldavEntity.available; failing the poll
-        # over it would take the other half's entity with it, on data that then
-        # freezes for as long as this one stays broken.
-        if errors and len(errors) == self._halves:
-            raise errors[0]
+        lost = [error for _, result, error in halves if result is _DEAD]
+        rejected = [
+            error
+            for error in errors
+            if isinstance(error, AuthorizationError) and error.reason == "Unauthorized"
+        ]
+        # Only 401, caldav raises this for a transient 403 too. A half that read
+        # explains one away, and so does one still inside its keep budget.
+        if (
+            rejected
+            and len(errors) == self._halves
+            and all(error in rejected or error in lost for error in errors)
+        ):
+            raise rejected[0]
+        # One half is all a collection of one component type has, so anything
+        # stricter fails on every timeout there.
+        if lost and len(lost) == self._halves:
+            raise lost[0]
         return not errors
 
     @property
@@ -418,12 +444,11 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         try:
             result = await self.hass.async_add_executor_job(job)
         except Exception as err:  # noqa: BLE001
-            # Nothing read before is nothing to fall back on: a failed poll, not
-            # a stale one, or the entity would look healthy and empty forever.
-            # The same goes for one that keeps failing, which serves a snapshot
-            # nobody can tell is old and validates writes against it. Reported
-            # rather than raised, so the other half is still fetched before the
-            # poll gives up and its cache does not freeze along with this one.
+            # Nothing read before is nothing to fall back on, and neither is a
+            # snapshot so old nobody can tell, which would go on validating
+            # writes against it. Either takes this half's own entity down, and
+            # the poll with it only once no half has anything left. Reported
+            # rather than raised, so the other half is still fetched first.
             if cached is None or self._misses[half] >= _MAX_KEPT_POLLS:
                 return _DEAD, err
             self._misses[half] += 1

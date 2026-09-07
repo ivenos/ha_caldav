@@ -1,5 +1,6 @@
 """Tests for the CalDAV diagnostics."""
 
+from datetime import timedelta
 import json
 from unittest.mock import Mock
 
@@ -8,6 +9,7 @@ from caldav.lib.error import DAVError
 from homeassistant.components.diagnostics import REDACTED
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ha_caldav.capability import Capability
@@ -19,7 +21,11 @@ from custom_components.ha_caldav.const import (
     CONF_CLIENT_KEY,
     DOMAIN,
 )
-from custom_components.ha_caldav.coordinator import HaCaldavRuntimeData, ManagedCalendar
+from custom_components.ha_caldav.coordinator import (
+    HaCaldavCoordinator,
+    HaCaldavRuntimeData,
+    ManagedCalendar,
+)
 from custom_components.ha_caldav.diagnostics import async_get_config_entry_diagnostics
 
 ENTRY_DATA = {
@@ -285,7 +291,7 @@ async def test_diagnostics_report_a_managed_calendar_from_what_was_read(
     managed = ManagedCalendar(
         calendar=calendar,
         capability=Capability(frozenset({"VEVENT"}), writable=False),
-        coordinator=Mock(),
+        coordinator=Mock(poll_health={}),
         read_only=True,
     )
     entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
@@ -297,3 +303,69 @@ async def test_diagnostics_report_a_managed_calendar_from_what_was_read(
     assert diag["calendars"][0]["components"] == ["VEVENT"]
     assert diag["calendars"][0]["writable"] is False
     assert diag["calendars"][0]["read_only_option"] is True
+
+
+async def test_diagnostics_report_how_current_each_half_is(
+    hass: HomeAssistant,
+) -> None:
+    """A half serves its last result for a few polls before the entity says so,
+    and this is the only place a report would show that it did."""
+    calendar = _calendar("Personal", ["VEVENT", "VTODO"])
+    entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    capability = Capability(frozenset({"VEVENT", "VTODO"}), writable=True)
+    coordinator = HaCaldavCoordinator(
+        hass, entry, calendar, capability, 7, True, timedelta(minutes=15)
+    )
+    coordinator._fetched_at = dt_util.utcnow() - timedelta(hours=2)
+    coordinator._misses["events"] = 2
+    coordinator.dead["todos"] = True
+    entry.runtime_data = _runtime(
+        _client([calendar]),
+        [
+            ManagedCalendar(
+                calendar=calendar,
+                capability=capability,
+                coordinator=coordinator,
+                read_only=False,
+            )
+        ],
+    )
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    poll = diag["calendars"][0]["poll"]
+    assert poll["kept_polls"] == {"events": 2, "todos": 0}
+    assert poll["dead"] == {"events": False, "todos": True}
+    assert poll["last_full_read"].startswith(
+        f"{coordinator._fetched_at:%Y-%m-%dT%H:%M}"
+    )
+    # This is what a user attaches to an issue.
+    json.dumps(diag)
+
+
+async def test_diagnostics_report_only_the_halves_a_calendar_has(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal", ["VEVENT"])
+    entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    capability = Capability(frozenset({"VEVENT"}), writable=True)
+    entry.runtime_data = _runtime(
+        _client([calendar]),
+        [
+            ManagedCalendar(
+                calendar=calendar,
+                capability=capability,
+                coordinator=HaCaldavCoordinator(
+                    hass, entry, calendar, capability, 7, True, timedelta(minutes=15)
+                ),
+                read_only=False,
+            )
+        ],
+    )
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert diag["calendars"][0]["poll"]["dead"] == {"events": False}
+    assert diag["calendars"][0]["poll"]["kept_polls"] == {"events": 0}

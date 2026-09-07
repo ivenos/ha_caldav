@@ -15,7 +15,7 @@
     "icalendar"
   ],
   "requirements": [
-    "caldav==2.1.0",
+    "caldav==2.2.6",
     "icalendar==6.3.1",
     "vobject==0.9.9"
   ],

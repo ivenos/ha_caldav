@@ -34,7 +34,7 @@ _KEEP = object()
 
 # Returned by a half with nothing left to serve: it never answered, or it has
 # been failing long enough that its snapshot cannot be told apart from a fresh
-# one. The poll fails once every half the calendar has is one of these.
+# one. A poll fails only when every half of the collection is one of these.
 _DEAD = object()
 
 # How long a half may go on serving that previous result before the entity says
@@ -215,12 +215,10 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
 
     @property
     def poll_health(self) -> dict[str, Any]:
-        """Report how far behind each half of this collection is.
+        """Return how far behind each half of this collection is.
 
-        A half that failed goes on serving its last result for a few polls, and
-        nothing else in a diagnostics dump would show that it did. The time is
-        of the last poll that came back whole, which a half still on a kept
-        result leaves behind, and which is None until one ever did.
+        The time is of the last poll where every half read, which a half still
+        serving a kept result leaves behind, and which is None until one did.
         """
         halves = [
             half
@@ -352,14 +350,11 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         self._etags_missed = False
         # Committed only after a complete fetch; a half that failed, or a window
         # whose etags did not arrive, leaves the token behind for the next poll.
-        if (
-            (stale or moved or aged)
-            and await self._async_fetch(start, end)
-            and not self._etags_missed
-        ):
-            self._window = (start, end)
-            self._sync_token = token
+        if (stale or moved or aged) and await self._async_fetch(start, end):
             self._fetched_at = dt_util.utcnow()
+            if not self._etags_missed:
+                self._window = (start, end)
+                self._sync_token = token
         upcoming = self._next_event()
         return CalendarSnapshot(
             next_event=upcoming[1] if upcoming is not None else None,
@@ -413,25 +408,24 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         halves = (("events", events, events_error), ("todos", todos, todos_error))
         for half, result, _ in halves:
             self.dead[half] = result is _DEAD
-        # Only when every half saw one, whether or not they still have something
-        # to serve. A 401 beside a half that read cleanly, or beside one that
-        # timed out, says nothing about the password: that is the server having
-        # a bad minute. Only 401, caldav raises this for a transient 403 too.
+        lost = [error for _, result, error in halves if result is _DEAD]
         rejected = [
             error
             for error in errors
             if isinstance(error, AuthorizationError) and error.reason == "Unauthorized"
         ]
-        if rejected and len(rejected) == self._halves:
+        # Only 401, caldav raises this for a transient 403 too. A half that read
+        # explains one away, and so does one still inside its keep budget.
+        if (
+            rejected
+            and len(errors) == self._halves
+            and all(error in rejected or error in lost for error in errors)
+        ):
             raise rejected[0]
-        # Only when no half has anything left. On a collection of one component
-        # type that is one half, and anything stricter fails on every timeout.
-        lost = [error for _, result, error in halves if result is _DEAD]
+        # One half is all a collection of one component type has, so anything
+        # stricter fails on every timeout there.
         if lost and len(lost) == self._halves:
-            # Never a 401 the rule above declined to reauth on: raised here it
-            # reaches reauth anyway, and which half holds it is an ordering
-            # accident rather than anything the server said.
-            raise next((error for error in lost if error not in rejected), lost[0])
+            raise lost[0]
         return not errors
 
     @property

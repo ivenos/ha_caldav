@@ -73,26 +73,17 @@
         "data": {
           "calendars": "Calendarios que incluir",
           "scan_interval": "Minutos entre sondeos",
+          "timeout": "Segundos por petición",
           "days": "Días de antelación",
           "include_all_day": "Incluir eventos de todo el día",
           "read_only": "Solo lectura"
         },
         "data_description": {
           "scan_interval": "Cada cuánto se buscan cambios hechos fuera de Home Assistant.",
+          "timeout": "Cuánto tiempo se espera la respuesta del servidor a una sola petición.",
           "days": "Con cuánta antelación se busca el próximo evento.",
           "include_all_day": "Si un evento de todo el día puede ser el próximo evento.",
           "read_only": "Oculta los controles de crear, editar y eliminar."
-        },
-        "sections": {
-          "advanced": {
-            "name": "Avanzado",
-            "data": {
-              "timeout": "Segundos por petición"
-            },
-            "data_description": {
-              "timeout": "Cuánto tiempo se espera la respuesta del servidor a una sola petición."
-            }
-          }
         }
       },
       "pick": {

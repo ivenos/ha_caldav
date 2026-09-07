@@ -770,7 +770,6 @@ async def test_the_only_half_of_a_calendar_rides_out_a_failure_then_gives_up(
 
     await entity.coordinator.async_refresh()
 
-    # Events alone, so the collection has one half and one timeout is the poll.
     assert entity.coordinator.last_update_success is True
     assert entity.available is True
     assert entity.coordinator.data.next_event.summary == "Standup"
@@ -1145,6 +1144,25 @@ async def test_the_panel_etags_and_the_polled_ones_live_side_by_side(
     await coordinator.async_get_events(hass, window, window + timedelta(days=20))
 
     assert coordinator.etags == {"near-1": '"near"', "far-1": '"far"'}
+
+
+async def test_a_server_that_puts_no_etag_on_a_window_still_reports_a_read(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    bare = _etag_item("uid-1", '"e"')
+    bare.props = {}
+    calendar.search.side_effect = lambda **kw: [] if kw.get("todo") else [bare]
+    calendar.objects_by_sync_token.side_effect = lambda token=None: Mock(
+        sync_token=object()
+    )
+    await _setup(hass, [calendar])
+    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+
+    await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is True
+    assert coordinator.poll_health["last_full_read"] is not None
 
 
 async def test_a_transient_403_during_a_poll_does_not_force_a_reauth(
@@ -1648,9 +1666,8 @@ async def test_a_401_beside_a_half_that_read_cleanly_is_not_a_reauth(
     ]
 
 
-@pytest.mark.parametrize("unauthorized", ["events", "todos"])
-async def test_a_401_beside_a_half_that_timed_out_is_not_a_reauth(
-    hass: HomeAssistant, unauthorized: str
+async def test_a_401_beside_one_bad_minute_is_not_a_reauth(
+    hass: HomeAssistant,
 ) -> None:
     calendar = _calendar("Personal")
     calendar.objects_by_sync_token.side_effect = lambda token=None: Mock(
@@ -1660,22 +1677,62 @@ async def test_a_401_beside_a_half_that_timed_out_is_not_a_reauth(
     coordinator = _entity(hass, "calendar.iven_personal").coordinator
 
     def search(**kwargs):
-        half = "todos" if kwargs.get("todo") else "events"
-        if half == unauthorized:
+        if kwargs.get("todo"):
             raise AuthorizationError(
                 url="https://cloud.example.com/dav/", reason="Unauthorized"
             )
         raise Timeout("no answer at all")
 
     calendar.search.side_effect = search
-    # Past the keep budget, so the poll has to pick an error to give up with.
-    # Which half holds the 401 is an accident of the order they are listed in.
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert not [
+        flow
+        for flow in hass.config_entries.flow.async_progress()
+        if flow["context"].get("source") == "reauth"
+    ]
+
+
+@pytest.mark.parametrize("unauthorized", ["events", "todos"])
+async def test_a_401_reauths_beside_a_half_that_has_been_broken_for_good(
+    hass: HomeAssistant, unauthorized: str
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.objects_by_sync_token.side_effect = lambda token=None: Mock(
+        sync_token=object()
+    )
+    await _setup(hass, [calendar])
+    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    broken = "events" if unauthorized == "todos" else "todos"
+
+    def half_of(kwargs):
+        return "todos" if kwargs.get("todo") else "events"
+
+    def timing_out(**kwargs):
+        if half_of(kwargs) == broken:
+            raise Timeout("no answer at all")
+        return []
+
+    calendar.search.side_effect = timing_out
     for _ in range(_MAX_KEPT_POLLS + 1):
         await coordinator.async_refresh()
-        await hass.async_block_till_done()
-        assert not [
-            flow
-            for flow in hass.config_entries.flow.async_progress()
-            if flow["context"].get("source") == "reauth"
-        ]
-    assert type(coordinator.last_exception).__name__ == "UpdateFailed"
+    assert coordinator.dead[broken]
+
+    def rotated(**kwargs):
+        if half_of(kwargs) == broken:
+            raise Timeout("no answer at all")
+        raise AuthorizationError(
+            url="https://cloud.example.com/dav/", reason="Unauthorized"
+        )
+
+    calendar.search.side_effect = rotated
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert [
+        flow
+        for flow in hass.config_entries.flow.async_progress()
+        if flow["context"].get("source") == "reauth"
+    ]

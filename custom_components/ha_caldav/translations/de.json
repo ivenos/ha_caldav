@@ -73,26 +73,17 @@
         "data": {
           "calendars": "Einzubindende Kalender",
           "scan_interval": "Minuten zwischen Abfragen",
+          "timeout": "Sekunden pro Serveranfrage",
           "days": "Tage im Voraus",
           "include_all_day": "Ganztägige Termine einbeziehen",
           "read_only": "Schreibgeschützt"
         },
         "data_description": {
           "scan_interval": "Wie oft nach Änderungen außerhalb von Home Assistant gesucht wird.",
+          "timeout": "Wie lange eine einzelne Anfrage an den Server dauern darf.",
           "days": "Wie weit vorausgeschaut wird, um den nächsten Termin zu bestimmen.",
           "include_all_day": "Ob ein ganztägiger Termin der nächste Termin sein kann.",
           "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus."
-        },
-        "sections": {
-          "advanced": {
-            "name": "Erweitert",
-            "data": {
-              "timeout": "Sekunden pro Anfrage"
-            },
-            "data_description": {
-              "timeout": "Wie lange auf die Antwort des Servers auf eine einzelne Anfrage gewartet wird."
-            }
-          }
         }
       },
       "pick": {

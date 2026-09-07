@@ -10,7 +10,6 @@ from homeassistant.const import CONF_TIMEOUT
 
 from .connection import calendar_key
 from .const import (
-    CONF_ADVANCED,
     CONF_CALENDAR_OPTIONS,
     CONF_DAYS,
     CONF_INCLUDE_ALL_DAY,
@@ -23,12 +22,8 @@ from .const import (
 
 
 def request_timeout(entry: ConfigEntry) -> float:
-    """Return the seconds one request to this account may take.
-
-    Under its own key because the form groups it into a collapsed section, and
-    a section hands its fields back nested.
-    """
-    return entry.options.get(CONF_ADVANCED, {}).get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+    """Return the seconds one request to this account may take."""
+    return entry.options.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
 
 
 def account_settings(entry: ConfigEntry) -> dict[str, Any]:

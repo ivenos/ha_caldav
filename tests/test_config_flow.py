@@ -22,7 +22,6 @@ import voluptuous_serialize
 
 from custom_components.ha_caldav.config_flow import _labelled
 from custom_components.ha_caldav.const import (
-    CONF_ADVANCED,
     CONF_CA_BUNDLE,
     CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
@@ -58,7 +57,7 @@ async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.FORM
 
     with (
-        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient"),
+        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client,
         patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
     ):
         result = await hass.config_entries.flow.async_configure(
@@ -69,6 +68,7 @@ async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "iven"
     assert result["data"] == USER_INPUT
+    assert client.call_args.kwargs["timeout"] == DEFAULT_TIMEOUT
 
 
 @pytest.mark.parametrize(
@@ -187,7 +187,6 @@ async def test_options_flow_saves_the_selection(hass: HomeAssistant) -> None:
                 CONF_DAYS: 14,
                 CONF_INCLUDE_ALL_DAY: False,
                 CONF_READ_ONLY: True,
-                CONF_ADVANCED: {},
             },
         )
         await hass.async_block_till_done()
@@ -199,7 +198,7 @@ async def test_options_flow_saves_the_selection(hass: HomeAssistant) -> None:
         CONF_DAYS: 14,
         CONF_INCLUDE_ALL_DAY: False,
         CONF_READ_ONLY: True,
-        CONF_ADVANCED: {CONF_TIMEOUT: DEFAULT_TIMEOUT},
+        CONF_TIMEOUT: DEFAULT_TIMEOUT,
     }
 
 
@@ -225,7 +224,6 @@ async def test_options_flow_keeps_selection_while_unreachable(
                 CONF_DAYS: 3,
                 CONF_INCLUDE_ALL_DAY: True,
                 CONF_READ_ONLY: False,
-                CONF_ADVANCED: {},
             },
         )
         await hass.async_block_till_done()
@@ -748,7 +746,7 @@ async def test_the_options_form_refuses_an_empty_calendar_selection(
     )
 
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {CONF_CALENDARS: [], CONF_ADVANCED: {}}
+        result["flow_id"], {CONF_CALENDARS: []}
     )
 
     # Reported as a translated form error, not as the voluptuous message, which
@@ -850,7 +848,6 @@ async def test_a_calendar_one_listing_left_out_stays_selected(
                 CONF_DAYS: 14,
                 CONF_INCLUDE_ALL_DAY: False,
                 CONF_READ_ONLY: False,
-                CONF_ADVANCED: {},
             },
         )
         await hass.async_block_till_done()
@@ -887,7 +884,6 @@ async def test_an_account_tracking_everything_is_not_frozen_by_a_visit(
                 CONF_DAYS: 14,
                 CONF_INCLUDE_ALL_DAY: False,
                 CONF_READ_ONLY: False,
-                CONF_ADVANCED: {},
             },
         )
         await hass.async_block_till_done()
@@ -964,7 +960,7 @@ async def test_reauth_asks_with_the_timeout_the_account_was_given(
     entry = MockConfigEntry(
         domain=DOMAIN,
         data=USER_INPUT,
-        options={CONF_ADVANCED: {CONF_TIMEOUT: 90}},
+        options={CONF_TIMEOUT: 90},
         unique_id=f"{USER_INPUT[CONF_URL]}#{USER_INPUT[CONF_USERNAME]}",
     )
     entry.add_to_hass(hass)
@@ -988,7 +984,7 @@ async def test_reconfigure_asks_with_the_timeout_the_account_was_given(
     entry = MockConfigEntry(
         domain=DOMAIN,
         data=USER_INPUT,
-        options={CONF_ADVANCED: {CONF_TIMEOUT: 90}},
+        options={CONF_TIMEOUT: 90},
         unique_id=f"{USER_INPUT[CONF_URL]}#{USER_INPUT[CONF_USERNAME]}",
     )
     entry.add_to_hass(hass)
@@ -1026,19 +1022,19 @@ async def test_a_timeout_set_in_the_options_reaches_the_client(
                 CONF_DAYS: 7,
                 CONF_INCLUDE_ALL_DAY: True,
                 CONF_READ_ONLY: False,
-                CONF_ADVANCED: {CONF_TIMEOUT: 90},
+                CONF_TIMEOUT: 90,
             },
         )
         await hass.async_block_till_done()
 
-    assert entry.options[CONF_ADVANCED][CONF_TIMEOUT] == 90
+    assert entry.options[CONF_TIMEOUT] == 90
     assert client.call_args.kwargs["timeout"] == 90
 
 
-async def test_the_advanced_section_opens_on_the_stored_timeout(
+async def test_the_account_form_opens_on_the_stored_timeout(
     hass: HomeAssistant,
 ) -> None:
-    entry = await _setup_entry(hass, options={CONF_ADVANCED: {CONF_TIMEOUT: 90}})
+    entry = await _setup_entry(hass, options={CONF_TIMEOUT: 90})
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], {"next_step_id": "account"}
@@ -1047,11 +1043,8 @@ async def test_the_advanced_section_opens_on_the_stored_timeout(
     fields = voluptuous_serialize.convert(
         result["data_schema"], custom_serializer=cv.custom_serializer
     )
-    advanced = next(item for item in fields if item["name"] == CONF_ADVANCED)
+    timeout = next(item for item in fields if item["name"] == CONF_TIMEOUT)
 
-    # The frontend reads a default on the section itself before it recurses
-    # into one, so a section carrying one renders every field in it empty.
-    assert "default" not in advanced
-    assert advanced["schema"][0]["default"] == 90
-    number = advanced["schema"][0]["selector"]["number"]
+    assert timeout["default"] == 90
+    number = timeout["selector"]["number"]
     assert (number["min"], number["max"]) == (5, 120)

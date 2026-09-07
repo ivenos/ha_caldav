@@ -10,7 +10,6 @@ CONF_CALENDAR_OPTIONS = "calendar_options"
 CONF_CLIENT_CERT = "client_cert"
 CONF_CLIENT_KEY = "client_key"
 CONF_CA_BUNDLE = "ca_bundle"
-CONF_ADVANCED = "advanced"
 
 DEFAULT_DAYS = 7
 DEFAULT_INCLUDE_ALL_DAY = True

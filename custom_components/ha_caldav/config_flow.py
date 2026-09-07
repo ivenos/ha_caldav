@@ -23,7 +23,6 @@ from homeassistant.const import (
     CONF_VERIFY_SSL,
 )
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import section
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.selector import (
     NumberSelector,
@@ -42,7 +41,6 @@ from .connection import (
     without_userinfo,
 )
 from .const import (
-    CONF_ADVANCED,
     CONF_CA_BUNDLE,
     CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
@@ -262,6 +260,9 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
             )
         ] = _minutes()
         fields[
+            vol.Optional(CONF_TIMEOUT, default=request_timeout(self.config_entry))
+        ] = _seconds()
+        fields[
             vol.Optional(CONF_DAYS, default=options.get(CONF_DAYS, DEFAULT_DAYS))
         ] = _days()
         fields[
@@ -275,16 +276,6 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
                 CONF_READ_ONLY, default=options.get(CONF_READ_ONLY, DEFAULT_READ_ONLY)
             )
         ] = cv.boolean
-        fields[vol.Required(CONF_ADVANCED)] = section(
-            vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_TIMEOUT, default=request_timeout(self.config_entry)
-                    ): _seconds()
-                }
-            ),
-            {"collapsed": True},
-        )
 
         return self.async_show_form(
             step_id="account", data_schema=vol.Schema(fields), errors=errors

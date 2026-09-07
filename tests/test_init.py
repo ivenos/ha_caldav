@@ -19,7 +19,6 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ha_caldav import async_migrate_entry
 from custom_components.ha_caldav.const import (
-    CONF_ADVANCED,
     CONF_CALENDARS,
     DOMAIN,
     ISSUE_BUILTIN_CALDAV,
@@ -751,7 +750,7 @@ async def test_the_timeout_option_is_what_a_request_gets(hass: HomeAssistant) ->
         domain=DOMAIN,
         title="iven",
         data=ENTRY_DATA,
-        options={CONF_ADVANCED: {CONF_TIMEOUT: 90}},
+        options={CONF_TIMEOUT: 90},
         unique_id="x",
     )
     entry.add_to_hass(hass)

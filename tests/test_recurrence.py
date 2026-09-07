@@ -2804,7 +2804,7 @@ def test_turning_an_all_day_event_into_a_timed_one_carries_its_timezone() -> Non
 
 
 def test_moving_a_series_onto_a_gap_keeps_its_exceptions_attached() -> None:
-    """A wall time the zone does not have — any spring-forward hour — comes
+    """A wall time the zone does not have - any spring-forward hour - comes
     back an hour later from a trip through UTC, and a delta taken from that is
     an hour too large. Every exception it then moves stops naming a slot the
     rule produces and detaches into an event of its own, standing next to the
@@ -2880,7 +2880,7 @@ def test_splitting_at_an_hour_the_zone_skips_does_not_retime_the_tail() -> None:
     """The occurrence is resolved to an instant the moment the frontend names
     it, and that instant converted back into the series zone lands an hour past
     the slot the rule produces. Anchored on it, the split-off series keeps that
-    hour for every year after — a yearly meeting on the morning the clocks go
+    hour for every year after - a yearly meeting on the morning the clocks go
     forward moves and stays moved."""
     series = (
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
@@ -2989,7 +2989,7 @@ def test_the_uid_of_a_split_all_day_series_does_not_move_with_the_zone(
     zone: str,
 ) -> None:
     """to_utc reads a bare date as local midnight, so the derived uid differed
-    in every configured zone — and the retry this shape exists for made a
+    in every configured zone - and the retry this shape exists for made a
     second tail instead of overwriting the first."""
     calendar = FakeCalendar(ALL_DAY_SERIES)
     previous = dt_util.get_default_time_zone()
@@ -3012,7 +3012,7 @@ def test_the_uid_of_a_split_all_day_series_does_not_move_with_the_zone(
 def test_a_split_tail_carries_the_uid_of_the_instant_it_starts_at() -> None:
     """The derived uid is what lets a retry overwrite the tail instead of
     adding a second one, so it has to name the split point the same way every
-    time — off the instant for a zoned series, off the value as written for one
+    time - off the instant for a zoned series, off the value as written for one
     dated in days."""
     calendar = FakeCalendar(TIMED_SERIES)
 
@@ -3031,7 +3031,7 @@ def test_a_split_tail_carries_the_uid_of_the_instant_it_starts_at() -> None:
 def test_a_tail_whose_rule_does_not_produce_its_own_start_is_refused() -> None:
     """The head is capped and the tail is anchored on the split point, so a
     rule that does not land on it would reschedule every remaining occurrence
-    onto other days — silently, and only from the split onwards."""
+    onto other days - silently, and only from the split onwards."""
     mondays = (
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
         "BEGIN:VEVENT\r\nUID:m-1\r\nDTSTAMP:20260101T000000Z\r\n"
@@ -3279,7 +3279,7 @@ def test_a_rule_nothing_can_expand_is_refused_before_it_is_stored(rule) -> None:
 def test_a_split_keeps_the_parameters_of_the_dates_it_rebuilds(half, kept) -> None:
     """VALUE=DATE and TZID live in those parameters. Dropped, an all-day extra
     occurrence becomes a floating midnight and a zoned one a different instant
-    — the very thing filtering the values one line at a time exists to avoid."""
+    - the very thing filtering the values one line at a time exists to avoid."""
     calendar = FakeCalendar(ALL_DAY_DATED_SERIES)
 
     update_event(
@@ -3328,7 +3328,7 @@ def test_moving_a_zoned_series_keeps_it_anchored_to_its_own_zone() -> None:
 
 def test_a_split_of_an_object_with_a_repeated_uid_names_the_tail_once() -> None:
     """icalendar hands a repeated property back as a list, and the derived uid
-    built out of one is a resource nothing can find again — while the retry the
+    built out of one is a resource nothing can find again - while the retry the
     derived shape exists for writes a second."""
     calendar = FakeCalendar(DOUBLED_UID_SERIES)
 

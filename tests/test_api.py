@@ -1319,7 +1319,7 @@ def test_a_rewrite_keeps_the_properties_the_server_put_on_the_document() -> None
 
 def test_a_generated_timezone_survives_being_read_back() -> None:
     """icalendar writes one RDATE per observance carrying every transition as a
-    list, and vobject — which the read path parses with — keeps only the first
+    list, and vobject - which the read path parses with - keeps only the first
     value of such a line. An event this integration had just written at 09:00
     Berlin read back an hour out for the whole daylight-saving half of the year,
     on its own calendar."""
@@ -1381,7 +1381,7 @@ def test_the_weak_marker_does_not_make_an_etag_a_conflict(stored, expected) -> N
 
 def test_a_rule_naming_a_day_no_month_has_is_refused() -> None:
     """Such a rule yields nothing, so the guard that counts yielded occurrences
-    never fires and dateutil walks to the year 9999 — minute by minute for a
+    never fires and dateutil walks to the year 9999 - minute by minute for a
     sub-daily frequency, with the collection's write lock held throughout."""
     instance = ICalCalendar.from_ical(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
@@ -1585,7 +1585,7 @@ def test_an_object_no_read_can_reach_still_answers_the_clash_check() -> None:
 
 
 # Text a caldav rewrite rule matches. RFC 5545 escapes none of it, so it
-# travels to the server exactly as the user typed it — or does not.
+# travels to the server exactly as the user typed it - or does not.
 _TRAP = "Deal COMPLETED:20260101 - archive the file"
 
 

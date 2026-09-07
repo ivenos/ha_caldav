@@ -376,7 +376,7 @@ def test_a_password_comes_off_a_url_too_malformed_to_parse() -> None:
 
 def test_stored_connection_details_carry_no_userinfo() -> None:
     """caldav prefers userinfo in the url over the account handed to it, so a
-    url pasted with credentials in it would authenticate as whoever it names —
+    url pasted with credentials in it would authenticate as whoever it names -
     and the entry would keep that password in a second place forever."""
     from custom_components.ha_caldav.config_flow import _cleaned
 

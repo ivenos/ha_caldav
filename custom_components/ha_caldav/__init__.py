@@ -76,16 +76,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_migrate_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> bool:
     """Normalize the account key of an entry, and the keys of its entities.
 
-    One account spelled with a trailing slash, another case in the host or an
-    explicit default port used to key as a different account, which let it be
-    set up a second time. Its entities were keyed on the calendar url as it
-    stood, so moving the account to another address renamed every one of them
-    to _2 and left what the automations pointed at behind, unavailable.
-
-    Reached only because MINOR_VERSION moved with it. Home Assistant compares
-    the stored version against the handler's and returns before loading this
-    module when they agree, so a migration written for entries that already
-    carry the current number never runs at all.
+    Home Assistant runs this only while the stored MINOR_VERSION is behind the
+    handler's, so the number has to move with every change of key shape.
     """
     _LOGGER.debug("Migrating %s to the normalized keys", entry.title)
     _async_migrate_entity_keys(hass, entry)
@@ -108,10 +100,7 @@ def _async_migrate_entity_keys(hass: HomeAssistant, entry: HaCaldavConfigEntry) 
         try:
             registry.async_update_entity(record.entity_id, new_unique_id=wanted)
         except ValueError:
-            # Another entity already holds the normalized key, which means the
-            # two urls only differed in what the normalization drops. Leaving
-            # this one alone keeps the duplicate visible instead of failing the
-            # whole setup over it.
+            # Two urls that only differed in what the normalization drops.
             _LOGGER.warning(
                 "Leaving %s under its old key; %s is already taken",
                 record.entity_id,
@@ -122,12 +111,8 @@ def _async_migrate_entity_keys(hass: HomeAssistant, entry: HaCaldavConfigEntry) 
 def _normalized_unique_id(entry_id: str, unique_id: str, domain: str) -> str | None:
     """Return a unique id rebuilt on the calendar key, or None if it is not ours.
 
-    Which half an entity is comes from the registry, not from reading a suffix
-    off the key. A collection url may itself end in "-todo", and calendar_key
-    drops a trailing slash and a query string, so text alone cannot tell the
-    two apart: it produced a wrong key for one shape, and for another it mapped
-    both entities of a calendar onto the same key, where the second re-key is
-    refused and that entity stays unavailable for good.
+    The half comes from the registry domain: a collection url may itself end
+    in "-todo".
     """
     prefix = f"{entry_id}-"
     if not unique_id.startswith(prefix):
@@ -144,22 +129,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
     client, calendars = await _async_connect(hass, entry)
 
     async def close_client() -> None:
-        # Tearing down pooled sockets is blocking, and the callback runs on the
-        # event loop.
+        # Tearing down pooled sockets blocks.
         await hass.async_add_executor_job(client.close)
 
-    # Registered before anything else can fail, so a setup that gives up part
-    # way still hands the session back.
+    # First, so a setup that gives up part way still hands the session back.
     entry.async_on_unload(close_client)
 
     try:
         capabilities = await hass.async_add_executor_job(fetch_capabilities, client)
     except Exception as err:  # noqa: BLE001
-        # A server that will not answer the property is not a reason to refuse
-        # setup; every calendar then keeps the permissive default.
+        # Every calendar then keeps the permissive default.
         _LOGGER.debug("Could not read calendar capabilities: %s", err)
         capabilities = {}
     address_set = await hass.async_add_executor_job(fetch_address_set, client)
+    # A property of the server, so one calendar is enough to ask.
+    sync_collection = True
+    if calendars:
+        sync_collection = await hass.async_add_executor_job(
+            supports_sync_collection, calendars[0]
+        )
 
     scan_interval = timedelta(
         minutes=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
@@ -167,7 +155,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
     selected = entry.options.get(CONF_CALENDARS)
 
     colors = HaCaldavColorCoordinator(hass, entry, client, scan_interval)
-    # Up front, so the first sync already has colors.
     await colors.async_refresh()
 
     managed: list[ManagedCalendar] = []
@@ -188,6 +175,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
                     settings[CONF_DAYS],
                     settings[CONF_INCLUDE_ALL_DAY],
                     scan_interval,
+                    sync_collection,
                 ),
                 read_only=settings[CONF_READ_ONLY],
             )
@@ -198,19 +186,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
         *(item.coordinator.async_refresh() for item in managed),
     )
     if managed and not any(item.coordinator.last_update_success for item in managed):
-        # A password revoked between the principal lookup and the first poll
-        # belongs in reauth, not in the retry loop.
         for item in managed:
             if isinstance(item.coordinator.last_exception, ConfigEntryAuthFailed):
                 raise item.coordinator.last_exception
         raise ConfigEntryNotReady("No calendar on this account could be read")
 
     entry.runtime_data = HaCaldavRuntimeData(
-        client=client, colors=colors, calendars=managed, address_set=address_set
+        client=client,
+        colors=colors,
+        calendars=managed,
+        address_set=address_set,
+        sync_collection=sync_collection,
     )
     _async_prune_entities(hass, entry, managed, calendars)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    await _async_check_for_issues(hass, entry, managed)
+    _async_check_for_issues(hass, entry)
     return True
 
 
@@ -230,23 +220,19 @@ async def _async_connect(
             calendars = await hass.async_add_executor_job(_list_calendars, client)
         except AuthorizationError as err:
             await hass.async_add_executor_job(client.close)
-            # caldav raises this for 403 as well, which a reverse proxy or a
-            # rate limiter can produce transiently; only 401 is a bad password.
+            # caldav raises this for a 403 as well; only a 401 is a bad password.
             if err.reason == "Unauthorized":
                 _LOGGER.debug("Authorization failed: %s", err)
                 raise ConfigEntryAuthFailed("Authorization failed") from err
             last_error = err
             continue
         except Exception as err:  # noqa: BLE001
-            # Broad on purpose: a captive portal or a failing proxy answers 207
-            # with html, and caldav comes out of that with a TypeError. Letting
-            # it escape would fail setup for good instead of retrying.
+            # A captive portal answers 207 with html, which is a TypeError in caldav.
             await hass.async_add_executor_job(client.close)
             last_error = err
             continue
         return client, calendars
-    # Only the kind of failure: caldav puts the whole response body where its
-    # error prints a url, and this text is both logged and shown on the card.
+    # caldav puts the whole response body into its error text.
     _LOGGER.debug("Cannot connect to CalDAV server: %s", last_error)
     raise ConfigEntryNotReady(
         f"Cannot connect to CalDAV server: {type(last_error).__name__}"
@@ -260,8 +246,7 @@ def _list_calendars(client: caldav.DAVClient) -> list[caldav.Calendar]:
 def _is_selected(calendar: caldav.Calendar, selected: list[str]) -> bool:
     """Return whether this calendar is one the entry was told to load.
 
-    Keyed on the url. A selection written before that named the calendar, which
-    a rename on the server silently dropped out of it.
+    Entries written before v1.2.0 selected by display name rather than url.
     """
     return calendar_key(calendar.url) in selected or display_name(calendar) in selected
 
@@ -273,10 +258,7 @@ def _async_prune_entities(
     managed: list[ManagedCalendar],
     listed: list[caldav.Calendar],
 ) -> None:
-    """Drop entities for a component the calendar turns out not to carry.
-
-    They would otherwise stay in the registry as permanently unavailable.
-    """
+    """Drop entities for a component the calendar turns out not to carry."""
     registry = er.async_get(hass)
     for item in managed:
         url = item.calendar.url
@@ -311,17 +293,9 @@ def _async_prune_deselected(
 ) -> None:
     """Drop the entities of a calendar the user took out of the selection.
 
-    Decided against what the account listed, not against what was loaded out of
-    it. Those differ whenever a calendar the selection names is missing from a
-    single answer, and that is a server having a bad minute rather than a
-    decision to stop tracking it. Answered by deletion it costs the recorder
-    history, the automations, the dashboard cards and the name overrides that
-    point at the entity, irreversibly, while setup still reports success. Only
-    a calendar the account did list and the selection leaves out was really
-    deselected.
-
-    Only with an explicit selection at all: without one there is nothing for a
-    calendar to have been left out of.
+    Decided against what the account listed, not what was loaded: a calendar
+    missing from one listing is a server having a bad minute, and removing an
+    entity takes its history and everything pointing at it.
     """
     selected = entry.options.get(CONF_CALENDARS)
     if not selected:
@@ -343,24 +317,14 @@ def _async_prune_deselected(
             registry.async_remove(record.entity_id)
 
 
-async def _async_check_for_issues(
-    hass: HomeAssistant, entry: HaCaldavConfigEntry, managed: list[ManagedCalendar]
-) -> None:
+@callback
+def _async_check_for_issues(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> None:
     """Raise the repair issues for this entry."""
     _async_check_builtin_conflict(hass, entry)
     issue_id = f"{ISSUE_NO_SYNC_COLLECTION}_{entry.entry_id}"
-    if not managed:
-        # Nothing left to ask, so nothing left to warn about: an issue raised
-        # while there was would otherwise stand for good, with no calendar left
-        # for the user to see it about.
-        ir.async_delete_issue(hass, DOMAIN, issue_id)
-        return
-    # sync-collection is a property of the server, not of a collection, and
-    # the issue is worded for the account, so one calendar is enough to ask.
-    supported = await hass.async_add_executor_job(
-        supports_sync_collection, managed[0].calendar
-    )
-    if supported:
+    data = entry.runtime_data
+    # With no calendar loaded there is nothing to warn about.
+    if not data.calendars or data.sync_collection:
         ir.async_delete_issue(hass, DOMAIN, issue_id)
         return
     ir.async_create_issue(
@@ -378,9 +342,6 @@ def _async_check_builtin_conflict(
     hass: HomeAssistant, entry: HaCaldavConfigEntry
 ) -> None:
     """Warn when the built-in caldav integration serves the same account."""
-    # Through the account key, not the text as typed: the built-in integration
-    # is set up on its own, and the one spelling that would not warn is the one
-    # where the two were typed differently, which is most of them.
     ours = account_key(entry.data[CONF_URL], entry.data[CONF_USERNAME])
     clash = any(
         account_key(
@@ -412,8 +373,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) ->
 async def async_remove_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> None:
     """Drop the issues raised for this entry.
 
-    Not on unload: deleting an issue drops the record that the user dismissed
-    it, and an options change reloads the entry.
+    Not on unload: that would drop the record of a dismissal on every reload.
     """
     for issue in (ISSUE_BUILTIN_CALDAV, ISSUE_NO_SYNC_COLLECTION):
         ir.async_delete_issue(hass, DOMAIN, f"{issue}_{entry.entry_id}")

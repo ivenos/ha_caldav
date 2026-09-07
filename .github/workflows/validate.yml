@@ -14,6 +14,8 @@ concurrency:
 env:
   RUFF_VERSION: "0.15.21"
   PYTHON_VERSION: "3.14"
+  # Home Assistant 2026.3.4, the floor hacs.json sets.
+  OLDEST_HARNESS: "0.13.320"
 
 permissions:
   contents: read
@@ -52,7 +54,12 @@ jobs:
         run: ruff format --check
 
   test:
+    name: test (${{ matrix.homeassistant }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        homeassistant: [oldest, pinned]
     steps:
       - uses: actions/checkout@v7
 
@@ -64,6 +71,10 @@ jobs:
 
       - name: Install test dependencies
         run: pip install -r requirements_test.txt
+
+      - name: Install the oldest supported Home Assistant
+        if: matrix.homeassistant == 'oldest'
+        run: pip install "pytest-homeassistant-custom-component==${{ env.OLDEST_HARNESS }}"
 
       - name: Run tests
         run: pytest

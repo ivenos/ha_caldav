@@ -33,14 +33,12 @@ from .errors import as_reported
 from .recurrence import delete_event, update_event
 from .services import async_register_entity_services
 
-# Home Assistant owns the visible color under its own domain, so the record of
-# what we took from the server needs a namespace of its own.
+# Home Assistant owns the visible color under its own domain; this records the
+# one taken from the server.
 COLOR_STATE = f"{DOMAIN}.private"
 
-# Home Assistant honours this for service calls only. The panel edits its way
-# in over the websocket and never reaches it, which is why the writes are also
-# serialized per collection in HaCaldavEntity.async_write; this stays for the
-# service path, where it queues at the platform rather than per calendar.
+# Service calls only; the panel comes in over the websocket, and the lock in
+# HaCaldavEntity.async_write is what serializes writes.
 PARALLEL_UPDATES = 1
 
 
@@ -90,10 +88,9 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         self._attr_unique_id = calendar_unique_id(entry.entry_id, managed.calendar.url)
 
     def get_initial_entity_options(self) -> er.EntityOptionsType | None:
-        """Give a newly registered entity the server color, and say we set it.
+        """Give a newly registered entity the server color, recorded as ours.
 
-        Core only calls this on registration, so recording our own state here is
-        what keeps the first sync from reading its own color as a user's pick.
+        Core calls this on registration only.
         """
         options = dict(super().get_initial_entity_options() or {})
         options[COLOR_STATE] = {"color": self.initial_color, "override": False}
@@ -101,8 +98,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
 
     async def async_added_to_hass(self) -> None:
         """Start following the color this calendar carries on the server."""
-        # Before the base class, which is what subscribes to registry updates:
-        # a hook running while this is unset would read as a color the user set.
+        # Before the base class subscribes to registry updates.
         if entry := self.registry_entry:
             self._written_color = entry.options.get(CALENDAR_DOMAIN, {}).get("color")
         await super().async_added_to_hass()
@@ -111,17 +107,13 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
 
     @callback
     def async_registry_entry_updated(self) -> None:
-        """Note a color the user picked the moment they pick it.
-
-        Two changes between polls can land back on the server's own color.
-        """
+        """Note a color the user picked the moment they pick it."""
         if (entry := self.registry_entry) is None:
             return
         if entry.options.get(CALENDAR_DOMAIN, {}).get("color") == self._written_color:
             return
         self._picked = True
-        # Recorded right away rather than at the next poll, which a restart in
-        # between would never let happen.
+        # Recorded now; a restart before the next poll would lose it.
         state = entry.options.get(COLOR_STATE)
         if state is not None and not state.get("override"):
             er.async_get(self.hass).async_update_entity_options(
@@ -143,8 +135,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         current = entry.options.get(CALENDAR_DOMAIN, {}).get("color")
         server = self._server_color()
         if state is None:
-            # No record yet: an entity registered before we tracked colors, so
-            # anything already showing is a color the user picked themselves.
+            # Registered before colors were tracked: what shows is the user's pick.
             override = current is not None
         else:
             override = state.get("override") or current != state.get("color")
@@ -162,7 +153,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
                 options.pop("color", None)
             else:
                 options["color"] = server
-            # Recorded before the write, which calls back into the watcher above.
+            # Before the write, which calls back into the watcher above.
             self._written_color = server
             registry.async_update_entity_options(
                 self.entity_id, CALENDAR_DOMAIN, options or None
@@ -181,10 +172,8 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         if (entry := self.registry_entry) is None:
             return
         current = entry.options.get(CALENDAR_DOMAIN, {}).get("color")
-        # Both sides re-baselined on the color the entity shows now. Keeping
-        # the recorded one would have the registry watcher read the user's own
-        # earlier pick as a fresh one and put the override straight back, so
-        # the calendar would never follow the server again.
+        # Re-baselined on the color shown now, or the watcher reads the user's
+        # earlier pick as a fresh one.
         self._written_color = current
         if entry.options.get(COLOR_STATE) is not None:
             er.async_get(self.hass).async_update_entity_options(
@@ -206,9 +195,8 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
     ) -> list[CalendarEvent]:
         """Return events in a date range.
 
-        Everything the caller catches is a HomeAssistantError: the panel drops
-        a subscription that raises anything else and then waits forever, and
-        the REST view answers a plain-text traceback instead of json.
+        Anything but a HomeAssistantError leaves the panel waiting forever and
+        has the REST view answer a traceback.
         """
         try:
             return await self.coordinator.async_get_events(hass, start_date, end_date)
@@ -225,10 +213,8 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
     def _own_address(self) -> str | None:
         """Return the account's own calendar user address, if the server has one.
 
-        Written as ORGANIZER whenever attendees are set and the object carries
-        none: RFC 5546 3 requires it, and sabre/dav answers 500 on deleting an
-        object that lists attendees without one, which leaves the event
-        impossible to remove at all.
+        Written as ORGANIZER whenever attendees are set: RFC 5546 3 requires
+        it, and sabre/dav answers 500 on deleting an object without one.
         """
         addresses = self.runtime_data.address_set
         return addresses[0] if addresses else None
@@ -298,10 +284,8 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
 def _item_data(fields: dict[str, Any]) -> dict[str, Any]:
     """Map the platform's event fields, naming every one of them.
 
-    Home Assistant always sends the whole event, so a field it left out is one
-    the user cleared, and :func:`.recurrence._apply` only clears what it is
-    given. An absent rrule is the exception: expand strips it from the event
-    the frontend echoes back, and dropping the recurrence is never meant.
+    Core sends the whole event, so an absent field was cleared. An absent
+    rrule was stripped by the expansion and stays.
     """
     data: dict[str, Any] = {
         "summary": fields["summary"],

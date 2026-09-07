@@ -3,7 +3,7 @@
   "extends": ["config:recommended"],
   "description": [
     "Managed here: GitHub Actions, both pinned ruff versions (validate.yml and requirements_test.txt), and the test harness.",
-    "Deliberately not managed: caldav, icalendar and vobject. Home Assistant installs them into the same environment as the built-in caldav integration, so they must match the versions core pins, not the latest release on PyPI. They live in manifest.json (which no manager reads) and are mirrored in requirements_test.txt, where the rule below pins them."
+    "Deliberately not managed: caldav, icalendar and vobject. Home Assistant installs them into the same environment as the built-in caldav integration, so they must match the versions core pins, not the latest release on PyPI. They live in manifest.json and are mirrored in requirements_test.txt; the rule below leaves them alone in both."
   ],
   "dependencyDashboard": false,
   "labels": ["dependencies"],
@@ -15,7 +15,6 @@
     },
     {
       "description": "Mirrors the manifest.json pins, which follow Home Assistant core.",
-      "matchManagers": ["pip_requirements"],
       "matchPackageNames": ["caldav", "icalendar", "vobject"],
       "enabled": false
     },

@@ -521,8 +521,8 @@ def test_an_attendee_added_for_the_first_time_is_asked_to_reply() -> None:
 
 
 def test_attendees_written_without_an_organizer_get_one() -> None:
-    """RFC 5546 3 requires ORGANIZER wherever ATTENDEE appears. sabre/dav —
-    Baikal and much else — hands the missing one to its scheduling plugin when
+    """RFC 5546 3 requires ORGANIZER wherever ATTENDEE appears. sabre/dav -
+    Baikal and much else - hands the missing one to its scheduling plugin when
     the object is deleted and answers 500, and the event cannot be removed at
     all after that. Nextcloud guards its own copy of that plugin, and the two
     servers that do no scheduling never look, so only a sabre server shows it.

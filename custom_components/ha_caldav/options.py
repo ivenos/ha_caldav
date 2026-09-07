@@ -41,12 +41,10 @@ def account_settings(entry: ConfigEntry) -> dict[str, Any]:
 def calendar_settings(entry: ConfigEntry, calendar: caldav.Calendar) -> dict[str, Any]:
     """Return the effective settings for one calendar.
 
-    Per-calendar entries hold only the keys the user actually overrode, so an
-    account-wide change still reaches every calendar that never got its own.
+    An override holds only the keys the user set. Entries written before
+    v1.2.0 keyed overrides on the display name rather than the url.
     """
     overrides = entry.options.get(CONF_CALENDAR_OPTIONS, {})
-    # Keyed on the url. Entries written before that keyed on the display name,
-    # which a rename on the server silently detached from its calendar.
     override = overrides.get(calendar_key(calendar.url))
     if override is None:
         override = overrides.get(calendar.name or "", {})

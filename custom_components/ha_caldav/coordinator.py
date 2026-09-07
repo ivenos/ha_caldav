@@ -29,41 +29,25 @@ from .event import read_extras
 
 _LOGGER = logging.getLogger(__name__)
 
-# Returned by a half of the poll that failed but had a previous result to keep.
-_KEEP = object()
-
-# Returned by a half with nothing left to serve: it never answered, or it has
-# been failing long enough that its snapshot cannot be told apart from a fresh
-# one. A poll fails only when every half of the collection is one of these.
-_DEAD = object()
-
-# How long a half may go on serving that previous result before the entity says
-# so, and how long a sync token is trusted without a read behind it.
+# How many polls a half may serve its previous result before its entity goes
+# unavailable, and how long a sync token is trusted without a read behind it.
 _MAX_KEPT_POLLS = 3
 _MAX_AGE = timedelta(hours=1)
 
-# Entries a uid cache may hold. A window the panel asked for is not the polled
-# one, so nothing later evicts what it left behind.
+# Entries a uid cache may hold; a panel window is not the polled one, so
+# nothing else evicts what it left behind.
 _CACHE_LIMIT = 2000
 
 
 def _bounded[T](cache: dict[str, T]) -> dict[str, T]:
-    """Return the cache trimmed to its limit, from the far end.
-
-    Callers put the window they just read at the front, so what goes is what
-    has been out of view longest. Built the other way round the same leading
-    entries were dropped on every poll, and those uids never got an etag again:
-    their next edit was written with nothing to check against, silently, on
-    exactly the large calendars where a clash is likeliest.
-    """
+    """Return the cache trimmed to its limit; callers put the newest first."""
     if (excess := len(cache) - _CACHE_LIMIT) <= 0:
         return cache
     _LOGGER.debug("Dropping %s cache entries past the limit", excess)
     return dict(list(cache.items())[:_CACHE_LIMIT])
 
 
-# CalDAV knows four states, Home Assistant two. Cancelled items are folded into
-# completed because they are equally "not outstanding".
+# CalDAV knows four states, Home Assistant two; cancelled folds onto completed.
 TODO_STATUS = {
     "NEEDS-ACTION": TodoItemStatus.NEEDS_ACTION,
     "IN-PROCESS": TodoItemStatus.NEEDS_ACTION,
@@ -93,8 +77,7 @@ class ManagedCalendar:
     capability: Capability
     coordinator: HaCaldavCoordinator
     read_only: bool
-    # Shared by the calendar entity and the to-do list of the same collection,
-    # because both write to the objects of it.
+    # Shared by the calendar entity and the to-do list of the same collection.
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
@@ -116,6 +99,7 @@ class HaCaldavRuntimeData:
     colors: HaCaldavColorCoordinator
     calendars: list[ManagedCalendar]
     address_set: list[str]
+    sync_collection: bool = True
 
 
 type HaCaldavConfigEntry = ConfigEntry[HaCaldavRuntimeData]
@@ -140,18 +124,32 @@ class _TodoRead:
     epoch: int = 0
 
 
+@dataclass
+class _Half:
+    """One component type of the collection, as the poll tracks it.
+
+    A failed read keeps serving the last result for a few polls. Dead is a
+    half with nothing left to serve, and its entity goes unavailable; the poll
+    itself fails only once every half is dead.
+    """
+
+    supported: bool
+    cached: Any = None
+    misses: int = 0
+    dead: bool = False
+    error: Exception | None = None
+
+
+def _rejected(err: Exception | None) -> bool:
+    """Return whether an error is a 401; caldav raises the same type for 403."""
+    return isinstance(err, AuthorizationError) and err.reason == "Unauthorized"
+
+
 def calendar_unique_id(entry_id: str, url: object) -> str:
     """Return the unique id of a calendar entity.
 
-    Through calendar_key, not off the url as it stands: the url carries the
-    scheme, the host and the port, and the reconfigure step exists to change
-    exactly those. Keyed on the raw one, moving an account from http to https
-    renamed every entity to _2 and left the originals unavailable, taking the
-    automations, dashboard cards and history that named them with it.
-
-    Changing the shape orphans every entity already in the registry, so it
-    needs a migration, and :mod:`.services` reverses it to find a calendar from
-    a target entity.
+    Through calendar_key, so the scheme, host and port the reconfigure step
+    changes are not part of it. Changing the shape needs a migration.
     """
     return f"{entry_id}-{calendar_key(url)}"
 
@@ -164,8 +162,8 @@ def todo_unique_id(entry_id: str, url: object) -> str:
 class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
     """Fetch the events and to-do items of a single calendar.
 
-    Both live in the same collection and are covered by one sync token, so a
-    single poll serves the calendar entity and the to-do list entity alike.
+    Both live in one collection under one sync token, so one poll serves the
+    calendar entity and the to-do list alike.
     """
 
     def __init__(
@@ -177,6 +175,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         days: int,
         include_all_day: bool,
         scan_interval: timedelta,
+        sync_collection: bool = True,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -191,48 +190,34 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         self.days = days
         self.include_all_day = include_all_day
         self.etags: dict[str, str] = {}
-        # Both the poll and a panel read merge into the etag caches, and both
-        # run in the executor, so the read-modify-write needs holding together.
+        # The poll and a panel read both merge into the etag caches, from the
+        # executor.
         self.etag_lock = threading.Lock()
-        # Moved by every write that invalidates an etag. A read that started
-        # before it carries the value from before the write, and the lock alone
-        # cannot tell the two apart: it covers the moment the dict is changed,
-        # not the span between a read and the commit that follows it.
+        # Moved by every write that invalidates an etag, so a read that started
+        # before the write can be told from one that started after it.
         self._etag_epoch = 0
         self._etag_window: set[str] = set()
         self.rrules: dict[str, str] = {}
         self.todo_etags: dict[str, str] = {}
+        self._sync_collection = sync_collection
         self._sync_token: str | None = None
-        self._window_events: list[Any] | None = None
         self._window: tuple[datetime, datetime] | None = None
-        self._todos: list[TodoItem] | None = None
         self._etags_missed = False
         self._fetched_at: datetime | None = None
-        self._misses = {"events": 0, "todos": 0}
-        # Per half, because one entity each reads from them. A collection whose
-        # to-do report the server refuses is still a calendar that reads.
-        self.dead = {"events": False, "todos": False}
+        self.halves = {
+            "events": _Half(capability.supports_events),
+            "todos": _Half(capability.supports_todos),
+        }
 
     @property
     def poll_health(self) -> dict[str, Any]:
-        """Return how far behind each half of this collection is.
-
-        The time is of the last poll where every half read, which a half still
-        serving a kept result leaves behind, and which is None until one did.
-        """
-        halves = [
-            half
-            for half, supported in (
-                ("events", self.capability.supports_events),
-                ("todos", self.capability.supports_todos),
-            )
-            if supported
-        ]
+        """Return how far behind each half of this collection is."""
+        halves = {name: half for name, half in self.halves.items() if half.supported}
         fetched = self._fetched_at
         return {
             "last_full_read": fetched.isoformat() if fetched else None,
-            "kept_polls": {half: self._misses[half] for half in halves},
-            "dead": {half: self.dead[half] for half in halves},
+            "kept_polls": {name: half.misses for name, half in halves.items()},
+            "dead": {name: half.dead for name, half in halves.items()},
         }
 
     async def async_get_events(
@@ -248,26 +233,17 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
     def _searched_events(
         self, start_date: datetime, end_date: datetime
     ) -> list[CalendarEvent]:
-        """Return the events of one window. Blocking, and not only for the read.
+        """Return the events of one window. Blocking, the vobject parse included.
 
-        vobject parses an item the first time its components are asked for, so
-        building the list costs as much as the request does. The window is the
-        caller's to choose, and one year of a handful of daily series is
-        seconds of it, which on the event loop is all of Home Assistant waiting.
-
-        The rules are read first: expanding a series strips the RRULE from every
-        occurrence it produces, so the rule shown against one comes from the
-        second search, and a series that stopped recurring has to be forgotten
-        before the occurrences are built from it.
+        The rules are read first: expanding a series strips the RRULE from
+        every occurrence, and a series that stopped recurring has to be
+        forgotten before its occurrences are built.
         """
         epoch = self._etag_epoch
         etags, rules = self._window_index(start_date, end_date)
         self._keep_rules(rules)
         if etags is not None:
-            # Merged, not replaced: the panel window need not overlap the polled
-            # one and an edit made from it still has to be conflict-checked. The
-            # window just read comes first, so a cache at its limit gives up
-            # what is furthest out of view rather than these.
+            # Merged: a panel window need not overlap the polled one.
             with self.etag_lock:
                 if epoch == self._etag_epoch:
                     kept = {
@@ -289,11 +265,10 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         ]
 
     def forget_etags(self, name: str, keys: tuple[str, ...]) -> None:
-        """Drop the etags a write has just made stale.
+        """Drop the etags a write has just made stale, and move the epoch.
 
-        The epoch moves with them, so a read already on the wire cannot put back
-        what this took out. The cache is named rather than handed over, because
-        a poll landing meanwhile replaces the dict rather than emptying it.
+        The cache is named because a poll replaces the dict rather than
+        emptying it.
         """
         with self.etag_lock:
             cache = getattr(self, name)
@@ -302,7 +277,6 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             self._etag_epoch += 1
 
     def _rule_for(self, vevent: Any) -> str | None:
-        """Return the recurrence rule recorded for this occurrence's series."""
         uid = getattr(vevent, "uid", None)
         return self.rrules.get(str(uid.value)) if uid is not None else None
 
@@ -319,37 +293,30 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
                 raise ConfigEntryAuthFailed("Authorization failed") from err
             raise self._failure(err) from err
         except Exception as err:
-            # caldav asserts its way out of a response it does not expect, so
-            # the type of a server-side failure is not worth predicting.
+            # caldav asserts its way out of a response it does not expect.
             raise self._failure(err) from err
 
     def _failure(self, err: Exception) -> UpdateFailed:
-        """Return the poll failure to log, without the collection url.
-
-        A caldav error prints the url it was reading, and with it the account
-        name, into a line users are asked to paste into an issue.
-        """
+        """Return the poll failure to log, without the collection url."""
         _LOGGER.debug("Could not read %s: %s", self.name, err)
         return UpdateFailed(f"Could not read {self.name}: {type(err).__name__}")
 
     async def _async_snapshot(self) -> CalendarSnapshot:
         """Refresh what the window needs and map it onto a snapshot.
 
-        A sync-collection REPORT (RFC 6578) gates the fetch.
+        A sync-collection REPORT (RFC 6578) gates the fetch. The token is
+        committed only after a complete fetch that brought its etags.
         """
         start = dt_util.start_of_local_day()
         end = start + timedelta(days=self.days)
         changed, token = await self.hass.async_add_executor_job(self._sync_changed)
-        stale = self._window_events is None or self._todos is None or changed
+        stale = changed or any(half.cached is None for half in self.halves.values())
         moved = self._window != (start, end)
-        # A server that hands back the same token forever would otherwise never
-        # be read again, and it would report nothing wrong while doing it.
+        # A server may hand back the same token forever.
         aged = (
             self._fetched_at is None or dt_util.utcnow() - self._fetched_at >= _MAX_AGE
         )
         self._etags_missed = False
-        # Committed only after a complete fetch; a half that failed, or a window
-        # whose etags did not arrive, leaves the token behind for the next poll.
         if (stale or moved or aged) and await self._async_fetch(start, end):
             self._fetched_at = dt_util.utcnow()
             if not self._etags_missed:
@@ -359,117 +326,92 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         return CalendarSnapshot(
             next_event=upcoming[1] if upcoming is not None else None,
             extras=read_extras(upcoming[0]) if upcoming is not None else {},
-            todos=list(self._todos or []),
+            todos=list(self.halves["todos"].cached or []),
         )
 
     async def _async_fetch(self, start: datetime, end: datetime) -> bool:
-        """Refresh both halves; a half that failed before keeps its last result.
+        """Refresh both halves; a half that failed keeps its last result.
 
-        A poll where no half has a result left to keep still fails.
+        Each half commits its data and etags together before the other one
+        can fail. The poll fails only once every half is dead, and reauths
+        only when a 401 is all that is left to explain the failure.
         """
-        events, events_error = await self._async_half(
+        events, todos = self.halves["events"], self.halves["todos"]
+        window = await self._async_read(
+            events,
             self._fetch_events(start, end),
-            self.capability.supports_events,
-            self._window_events,
-            "events",
             _WindowRead(vevents=[], etags={}, rules={}, epoch=self._etag_epoch),
         )
-        todos, todos_error = await self._async_half(
+        if window is not None:
+            self._commit_window(window)
+        read = await self._async_read(
+            todos,
             self._fetch_todos,
-            self.capability.supports_todos,
-            self._todos,
-            "todos",
             _TodoRead(items=[], etags={}, epoch=self._etag_epoch),
         )
-        errors = [error for error in (events_error, todos_error) if error is not None]
-        # A half commits its data and its etags together, so neither can end up
-        # describing a revision the other never saw. Committed before the raises
-        # below, because a half that read cleanly must not be thrown away over
-        # the other one failing: its entity would sit unavailable on frozen data
-        # for as long as the broken half stays broken, and pay for the read that
-        # is discarded on every poll.
-        if isinstance(events, _WindowRead):
-            self._window_events = events.vevents
-            self._keep_rules(events.rules)
-            # The window was read, its etags were not, or a write overtook them.
-            # Committing the token on that would leave every etag here frozen
-            # with no later poll to repair them, and each refuses the next edit.
-            if events.etags is None or not self._merge_etags(
-                events.etags, events.epoch
-            ):
-                self._etags_missed = True
-        if isinstance(todos, _TodoRead):
-            self._todos = todos.items
-            with self.etag_lock:
-                if todos.etags is None or todos.epoch != self._etag_epoch:
-                    self._etags_missed = True
-                else:
-                    self.todo_etags = todos.etags
-        halves = (("events", events, events_error), ("todos", todos, todos_error))
-        for half, result, _ in halves:
-            self.dead[half] = result is _DEAD
-        lost = [error for _, result, error in halves if result is _DEAD]
-        rejected = [
-            error
-            for error in errors
-            if isinstance(error, AuthorizationError) and error.reason == "Unauthorized"
-        ]
-        # Only 401, caldav raises this for a transient 403 too. A half that read
-        # explains one away, and so does one still inside its keep budget.
-        if (
-            rejected
-            and len(errors) == self._halves
-            and all(error in rejected or error in lost for error in errors)
-        ):
-            raise rejected[0]
-        # One half is all a collection of one component type has, so anything
-        # stricter fails on every timeout there.
-        if lost and len(lost) == self._halves:
-            raise lost[0]
-        return not errors
+        if read is not None:
+            self._commit_todos(read)
+        failed = [half for half in self.halves.values() if half.error is not None]
+        if failed and len(failed) == self._halves:
+            rejected = [half.error for half in failed if _rejected(half.error)]
+            if rejected and all(half.dead or _rejected(half.error) for half in failed):
+                raise rejected[0]
+            if all(half.dead for half in failed):
+                raise failed[0].error
+        return not failed
 
     @property
     def _halves(self) -> int:
-        return self.capability.supports_events + self.capability.supports_todos
+        return sum(half.supported for half in self.halves.values())
 
-    async def _async_half(
-        self, job: Any, supported: bool, cached: Any, half: str, empty: Any
-    ) -> tuple[Any, Exception | None]:
-        if not supported:
-            # An empty read, not a skipped one: the caller keeps what a half
-            # hands back, and a half that hands back nothing at all would leave
-            # its side of the snapshot unset, which reads as never fetched and
-            # runs the expensive search again on every poll for good.
-            return empty, None
+    async def _async_read(self, half: _Half, job: Any, empty: Any) -> Any | None:
+        """Run one half's read; None when it failed, with the half updated.
+
+        An unsupported half reads as empty rather than skipped, or its side of
+        the snapshot would count as never fetched on every poll.
+        """
+        half.error = None
+        if not half.supported:
+            return empty
         try:
             result = await self.hass.async_add_executor_job(job)
         except Exception as err:  # noqa: BLE001
-            # Nothing read before is nothing to fall back on, and neither is a
-            # snapshot so old nobody can tell, which would go on validating
-            # writes against it. Either takes this half's own entity down, and
-            # the poll with it only once no half has anything left. Reported
-            # rather than raised, so the other half is still fetched first.
-            if cached is None or self._misses[half] >= _MAX_KEPT_POLLS:
-                return _DEAD, err
-            self._misses[half] += 1
+            half.error = err
+            if half.cached is None or half.misses >= _MAX_KEPT_POLLS:
+                half.dead = True
+                return None
+            half.misses += 1
+            half.dead = False
             _LOGGER.debug("Keeping the previous result for %s: %s", self.name, err)
-            return _KEEP, err
-        self._misses[half] = 0
-        return result, None
+            return None
+        half.misses = 0
+        half.dead = False
+        return result
+
+    def _commit_window(self, window: _WindowRead) -> None:
+        self.halves["events"].cached = window.vevents
+        self._keep_rules(window.rules)
+        # Committing the token without the etags would freeze every etag here.
+        if window.etags is None or not self._merge_etags(window.etags, window.epoch):
+            self._etags_missed = True
+
+    def _commit_todos(self, read: _TodoRead) -> None:
+        self.halves["todos"].cached = read.items
+        with self.etag_lock:
+            if read.etags is None or read.epoch != self._etag_epoch:
+                self._etags_missed = True
+            else:
+                self.todo_etags = read.etags
 
     def _fetch_events(self, start: datetime, end: datetime) -> Any:
         def fetch() -> _WindowRead:
             epoch = self._etag_epoch
-            # Unsplit: caldav's split copies and reparses the whole expanded
-            # object once per occurrence, which is quadratic in their number.
+            # caldav's split reparses the whole expanded object per occurrence.
             results = self.calendar.search(
                 start=start, end=end, event=True, expand=True, split_expanded=False
             )
-            # Read here rather than only when the frontend asks, so a write made
-            # from an automation after a restart is still conflict-checked.
             etags, rules = self._window_index(start, end)
-            # DTSTART is optional in RFC 5545 once the object carries a METHOD,
-            # and ordering, the window filter and the state all need one.
+            # RFC 5545 makes DTSTART optional once the object carries a METHOD.
             return _WindowRead(
                 vevents=[
                     vevent
@@ -493,14 +435,9 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
     def _merge_etags(self, etags: dict[str, str], epoch: int) -> bool:
         """Take in the etags of a freshly read window, unless a write beat it.
 
-        Kept rather than replaced: a panel window the user paged to need not
-        overlap the polled one, and dropping its etags would let a write from
-        it overwrite a change made elsewhere without noticing. Only a uid this
-        same window carried before and no longer does is gone for certain.
-
-        False when the read is older than the last write: it holds the etag from
-        before that write, and putting it back would have the user's own next
-        edit of the object refused as somebody else's change.
+        Kept rather than replaced: a panel window need not overlap the polled
+        one. Only a uid this same window carried before and no longer does is
+        gone for certain.
         """
         with self.etag_lock:
             if epoch != self._etag_epoch:
@@ -517,12 +454,10 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
 
     def _next_event(self) -> tuple[Any, CalendarEvent] | None:
         # The server is not required to return results in any order.
-        for vevent in sorted(self._window_events or [], key=sort_key):
+        for vevent in sorted(self.halves["events"].cached or [], key=sort_key):
             try:
                 over = is_over(vevent)
             except _UNMAPPABLE as err:
-                # Outside to_event, and reached before it, so it needs the same
-                # forbearance: an end no datetime can hold fails here first.
                 _LOGGER.debug("Skipping an event that cannot be placed: %s", err)
                 continue
             if over or not (self.include_all_day or not is_all_day(vevent)):
@@ -531,11 +466,8 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
                 return vevent, event
         return None
 
-    def _fetch_todos(self) -> list[TodoItem]:
-        """Return every to-do item, completed ones included, in sort-order.
-
-        Nothing expands a to-do, so this search can carry the etags.
-        """
+    def _fetch_todos(self) -> _TodoRead:
+        """Return every to-do item, completed ones included, in sort-order."""
         epoch = self._etag_epoch
         results = self.calendar.search(
             todo=True, include_completed=True, props=[dav.GetEtag()]
@@ -552,9 +484,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
                 etags[item.uid] = etag
         return _TodoRead(
             items=[item for _, item in sorted(found, key=lambda pair: pair[0])],
-            # The list held items and the server put an etag on none of them.
-            # Taken at face value that empties the cache, and the next edit of
-            # every one of those items goes out with nothing to check against.
+            # Items without a single etag is a server not saying, not an empty cache.
             etags=etags if etags or not found else None,
             epoch=epoch,
         )
@@ -562,14 +492,15 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
     def _sync_changed(self) -> tuple[bool, str | None]:
         """Return (changed, token) since the last poll (RFC 6578), uncommitted.
 
-        Any failure degrades to a full refresh.
+        A server without the report, and any failure, means a full refresh.
         """
+        if not self._sync_collection:
+            return True, None
         try:
             collection = self.calendar.objects_by_sync_token(self._sync_token)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("sync-collection failed, refreshing in full: %s", err)
-            # Dropped, not kept: a restored server 403s forever on a token it
-            # lost.
+            # Dropped: a restored server 403s forever on a token it lost.
             return True, None
         return collection.sync_token != self._sync_token, collection.sync_token
 
@@ -578,14 +509,9 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
     ) -> tuple[dict[str, str] | None, dict[str, str | None]]:
         """Return the etags and the rules of a window, without keeping either.
 
-        The etags are None when the server did not say. The rules map every uid
-        the window held, to its rule or to None where it has none, so a series
-        that stopped recurring can be told apart from one this window never saw.
-
-        Handed back rather than stored: the caller commits both only once the
-        whole poll is known to stand, or a half whose data is discarded would
-        still have left its etags describing what the next write is checked
-        against.
+        The etags are None when the server did not say. The rules map every
+        uid in the window, to None where it has none, so a series that stopped
+        recurring can be told apart from one this window never saw.
         """
         try:
             items = self.calendar.search(
@@ -606,9 +532,6 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             if isinstance(etag := item.props.get(dav.GetEtag.tag), str):
                 etags[uid] = etag
         if items and not etags:
-            # The window held objects and the server put an etag on none of
-            # them. Read as an empty window that would drop every etag kept
-            # here, and leave the next edit of each of those unchecked.
             _LOGGER.debug("The window came back without an etag on anything")
             return None, rules
         return etags, rules
@@ -637,18 +560,13 @@ class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, str | None]]):
     async def _async_update_data(self) -> dict[str, str | None]:
         """Return the color of every calendar on the account.
 
-        Failing keeps the previous colors and leaves data None until a first
-        fetch succeeds, which an empty result must not be confused with: that
-        one means the server reports no colors and clears them. UpdateFailed
-        rather than the original error, because only that one is logged once
-        instead of as a traceback on every poll.
+        A failure keeps the previous colors; an empty result means the server
+        reports none and clears them.
         """
         try:
             return await self.hass.async_add_executor_job(fetch_colors, self.client)
         except Exception as err:
-            # Only the type, like the event poll: a caldav error carries the
-            # url it was reading and the body it got back, and this one is
-            # logged at error level rather than debug.
+            # A caldav error carries the url it was reading.
             _LOGGER.debug("Could not read calendar colors: %s", err)
             raise UpdateFailed(
                 f"Could not read calendar colors: {type(err).__name__}"
@@ -656,11 +574,7 @@ class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, str | None]]):
 
 
 def sort_order(vtodo: Any) -> tuple[int, float]:
-    """Return the sort key of a to-do, unordered items last.
-
-    There is no RFC 5545 ordering property; the Apple extension is what the
-    task clients that can reorder at all agree on.
-    """
+    """Return the sort key of a to-do, unordered items last."""
     # vobject lowercases property names and turns dashes into underscores.
     value = get_attr_value(vtodo, "x_apple_sort_order")
     if value is None:
@@ -669,21 +583,15 @@ def sort_order(vtodo: Any) -> tuple[int, float]:
         position = float(value)
     except TypeError, ValueError:
         return (1, 0.0)
-    # nan compares false against everything, so one item carrying it decides
-    # nothing consistently and the whole list comes out in an order that
-    # depends on where the sort happened to meet it. The write path already
-    # refuses one; the read path has to agree, or a drag reorders around a
-    # position it will not store.
+    # nan compares false against everything, and the write path refuses it too.
     return (0, position) if isfinite(position) else (1, 0.0)
 
 
 def to_todo(vtodo: Any) -> TodoItem | None:
     """Map a vobject VTODO onto a Home Assistant to-do item.
 
-    Items without a uid or summary are skipped: Home Assistant needs both to
-    address and render them. So is one dated beyond what a datetime holds once
-    a zone offset reaches it, because nothing bounds a to-do search by a window
-    the user could page away from, and raising would fail every poll for good.
+    None without a uid or a summary, which core needs, and for a date beyond
+    what a datetime holds once a zone offset reaches it.
     """
     uid = get_attr_value(vtodo, "uid")
     summary = get_attr_value(vtodo, "summary")
@@ -721,10 +629,8 @@ def get_attr_value(obj: Any, attribute: str) -> Any | None:
 def get_end_date(vevent: Any) -> datetime | date:
     """Return the end date derived from dtend, duration or the start's type.
 
-    RFC 5545 3.6.1 splits the neither-property case by value type: an event
-    dated with a time ends at that same time, one dated with a day lasts the
-    day. A day for both would hold the entity on for twenty-four hours over
-    every zero-length marker another client writes.
+    RFC 5545 3.6.1: without either property, a timed event ends at its start
+    and an all-day one lasts the day.
     """
     start = vevent.dtstart.value
     if hasattr(vevent, "dtend"):
@@ -741,21 +647,12 @@ def get_end_date(vevent: Any) -> datetime | date:
 
 
 def _spanning(start: datetime | date, end: datetime | date) -> datetime | date:
-    """Return an end an expansion turned around, put back the way it was meant.
+    """Return an end the expansion turned around, put back the way it was meant.
 
-    An occurrence generated for a local time that does not exist keeps the wall
-    clock of both ends, and RFC 5545 3.3.5 resolves the missing start with the
-    offset from before the gap, so the start gains an hour the end does not and
-    the two instants come back reversed. The wall clock is then the only thing
-    they still agree on.
-
-    Compared as instants, deliberately. Two datetimes carrying the same zone
-    object compare by wall clock, which is exactly the comparison that hides
-    this, and it is also what lets the occurrence through unnoticed until
-    to_local converts both into some other zone and the event vanishes.
-
-    A value still carrying no zone is left alone: to_local settles it against
-    the local zone, and comparing before that only raises.
+    RFC 5545 3.3.5 resolves a start in a DST gap with the offset from before
+    the gap, so the start gains an hour the end does not and the two instants
+    come back reversed while the wall clock is still right. Two datetimes in
+    the same zone object compare by wall clock, hence the explicit UTC.
     """
     if not (isinstance(start, datetime) and isinstance(end, datetime)):
         return end
@@ -764,8 +661,7 @@ def _spanning(start: datetime | date, end: datetime | date) -> datetime | date:
     if end.astimezone(UTC) >= start.astimezone(UTC):
         return end
     if start.utcoffset() == end.utcoffset():
-        # One offset on both ends, so nothing was resolved across a gap: the
-        # object is simply malformed, and to_event drops it as such.
+        # Nothing was resolved across a gap; the object is simply malformed.
         return end
     return start + max(end.replace(tzinfo=None) - start.replace(tzinfo=None), _NOTHING)
 
@@ -780,10 +676,8 @@ def to_local(value: datetime | date) -> datetime | date:
     return value
 
 
-# ArithmeticError for the OverflowError a date near the year 9999 raises as soon
-# as a zone offset is added to it: a single such object, which any client may
-# store, would otherwise fail every poll and take both entities of the
-# collection down for as long as it sits in the window.
+# ArithmeticError for the OverflowError a date near the year 9999 raises once a
+# zone offset is added to it.
 _UNMAPPABLE = (
     HomeAssistantError,
     ArithmeticError,
@@ -796,12 +690,8 @@ _UNMAPPABLE = (
 def _dated(vevent: Any) -> bool:
     """Return whether the component carries a start that is really a date.
 
-    Present is not enough: a DTSTART written with an empty value, or with
-    VALUE=TEXT or VALUE=DURATION, leaves vobject holding "" or None. Ordering
-    is the one thing _next_event does outside its own guard, so such an object
-    failed every poll for as long as it sat in the window, and the entity and
-    the to-do list of the collection stayed unavailable with nothing in the log
-    naming either the object or the property.
+    A DTSTART with an empty value, VALUE=TEXT or VALUE=DURATION leaves vobject
+    holding "" or None.
     """
     start = getattr(getattr(vevent, "dtstart", None), "value", None)
     return isinstance(start, date)
@@ -823,11 +713,7 @@ def is_all_day(vevent: Any) -> bool:
 
 
 def is_over(vevent: Any) -> bool:
-    """Return whether the event has already ended.
-
-    An all-day event ends on a date, which cannot be compared against a
-    datetime, so the comparison is made per type.
-    """
+    """Return whether the event has already ended."""
     end = to_local(get_end_date(vevent))
     if isinstance(end, datetime):
         return dt_util.now() >= end
@@ -837,9 +723,7 @@ def is_over(vevent: Any) -> bool:
 def components_of(item: Any, name: str) -> list[Any]:
     """Return every named component of a search result, empty if unreadable.
 
-    An expanded object carries one per occurrence. vobject raises on a body it
-    cannot parse, and another client is free to leave one on the server; a
-    single such object must not fail the whole poll.
+    An expanded object carries one per occurrence.
     """
     try:
         return list(item.vobject_instance.contents.get(name, []))
@@ -857,9 +741,8 @@ def component_of(item: Any, name: str) -> Any | None:
 def master_of(item: Any) -> Any | None:
     """Return the series master of a search result, or its only component.
 
-    RFC 5545 leaves the order of the components of an object open, so a server
-    may put a detached occurrence first. Reading the rule off that one records
-    no rule for a series that has one, and drops the rule already recorded.
+    RFC 5545 leaves the component order open, so a detached occurrence may
+    come first.
     """
     found = components_of(item, "vevent")
     for vevent in found:
@@ -872,11 +755,7 @@ def to_event(vevent: Any, rrule: str | None = None) -> CalendarEvent | None:
     """Map a vobject VEVENT onto a Home Assistant calendar event.
 
     The rule is passed in because expanding a series strips RRULE from every
-    occurrence it produces, and without it the panel shows no "repeats weekly"
-    and opens the recurrence editor blank.
-
-    None for an object core refuses: another client can leave an end before its
-    start, and one such event must not take the whole collection down.
+    occurrence. None for an object core refuses, such as an end before its start.
     """
     try:
         return CalendarEvent(
@@ -895,11 +774,8 @@ def to_event(vevent: Any, rrule: str | None = None) -> CalendarEvent | None:
         )
     except _UNMAPPABLE as err:
         if rrule is not None:
-            # Home Assistant validates the rule it is handed against what its own
-            # editor can offer, and FREQ=HOURLY or FREQ=MINUTELY is RFC 5545 and
-            # writable from every other client. Passing it on took the whole
-            # occurrence off the panel; the event is the data, the rule only
-            # decides what the recurrence editor opens with.
+            # Core refuses rules its own editor cannot offer, FREQ=HOURLY among
+            # them; the rule only decides what the recurrence editor opens with.
             _LOGGER.debug("Keeping an event whose rule was refused: %s", err)
             return to_event(vevent)
         _LOGGER.debug("Skipping an event that cannot be mapped: %s", err)

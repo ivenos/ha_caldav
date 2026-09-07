@@ -8,17 +8,27 @@
           "url": "URL del server",
           "username": "Nome utente",
           "password": "Password",
-          "verify_ssl": "Verifica il certificato SSL",
-          "ca_bundle": "Percorso del bundle CA",
-          "client_cert": "Percorso del certificato client",
-          "client_key": "Percorso della chiave client"
+          "verify_ssl": "Verifica il certificato SSL"
         },
         "data_description": {
           "url": "L'indirizzo del tuo server CalDAV. Sulla maggior parte dei server basta il nome host.",
-          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque si trovi tra Home Assistant e il server può leggere la password.",
-          "ca_bundle": "Facoltativo. Verifica il server con questo file anziché con l'archivio di sistema.",
-          "client_cert": "Facoltativo. Identifica Home Assistant presso i server che chiedono un certificato.",
-          "client_key": "Facoltativo. La chiave privata di quel certificato."
+          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque si trovi tra Home Assistant e il server può leggere la password."
+        },
+        "sections": {
+          "certificates": {
+            "name": "Certificati",
+            "description": "Solo per server che richiedono un certificato client o usano una CA privata.",
+            "data": {
+              "ca_bundle": "Percorso del bundle CA",
+              "client_cert": "Percorso del certificato client",
+              "client_key": "Percorso della chiave client"
+            },
+            "data_description": {
+              "ca_bundle": "Facoltativo. Verifica il server con questo file anziché con l'archivio di sistema.",
+              "client_cert": "Facoltativo. Identifica Home Assistant presso i server che chiedono un certificato.",
+              "client_key": "Facoltativo. La chiave privata di quel certificato."
+            }
+          }
         }
       },
       "reconfigure": {
@@ -26,17 +36,27 @@
         "description": "Aggiorna l'URL del server o le impostazioni TLS. L'account resta invariato.",
         "data": {
           "url": "URL del server",
-          "verify_ssl": "Verifica il certificato SSL",
-          "ca_bundle": "Percorso del bundle CA",
-          "client_cert": "Percorso del certificato client",
-          "client_key": "Percorso della chiave client"
+          "verify_ssl": "Verifica il certificato SSL"
         },
         "data_description": {
           "url": "L'indirizzo del tuo server CalDAV. Sulla maggior parte dei server basta il nome host.",
-          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque si trovi tra Home Assistant e il server può leggere la password.",
-          "ca_bundle": "Facoltativo. Verifica il server con questo file anziché con l'archivio di sistema.",
-          "client_cert": "Facoltativo. Identifica Home Assistant presso i server che chiedono un certificato.",
-          "client_key": "Facoltativo. La chiave privata di quel certificato."
+          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque si trovi tra Home Assistant e il server può leggere la password."
+        },
+        "sections": {
+          "certificates": {
+            "name": "Certificati",
+            "description": "Solo per server che richiedono un certificato client o usano una CA privata.",
+            "data": {
+              "ca_bundle": "Percorso del bundle CA",
+              "client_cert": "Percorso del certificato client",
+              "client_key": "Percorso della chiave client"
+            },
+            "data_description": {
+              "ca_bundle": "Facoltativo. Verifica il server con questo file anziché con l'archivio di sistema.",
+              "client_cert": "Facoltativo. Identifica Home Assistant presso i server che chiedono un certificato.",
+              "client_key": "Facoltativo. La chiave privata di quel certificato."
+            }
+          }
         }
       },
       "reauth_confirm": {

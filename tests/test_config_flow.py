@@ -14,7 +14,7 @@ from homeassistant.const import (
     CONF_VERIFY_SSL,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, section
 from homeassistant.helpers import config_validation as cv
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -66,7 +66,7 @@ async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
         await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "iven"
+    assert result["title"] == "iven@cloud.example.com"
     assert result["data"] == USER_INPUT
     assert client.call_args.kwargs["timeout"] == DEFAULT_TIMEOUT
 
@@ -286,7 +286,8 @@ async def test_blank_tls_fields_are_not_stored(hass: HomeAssistant) -> None:
         patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
     ):
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {**USER_INPUT, CONF_CLIENT_CERT: "", CONF_CA_BUNDLE: ""}
+            result["flow_id"],
+            {**USER_INPUT, "certificates": {CONF_CLIENT_CERT: "", CONF_CA_BUNDLE: ""}},
         )
 
     assert CONF_CLIENT_CERT not in result["data"]
@@ -306,8 +307,10 @@ async def test_tls_paths_are_stored_when_given(hass: HomeAssistant) -> None:
             result["flow_id"],
             {
                 **USER_INPUT,
-                CONF_CLIENT_CERT: "/etc/client.pem",
-                CONF_CLIENT_KEY: "/etc/client.key",
+                "certificates": {
+                    CONF_CLIENT_CERT: "/etc/client.pem",
+                    CONF_CLIENT_KEY: "/etc/client.key",
+                },
             },
         )
 
@@ -428,7 +431,8 @@ async def test_reconfigure_can_clear_a_client_certificate(
         patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
     ):
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {CONF_URL: USER_INPUT[CONF_URL], CONF_CLIENT_CERT: ""}
+            result["flow_id"],
+            {CONF_URL: USER_INPUT[CONF_URL], "certificates": {CONF_CLIENT_CERT: ""}},
         )
 
     assert result["type"] is FlowResultType.ABORT
@@ -1048,3 +1052,84 @@ async def test_the_account_form_opens_on_the_stored_timeout(
     assert timeout["default"] == 90
     number = timeout["selector"]["number"]
     assert (number["min"], number["max"]) == (5, 120)
+
+
+async def test_inputs_are_trimmed(hass: HomeAssistant) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    with (
+        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient"),
+        patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                **USER_INPUT,
+                CONF_URL: f"{USER_INPUT[CONF_URL]} ",
+                CONF_USERNAME: " iven",
+            },
+        )
+
+    assert result["data"][CONF_URL] == USER_INPUT[CONF_URL]
+    assert result["data"][CONF_USERNAME] == "iven"
+
+
+async def test_the_certificate_paths_sit_in_a_collapsed_section(
+    hass: HomeAssistant,
+) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    schema = result["data_schema"].schema
+
+    assert CONF_CLIENT_CERT not in schema
+    certificates = schema["certificates"]
+    assert isinstance(certificates, section)
+    assert certificates.options["collapsed"] is True
+    assert CONF_CLIENT_CERT in certificates.schema.schema
+
+
+async def test_reconfigure_follows_the_host_in_an_untouched_title(
+    hass: HomeAssistant,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="iven@cloud.example.com",
+        data=USER_INPUT,
+        unique_id=f"{USER_INPUT[CONF_URL]}#{USER_INPUT[CONF_USERNAME]}",
+    )
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reconfigure_flow(hass)
+    with (
+        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient"),
+        patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_URL: "https://new.example.com/dav"}
+        )
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.title == "iven@new.example.com"
+
+
+async def test_reconfigure_keeps_a_title_the_user_chose(hass: HomeAssistant) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Work",
+        data=USER_INPUT,
+        unique_id=f"{USER_INPUT[CONF_URL]}#{USER_INPUT[CONF_USERNAME]}",
+    )
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reconfigure_flow(hass)
+    with (
+        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient"),
+        patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
+    ):
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_URL: "https://new.example.com/dav"}
+        )
+
+    assert entry.title == "Work"

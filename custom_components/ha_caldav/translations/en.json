@@ -8,17 +8,27 @@
           "url": "Server URL",
           "username": "Username",
           "password": "Password",
-          "verify_ssl": "Verify the SSL certificate",
-          "ca_bundle": "CA bundle path",
-          "client_cert": "Client certificate path",
-          "client_key": "Client key path"
+          "verify_ssl": "Verify the SSL certificate"
         },
         "data_description": {
           "url": "The address of your CalDAV server. On most servers the bare host name is enough.",
-          "verify_ssl": "Leave this on unless you know why not. Off, anyone between Home Assistant and the server can read the password.",
-          "ca_bundle": "Optional. Verify the server against this file instead of the system store.",
-          "client_cert": "Optional. Identifies Home Assistant to servers that ask for a certificate.",
-          "client_key": "Optional. The private key belonging to that certificate."
+          "verify_ssl": "Leave this on unless you know why not. Off, anyone between Home Assistant and the server can read the password."
+        },
+        "sections": {
+          "certificates": {
+            "name": "Certificates",
+            "description": "Only for a server that asks for a client certificate or uses a private CA.",
+            "data": {
+              "ca_bundle": "CA bundle path",
+              "client_cert": "Client certificate path",
+              "client_key": "Client key path"
+            },
+            "data_description": {
+              "ca_bundle": "Optional. Verify the server against this file instead of the system store.",
+              "client_cert": "Optional. Identifies Home Assistant to servers that ask for a certificate.",
+              "client_key": "Optional. The private key belonging to that certificate."
+            }
+          }
         }
       },
       "reconfigure": {
@@ -26,17 +36,27 @@
         "description": "Update the server URL or the TLS settings. The account itself stays as it is.",
         "data": {
           "url": "Server URL",
-          "verify_ssl": "Verify the SSL certificate",
-          "ca_bundle": "CA bundle path",
-          "client_cert": "Client certificate path",
-          "client_key": "Client key path"
+          "verify_ssl": "Verify the SSL certificate"
         },
         "data_description": {
           "url": "The address of your CalDAV server. On most servers the bare host name is enough.",
-          "verify_ssl": "Leave this on unless you know why not. Off, anyone between Home Assistant and the server can read the password.",
-          "ca_bundle": "Optional. Verify the server against this file instead of the system store.",
-          "client_cert": "Optional. Identifies Home Assistant to servers that ask for a certificate.",
-          "client_key": "Optional. The private key belonging to that certificate."
+          "verify_ssl": "Leave this on unless you know why not. Off, anyone between Home Assistant and the server can read the password."
+        },
+        "sections": {
+          "certificates": {
+            "name": "Certificates",
+            "description": "Only for a server that asks for a client certificate or uses a private CA.",
+            "data": {
+              "ca_bundle": "CA bundle path",
+              "client_cert": "Client certificate path",
+              "client_key": "Client key path"
+            },
+            "data_description": {
+              "ca_bundle": "Optional. Verify the server against this file instead of the system store.",
+              "client_cert": "Optional. Identifies Home Assistant to servers that ask for a certificate.",
+              "client_key": "Optional. The private key belonging to that certificate."
+            }
+          }
         }
       },
       "reauth_confirm": {

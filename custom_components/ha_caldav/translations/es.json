@@ -8,17 +8,27 @@
           "url": "URL del servidor",
           "username": "Usuario",
           "password": "Contraseña",
-          "verify_ssl": "Verificar el certificado SSL",
-          "ca_bundle": "Ruta del paquete de CA",
-          "client_cert": "Ruta del certificado de cliente",
-          "client_key": "Ruta de la clave de cliente"
+          "verify_ssl": "Verificar el certificado SSL"
         },
         "data_description": {
           "url": "La dirección de tu servidor CalDAV. En la mayoría de los servidores basta con el nombre del host.",
-          "verify_ssl": "Déjalo activado a menos que sepas por qué desactivarlo. Desactivado, cualquiera entre Home Assistant y el servidor puede leer la contraseña.",
-          "ca_bundle": "Opcional. Verifica el servidor con este archivo en lugar del almacén del sistema.",
-          "client_cert": "Opcional. Identifica a Home Assistant ante servidores que piden certificado.",
-          "client_key": "Opcional. La clave privada de ese certificado."
+          "verify_ssl": "Déjalo activado a menos que sepas por qué desactivarlo. Desactivado, cualquiera entre Home Assistant y el servidor puede leer la contraseña."
+        },
+        "sections": {
+          "certificates": {
+            "name": "Certificados",
+            "description": "Solo para servidores que piden un certificado de cliente o usan una CA propia.",
+            "data": {
+              "ca_bundle": "Ruta del paquete de CA",
+              "client_cert": "Ruta del certificado de cliente",
+              "client_key": "Ruta de la clave de cliente"
+            },
+            "data_description": {
+              "ca_bundle": "Opcional. Verifica el servidor con este archivo en lugar del almacén del sistema.",
+              "client_cert": "Opcional. Identifica a Home Assistant ante servidores que piden certificado.",
+              "client_key": "Opcional. La clave privada de ese certificado."
+            }
+          }
         }
       },
       "reconfigure": {
@@ -26,17 +36,27 @@
         "description": "Actualiza la URL del servidor o los ajustes de TLS. La cuenta en sí no cambia.",
         "data": {
           "url": "URL del servidor",
-          "verify_ssl": "Verificar el certificado SSL",
-          "ca_bundle": "Ruta del paquete de CA",
-          "client_cert": "Ruta del certificado de cliente",
-          "client_key": "Ruta de la clave de cliente"
+          "verify_ssl": "Verificar el certificado SSL"
         },
         "data_description": {
           "url": "La dirección de tu servidor CalDAV. En la mayoría de los servidores basta con el nombre del host.",
-          "verify_ssl": "Déjalo activado a menos que sepas por qué desactivarlo. Desactivado, cualquiera entre Home Assistant y el servidor puede leer la contraseña.",
-          "ca_bundle": "Opcional. Verifica el servidor con este archivo en lugar del almacén del sistema.",
-          "client_cert": "Opcional. Identifica a Home Assistant ante servidores que piden certificado.",
-          "client_key": "Opcional. La clave privada de ese certificado."
+          "verify_ssl": "Déjalo activado a menos que sepas por qué desactivarlo. Desactivado, cualquiera entre Home Assistant y el servidor puede leer la contraseña."
+        },
+        "sections": {
+          "certificates": {
+            "name": "Certificados",
+            "description": "Solo para servidores que piden un certificado de cliente o usan una CA propia.",
+            "data": {
+              "ca_bundle": "Ruta del paquete de CA",
+              "client_cert": "Ruta del certificado de cliente",
+              "client_key": "Ruta de la clave de cliente"
+            },
+            "data_description": {
+              "ca_bundle": "Opcional. Verifica el servidor con este archivo en lugar del almacén del sistema.",
+              "client_cert": "Opcional. Identifica a Home Assistant ante servidores que piden certificado.",
+              "client_key": "Opcional. La clave privada de ese certificado."
+            }
+          }
         }
       },
       "reauth_confirm": {

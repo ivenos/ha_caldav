@@ -42,8 +42,7 @@ class Capability:
         return COMPONENT_TODO in self.components
 
 
-# A server that answers neither property is not saying "nothing allowed"; it is
-# saying nothing, and the pre-capability behaviour has to stand.
+# A server answering neither property is saying nothing, not "nothing allowed".
 UNKNOWN = Capability(frozenset({COMPONENT_EVENT, COMPONENT_TODO}), writable=True)
 
 
@@ -56,7 +55,6 @@ def fetch_capabilities(client: caldav.DAVClient) -> dict[str, Capability]:
         parse_response_xml=False,
     )
     capabilities: dict[str, Capability] = {}
-    # Already keyed the way capability_for asks for them.
     for href, props in _objects_and_props(response, home.url).items():
         components = _components(props.get(cdav.SupportedCalendarComponentSet.tag))
         privileges = _privileges(props.get(CurrentUserPrivilegeSet.tag))
@@ -70,16 +68,9 @@ def fetch_capabilities(client: caldav.DAVClient) -> dict[str, Capability]:
 def _objects_and_props(response: Any, base: Any = None) -> dict[str, dict[str, Any]]:
     """Return href -> property tag -> element, tolerating a refused propstat.
 
-    RFC 4918 9.1 lets a server answer 403 for a property the client may not
-    read, which is exactly what one is likely to do for the privileges of a
-    foreign collection. caldav's own parser raises on the whole response when
-    it meets one, so a single shared calendar would cost every other calendar
-    on the account its capabilities and leave them all permissively guessed.
-
-    Keyed through calendar_key, because standing in for caldav's parser means
-    standing in for the normalization it does: RFC 4918 8.3 lets an href be an
-    absolute URI, and read literally not one of them would match the calendar
-    it describes. First propstat wins, as caldav's does.
+    RFC 4918 9.1 lets a server answer 403 for one property, on which caldav's
+    own parser raises for the whole response. RFC 4918 8.3 lets an href be
+    absolute, hence calendar_key. First propstat wins, as in caldav.
     """
     found: dict[str, dict[str, Any]] = {}
     for entry in response.tree.findall(".//" + dav.Response.tag):
@@ -87,10 +78,7 @@ def _objects_and_props(response: Any, base: Any = None) -> dict[str, dict[str, A
         if element is None or not element.text:
             continue
         if not _same_server(element.text, base):
-            # calendar_key drops the scheme and the host, so a response for
-            # another server keys onto the same path as a real calendar here,
-            # and the first one seen wins. caldav's own parser resolves an href
-            # against the request url and would never match it.
+            # calendar_key drops the host, so this would key onto a real path.
             _LOGGER.debug("Ignoring a response for another server: %s", element.text)
             continue
         href = calendar_key(element.text)
@@ -107,12 +95,7 @@ def _objects_and_props(response: Any, base: Any = None) -> dict[str, dict[str, A
 
 
 def _same_server(href: str, base: Any) -> bool:
-    """Return whether an href belongs to the server the request went to.
-
-    A relative one always does. An absolute one only when it names the same
-    host and scheme; RFC 4918 8.3 permits it, but nothing on another server has
-    anything to say about a calendar on this one.
-    """
+    """Return whether an href is relative or names the server asked."""
     parsed = urlparse(href)
     if not parsed.netloc:
         return True
@@ -132,12 +115,8 @@ def capability_for(
 def _components(element: Any) -> frozenset[str]:
     """Return the component names, empty when the server named none.
 
-    Radicale answers an empty component set with a single nameless comp
-    element, which has to read the same as no answer at all.
-
-    RFC 5545 makes component names case-insensitive, and a lowercase answer read
-    literally would report a calendar as holding neither kind, which is what
-    :func:`._async_prune_entities` deletes entities on.
+    Radicale answers an empty set as one nameless comp element, and RFC 5545
+    makes the names case-insensitive.
     """
     if element is None:
         return frozenset()
@@ -161,29 +140,22 @@ def _privileges(element: Any) -> frozenset[str]:
 def fetch_address_set(client: caldav.DAVClient) -> list[str]:
     """Return the calendar user addresses of the account, empty if unsupported.
 
-    Only a server doing RFC 6638 scheduling answers this, and it is what an
-    ATTENDEE line has to be matched against to find our own participation.
+    Only a server doing RFC 6638 scheduling answers this.
     """
     try:
         addresses = client.principal().calendar_user_address_set()
         return [_absolute(client, str(address)) for address in addresses if address]
     except Exception as err:  # noqa: BLE001
-        # Anything from NotFoundError to a parse failure on servers that answer
-        # the property with a shape caldav does not expect.
+        # NotFoundError, or a parse failure on a shape caldav does not expect.
         _LOGGER.debug("No calendar user address set: %s", err)
         return []
 
 
 def _absolute(client: caldav.DAVClient, address: str) -> str:
-    """Return a calendar user address as the URI a CAL-ADDRESS has to be.
+    """Return a calendar user address as an absolute URI.
 
-    RFC 6638 lets the set name the principal by its url, and sabre/dav and
-    Nextcloud both answer with a bare path for an account carrying no mail
-    address. Written onto an ATTENDEE as it stands, sabre reads it as a local
-    principal, cannot resolve it, and answers 500 to every DELETE of the object
-    from then on: the event cannot be removed at all, from here or from any
-    other client. Resolved against the account it is a principal both ends can
-    follow. An address that carries a scheme of its own keeps it.
+    RFC 6638 lets the set name the principal by a bare path; written onto an
+    ATTENDEE, sabre/dav cannot resolve it and answers 500 to every DELETE.
     """
     try:
         return urljoin(str(client.url), address)
@@ -210,8 +182,7 @@ def supports_sync_collection(calendar: caldav.Calendar) -> bool:
             if any("sync-collection" in str(node.tag) for node in element.iter()):
                 return True
     except Exception as err:  # noqa: BLE001
-        # Parsing fails on the same servers that answer the property oddly, so
-        # the whole probe is guarded, not only the request.
+        # Parsing fails on the same servers that answer the property oddly.
         _LOGGER.debug("Could not read the supported report set: %s", err)
         return True
     return not answered

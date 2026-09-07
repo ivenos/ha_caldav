@@ -3,8 +3,22 @@ name: Live
 on:
   push:
     branches: [main]
+    paths:
+      - custom_components/**
+      - tests/**
+      - requirements_test.txt
+      - pytest.ini
+      - .github/scripts/live-test.sh
+      - .github/workflows/live.yml
   pull_request:
     branches: [main]
+    paths:
+      - custom_components/**
+      - tests/**
+      - requirements_test.txt
+      - pytest.ini
+      - .github/scripts/live-test.sh
+      - .github/workflows/live.yml
   workflow_dispatch:
   schedule:
     - cron: "0 4 * * 1"

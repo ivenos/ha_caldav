@@ -84,6 +84,7 @@ from .coordinator import (
     todo_unique_id,
 )
 from .errors import as_reported
+from .event import read_extras
 
 if TYPE_CHECKING:
     from .calendar import HaCaldavCalendarEntity
@@ -92,30 +93,24 @@ if TYPE_CHECKING:
 def _local_datetime(value: Any) -> datetime:
     """Return an aware datetime in Home Assistant's own timezone.
 
-    The datetime selector sends a naive value, and caldav resolves a naive one
-    against the OS timezone, which need not be the one Home Assistant runs in.
+    The datetime selector sends a naive value, which caldav would resolve
+    against the OS timezone.
     """
     parsed = cv.datetime(value)
     return parsed if parsed.tzinfo is not None else dt_util.as_local(parsed)
 
 
 def _date_only(value: Any) -> date:
-    """Return a plain date, refusing the datetime cv.date would let through.
-
-    datetime is a subclass of date, so cv.date hands a naive one back unchanged
-    and an all-day field would silently accept a time it then drops.
-    """
+    """Return a plain date; cv.date lets a datetime through unchanged."""
     if isinstance(value, datetime):
         raise vol.Invalid("expected a date without a time")
     return cv.date(value)
 
 
 def _named(values: tuple[str, ...]) -> Any:
-    """Return a field taking an RFC 5545 name in the spelling selectors need.
+    """Return a field taking an RFC 5545 name in either spelling.
 
-    hassfest holds a selector's option keys to [a-z0-9-_]+, so the wire form of
-    a value like OPAQUE or THISANDFUTURE cannot be the option itself. Either
-    spelling is accepted and the RFC one is what reaches the write path.
+    hassfest holds selector option keys to [a-z0-9-_]+.
     """
     return vol.All(vol.Lower, vol.In(tuple(v.lower() for v in values)), vol.Upper)
 
@@ -175,9 +170,8 @@ FREE_BUSY_SCHEMA = {
     vol.Required("end"): _local_datetime,
 }
 
-# A date and a datetime need a field each, because the pickers behind them
-# differ: the datetime one always sends a time, so a single field could never
-# express the all-day event RFC 5545 writes as a DATE.
+# A field each: the datetime picker always sends a time, and RFC 5545 writes
+# an all-day event as a DATE.
 SPAN_FIELDS = {
     vol.Optional("start_date_time"): _local_datetime,
     vol.Optional("end_date_time"): _local_datetime,
@@ -229,14 +223,9 @@ UPDATE_EVENT_SCHEMA = vol.All(
     ),
     _ONE_START,
     _ONE_END,
-    # A range says where in the series to start, so on its own it has nothing to
-    # start from. Accepted anyway it was dropped without a word, and a call
-    # meaning "this occurrence and the ones after it" rewrote the whole series,
-    # the past included.
     _range_needs_occurrence,
-    # An update naming nothing but the uid still writes: the PUT moves SEQUENCE,
-    # and a scheduling server reads that as a new revision and tells every
-    # attendee about a change that was never made.
+    # A PUT naming nothing still moves SEQUENCE, which a scheduling server
+    # announces to every attendee.
     cv.has_at_least_one_key(
         "summary",
         "description",
@@ -262,12 +251,7 @@ EXPORT_SCHEMA = {vol.Optional("uid"): cv.string}
 
 
 def _hex_color(value: Any) -> str:
-    """Return a color in the one shape the read path recognises again.
-
-    Anything else reaches the server verbatim and comes back as no color at
-    all, so the calendar loses the color it had and every other client on the
-    account reads a broken property.
-    """
+    """Return a color in the one shape the read path recognises again."""
     if (color := normalize_color(cv.string(value))) is None:
         raise vol.Invalid("expected a hex color such as #00679e")
     return color
@@ -300,8 +284,7 @@ DELETE_CALENDAR_SCHEMA = vol.Schema(
 
 def async_register_services(hass: HomeAssistant) -> None:
     """Register the services that act on an account rather than a calendar."""
-    # Admin only: creating and especially deleting a collection changes the
-    # account itself, and a plain service gets no permission check at all.
+    # Admin only: a plain service gets no permission check at all.
     async_register_admin_service(
         hass,
         DOMAIN,
@@ -332,9 +315,7 @@ def async_register_entity_services(platform: EntityPlatform) -> None:
         _async_get_free_busy,
         supports_response=SupportsResponse.ONLY,
     )
-    # Not feature-gated, deliberately: core's own refusal for a missing feature
-    # says only "does not support", while _require_writable names the read-only
-    # option the user themselves set and can undo.
+    # Not feature-gated: _require_writable names the option the user set.
     platform.async_register_entity_service(
         SERVICE_CREATE_EVENT, CREATE_EVENT_SCHEMA, _async_create_event
     )
@@ -362,11 +343,7 @@ def async_register_entity_services(platform: EntityPlatform) -> None:
 
 
 def _require_writable(entity: HaCaldavCalendarEntity) -> None:
-    """Refuse a write the entity's own controls would not offer either.
-
-    A service reaches the server directly, so the read-only option and the
-    privileges the server reports have to be re-checked here.
-    """
+    """Refuse a write the entity's own controls would not offer either."""
     if not entity.managed.writable:
         raise ServiceValidationError(
             translation_domain=DOMAIN,
@@ -385,10 +362,7 @@ async def _async_search_events(
     if end := call.data.get("end"):
         criteria["end"] = end
     _check_window(criteria.get("start"), criteria.get("end"))
-    # Searched and read in one executor job. vobject parses an item the first
-    # time its components are asked for, so building the list costs as much as
-    # the request does, and the window is optional here: an unbounded text
-    # search over a large collection is unbounded time on the event loop.
+    # Searched and parsed in one executor job: vobject parses on first access.
     events = await _async_account_job(
         entity.hass,
         partial(_found_events, entity.calendar, criteria),
@@ -412,6 +386,7 @@ def _found_events(calendar: Any, criteria: dict[str, Any]) -> list[dict[str, Any
                 "end": event.end.isoformat(),
                 "description": event.description,
                 "location": event.location,
+                **read_extras(vevent),
             }
         )
     return events
@@ -433,15 +408,13 @@ async def _async_get_free_busy(
 def _periods(report: Any) -> list[dict[str, str]]:
     """Flatten the FREEBUSY lines of a VFREEBUSY into start/end pairs.
 
-    Each value is a period whose second half is either an end or a duration,
-    and icalendar hands back a bare one for a single period and a list once
-    there is more than one, however the lines were split.
+    A period's second half is an end or a duration, and icalendar hands back
+    a bare value for one period and a list for several.
     """
     try:
         found = list(report.icalendar_instance.walk("VFREEBUSY"))
     except Exception as err:
-        # Answering "nothing is busy" for a report we could not read would have
-        # an automation book a meeting on top of one.
+        # "Nothing is busy" is the wrong answer for a report we could not read.
         raise as_reported(err, SERVICE_GET_FREE_BUSY) from err
     periods = []
     for component in found:
@@ -503,9 +476,7 @@ def _span(data: Mapping[str, Any]) -> tuple[Any, Any]:
 def _check_window(start: Any, end: Any) -> None:
     """Refuse a window that ends before it starts.
 
-    A server answers one with nothing, and nothing from a free/busy report
-    reads as "the whole window is free", which is what an automation books a
-    meeting on top of an existing one over.
+    A server answers one with nothing, which a free/busy caller reads as free.
     """
     if start is not None and end is not None and end < start:
         raise ServiceValidationError(
@@ -514,15 +485,10 @@ def _check_window(start: Any, end: Any) -> None:
 
 
 def _check_span(start: Any, end: Any) -> None:
-    """Refuse a date paired with a datetime, and an end before its start.
+    """Refuse a date paired with a datetime, and an end not after its start.
 
-    RFC 5545 requires DTSTART and DTEND to share a value type, and servers take
-    either mistake and then hand back an event core refuses to read.
-
-    An end equal to the start is refused with them: core holds new events to a
-    second at minimum, and for a date pair RFC 5545 3.6.1 wants DTEND strictly
-    later, so the natural reading of end_date as "the last day" would store an
-    object other clients reject.
+    RFC 5545 requires DTSTART and DTEND to share a value type, and 3.6.1
+    wants a DATE end strictly later.
     """
     if isinstance(start, datetime) != isinstance(end, datetime):
         raise ServiceValidationError(
@@ -552,10 +518,8 @@ async def _async_move_event(entity: HaCaldavCalendarEntity, call: ServiceCall) -
     _require_writable(entity)
     await _async_check_control(entity, call, call.data[ATTR_TARGET_ENTITY_ID])
     target = _managed_target(entity, call.data[ATTR_TARGET_ENTITY_ID])
-    # By identity: one loaded collection is one ManagedCalendar, whichever
-    # account it belongs to. Compared on calendar_key instead, two accounts on
-    # different servers read as the same calendar whenever their paths agree,
-    # and on Nextcloud the default calendar of every instance is /personal/.
+    # By identity: two accounts on different servers may share a path, and on
+    # Nextcloud every account has /personal/.
     if target is entity.managed:
         raise ServiceValidationError(
             translation_domain=DOMAIN,
@@ -581,8 +545,8 @@ async def _async_check_control(
 ) -> None:
     """Refuse a caller who may not control the entity being written to.
 
-    Home Assistant checks this for entities named in a service target, not for
-    one named in a field, and this service writes into the entity named here.
+    Core checks this for the service target only, not for an entity named in
+    a field.
     """
     if (user_id := call.context.user_id) is None:
         return
@@ -680,10 +644,7 @@ async def _async_respond(entity: HaCaldavCalendarEntity, call: ServiceCall) -> N
             addresses,
         ),
         SERVICE_RESPOND_TO_INVITATION,
-        # The reply is a PUT, so the etag the coordinator holds for this event
-        # is stale the moment it lands, and the refresh behind it is debounced.
-        # Editing the event straight after replying would be refused over a
-        # conflict that is the user's own reply.
+        # The reply is a PUT, so the etag held for this event is stale.
         forget=("etags", (call.data["uid"],)),
     )
 
@@ -701,12 +662,10 @@ async def _async_create_calendar(hass: HomeAssistant, call: ServiceCall) -> None
         ),
         SERVICE_CREATE_CALENDAR,
     )
-    # An explicit calendar list would skip the new calendar at setup.
+    # By name: the url of the new collection is not known until the account
+    # is listed again, and _is_selected accepts either shape.
     selected = entry.options.get(CONF_CALENDARS)
     if selected is not None and name not in selected:
-        # By name: the url of the new collection is not known until the account
-        # is listed again, and _is_selected accepts either shape. The options
-        # flow rewrites it to a key the next time it is opened.
         hass.config_entries.async_update_entry(
             entry, options={**entry.options, CONF_CALENDARS: [*selected, name]}
         )
@@ -724,7 +683,6 @@ async def _async_delete_calendar(hass: HomeAssistant, call: ServiceCall) -> None
             translation_placeholders={"name": name},
         )
     if len(matches) > 1:
-        # Irreversible and unguided: refuse rather than destroy an arbitrary one.
         raise ServiceValidationError(
             translation_domain=DOMAIN,
             translation_key="ambiguous_calendar",
@@ -735,9 +693,7 @@ async def _async_delete_calendar(hass: HomeAssistant, call: ServiceCall) -> None
         hass, partial(delete_calendar, managed.calendar), SERVICE_DELETE_CALENDAR
     )
     _async_forget_entities(hass, entry, managed.calendar.url)
-    # Both shapes: the flow writes calendar keys and create_calendar writes a
-    # display name, so matching only one left the other behind forever, and the
-    # option ended up holding keys for collections that no longer exist.
+    # Both shapes: the flow writes keys and create_calendar writes a name.
     gone = {name, calendar_key(managed.calendar.url)}
     selected = entry.options.get(CONF_CALENDARS)
     if selected is not None and gone & set(selected):
@@ -784,12 +740,7 @@ async def _async_account_job(hass: HomeAssistant, job: partial, action: str) -> 
     try:
         return await hass.async_add_executor_job(job)
     except Exception as err:
-        # As broad as the entity write path, and for the same reason: caldav
-        # asserts its way out of a response it did not expect and comes out of
-        # a captive portal's html with a TypeError, neither of which is a
-        # WRITE_ERRORS. Unwrapped they reach the caller as "Unknown error" with
-        # a traceback, while the identical failure through create_event is
-        # translated. as_reported names only the type, so nothing is disclosed.
+        # As broad as the entity write path, and for the same reason.
         raise as_reported(err, action) from err
 
 
@@ -799,9 +750,5 @@ async def _async_write(
     action: str,
     forget: tuple[str, tuple[str, ...]] | None = None,
 ) -> None:
-    """Run a write against the entity's own calendar.
-
-    The entity owns this so a service write behaves exactly like one made from
-    the platform: same error mapping, same refresh, same etag invalidation.
-    """
+    """Run a write against the entity's own calendar, as the platform would."""
     await entity.async_write(job, action, forget=forget)

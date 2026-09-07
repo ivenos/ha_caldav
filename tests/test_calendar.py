@@ -790,7 +790,7 @@ async def test_a_poll_drops_the_etag_of_an_event_it_no_longer_finds(
     # Seen by the polled window before, so its absence now means it is gone.
     entity.coordinator._etag_window = {"deleted-1"}
     entity.coordinator.etags = {"deleted-1": "old-etag"}
-    entity.coordinator._window_events = None
+    entity.coordinator.halves["events"].cached = None
 
     await entity.coordinator.async_refresh()
 
@@ -807,7 +807,7 @@ async def test_a_poll_keeps_the_etags_of_a_window_it_did_not_read(
     entity = _entity(hass, "calendar.iven_personal")
     # Cached by the panel for a month the poll window does not reach.
     entity.coordinator.etags = {"next-month-1": "panel-etag"}
-    entity.coordinator._window_events = None
+    entity.coordinator.halves["events"].cached = None
 
     await entity.coordinator.async_refresh()
 
@@ -1060,14 +1060,14 @@ async def test_a_half_that_keeps_failing_stops_looking_healthy(
     )
     for _ in range(3):
         await coordinator.async_refresh()
-        assert not coordinator.dead["todos"]
+        assert not coordinator.halves["todos"].dead
 
     await coordinator.async_refresh()
 
     # The list stops claiming to be a list; the calendar beside it, which the
     # server answers about perfectly well, carries on.
-    assert coordinator.dead["todos"]
-    assert not coordinator.dead["events"]
+    assert coordinator.halves["todos"].dead
+    assert not coordinator.halves["events"].dead
     await hass.async_block_till_done()
     assert hass.states.get("todo.iven_personal").state == STATE_UNAVAILABLE
     assert hass.states.get("calendar.iven_personal").state != STATE_UNAVAILABLE
@@ -1259,7 +1259,7 @@ async def test_a_dead_half_still_lets_the_other_one_read(
     for _ in range(4):
         await coordinator.async_refresh()
 
-    assert coordinator.dead["events"]
+    assert coordinator.halves["events"].dead
     # Reached on the failing poll too, not only on the tolerated ones.
     assert len(seen) == 4
 
@@ -1290,7 +1290,7 @@ async def test_a_dead_half_keeps_the_other_ones_data_and_etags_together(
     for _ in range(4):
         await coordinator.async_refresh()
 
-    assert coordinator.dead["events"]
+    assert coordinator.halves["events"].dead
     # The list itself was read four times and is current, so the etag describing
     # it is the one the next edit has to be checked against.
     assert coordinator.todo_etags == {"todo-1": '"t4"'}
@@ -1339,7 +1339,7 @@ async def test_a_half_that_recovers_starts_counting_again(
     # limit, and the half would be declared dead over failures that were never
     # consecutive.
     assert coordinator.last_update_success
-    assert coordinator._misses["events"] == 2
+    assert coordinator.halves["events"].misses == 2
 
 
 async def test_one_unplaceable_event_does_not_cost_the_collection_its_entities(
@@ -1379,7 +1379,7 @@ async def test_a_polled_window_survives_an_etag_cache_at_its_limit(
     """Merged behind the entries already held, a cache at its limit gives up
     the window it just read instead of what has been out of view longest. Those
     uids then never regain an etag, and their next edit is written with nothing
-    to check against — silently, and only on the large calendars where a clash
+    to check against - silently, and only on the large calendars where a clash
     is likeliest."""
     from custom_components.ha_caldav.coordinator import _CACHE_LIMIT
 
@@ -1404,7 +1404,7 @@ async def test_a_todo_report_without_etags_does_not_empty_the_cache(
     hass: HomeAssistant,
 ) -> None:
     """Taken at face value it empties the cache, and the next edit of every one
-    of those items goes out with nothing to check against — silently."""
+    of those items goes out with nothing to check against - silently."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.iven_personal").coordinator
@@ -1624,7 +1624,7 @@ async def test_a_dead_half_beside_one_still_serving_is_not_a_failed_poll(
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.iven_personal").coordinator
     # Never read at all, so the list is dead from the very first poll.
-    assert coordinator.dead["todos"]
+    assert coordinator.halves["todos"].dead
 
     calendar.search.side_effect = Timeout("and now neither does the window")
     await coordinator.async_refresh()
@@ -1718,7 +1718,7 @@ async def test_a_401_reauths_beside_a_half_that_has_been_broken_for_good(
     calendar.search.side_effect = timing_out
     for _ in range(_MAX_KEPT_POLLS + 1):
         await coordinator.async_refresh()
-    assert coordinator.dead[broken]
+    assert coordinator.halves[broken].dead
 
     def rotated(**kwargs):
         if half_of(kwargs) == broken:

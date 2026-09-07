@@ -22,8 +22,8 @@ RANGE_THIS_AND_FUTURE = "THISANDFUTURE"
 COMPONENT_EVENT = "VEVENT"
 COMPONENT_TODO = "VTODO"
 
-# RFC 3744 privileges that let us write into a collection. Servers disagree on
-# which one they report for a shared calendar, so any of them counts.
+# RFC 3744 privileges that grant writes; servers disagree on which one they
+# report for a shared calendar, so any of them counts.
 WRITE_PRIVILEGES = frozenset({"write", "write-content", "all", "bind"})
 
 SERVICE_SEARCH_EVENTS = "search_events"
@@ -58,8 +58,7 @@ ATTR_COMPONENTS = "components"
 ATTR_TEXT = "text"
 ATTR_FIELD = "field"
 
-# What the upcoming event publishes beyond Home Assistant's own fields. Kept
-# out of the recorder, so the list has to be nameable.
+# What the upcoming event publishes beyond core's fields; kept out of the recorder.
 EVENT_ATTRIBUTES = (
     ATTR_URL,
     ATTR_EVENT_STATUS,
@@ -72,7 +71,7 @@ EVENT_ATTRIBUTES = (
     ATTR_ALARMS,
 )
 
-# Closed vocabularies from RFC 5545, so vol.In is safe to validate against.
+# Closed vocabularies from RFC 5545.
 EVENT_STATUSES = ("TENTATIVE", "CONFIRMED", "CANCELLED")
 EVENT_CLASSIFICATIONS = ("PUBLIC", "PRIVATE", "CONFIDENTIAL")
 EVENT_TRANSPARENCIES = ("OPAQUE", "TRANSPARENT")
@@ -92,8 +91,7 @@ SEARCH_FIELDS = (
     "uid",
 )
 
-# Nextcloud Tasks and Apple Reminders both order by this property; there is no
-# RFC 5545 equivalent, so a server that does not know it just stores it.
+# No RFC 5545 equivalent; Nextcloud Tasks and Apple Reminders both order by it.
 SORT_ORDER_PROPERTY = "X-APPLE-SORT-ORDER"
 
 ISSUE_BUILTIN_CALDAV = "builtin_caldav_conflict"

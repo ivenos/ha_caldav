@@ -28,6 +28,7 @@ from .api import (
     collapse_repeated,
     delete_components,
     object_by_uid,
+    stamp,
     zoned_document,
 )
 from .errors import NETWORK_ERRORS, WRITE_ERRORS, Refused
@@ -65,17 +66,14 @@ def update_event(
 
     if recurrence_id is None:
         if data.get("rrule") and "RECURRENCE-ID" in master:
-            # Nothing here is a series head: an object holding only detached
-            # instances falls back to one of them, and a rule written onto a
-            # component that names one occurrence is inert wherever it lands.
+            # No series head here; a rule on a detached instance is inert.
             raise Refused("not_recurring")
         _update_series(dav_event, ical, master, data, own_address)
         return
 
     _check_no_ranged_override(ical)
-    # Aligned once, here: every comparison below goes through to_utc, and a
-    # bare date reads as local midnight there while an aware id keeps its own
-    # instant. Left to each caller the two never meet outside UTC.
+    # Aligned once: to_utc reads a bare date as local midnight and an aware
+    # id as its own instant.
     occurrence = _align(master, parse_recurrence_id(recurrence_id))
 
     if this_and_future and "RECURRENCE-ID" in master:
@@ -92,11 +90,7 @@ def update_event(
         return
 
     if to_utc(occurrence) <= to_utc(master["DTSTART"].dt):
-        # From the first occurrence onwards is every occurrence there is, so
-        # this is the whole-series edit under another name and takes the same
-        # path. Its own once dropped every exception and every extra and
-        # cancelled date, for a range that covers exactly what the split path
-        # carries over into the tail.
+        # From the first occurrence onwards is the whole series.
         _update_series(dav_event, ical, master, data, own_address)
         return
 
@@ -126,8 +120,7 @@ def update_event(
         _drop_overrides(ical, master, occurrence, from_occurrence=True)
         _save(dav_event, ical, master)
     except WRITE_ERRORS:
-        # The server may have committed the cap before the timeout; only drop
-        # the tail if the head is verifiably still uncapped.
+        # The server may have committed the cap before the timeout.
         if _head_uncapped(calendar, uid, occurrence):
             _discard(tail)
         else:
@@ -146,10 +139,7 @@ def _update_series(
     own_address: str | None,
 ) -> None:
     """Apply an edit to every occurrence of a series and save it."""
-    # The start as it is written, not as an instant: to_utc reads a bare date as
-    # local midnight, so the delta an all-day series moves by came out a day too
-    # large everywhere east of UTC, and every exception it then shifted stopped
-    # naming a slot the rule produces.
+    # As written, not as an instant: to_utc reads a bare date as local midnight.
     old_start = master["DTSTART"].dt
     old_rule = _rule_string(master)
     _apply(master, data, own_address)
@@ -159,33 +149,20 @@ def _update_series(
         raise Refused("rrule_mismatch")
     if rule_changed or start_moved:
         if "RECURRENCE-ID" in master and len(ical.walk("VEVENT")) > 1:
-            # No series head here, so the components beside this one are not its
-            # exceptions but detached instances of their own, and dropping them
-            # would delete events nobody asked about. A lone instance has
-            # nothing to lose and stays editable.
+            # No series head: the other components are detached instances.
             raise Refused("not_recurring")
-        # Only once something actually moves: an edit that leaves the rule and
-        # the start alone carries no occurrence anywhere, and refusing one there
-        # would leave such a series unrenameable.
         _check_no_ranged_override(ical)
         if rule_changed:
-            # The slots the exceptions named need not exist under the new rule,
-            # so there is nothing to carry them onto.
+            # The slots the exceptions named need not exist under the new rule.
             _drop_overrides(
                 ical, master, old_start, from_occurrence=False, all_overrides=True
             )
             _clear_dates(master)
         elif delta := _wall(master, master["DTSTART"].dt) - _wall(master, old_start):
-            # The rule still stands and the whole series moved, so the extra and
-            # the cancelled dates move with it, as the split path already does.
-            # Clearing them would drop every RDATE occurrence and bring back
-            # every one an EXDATE had cancelled.
+            # The rule stands and the series moved, so the exceptions, extra
+            # and cancelled dates move with it.
             dtstart = master["DTSTART"].dt
             zone = dtstart.tzinfo if isinstance(dtstart, datetime) else None
-            # The exceptions move with them: every slot they name still exists,
-            # only later. Dropping them would take the time, the place and the
-            # replies of each customized occurrence along with a nudge that was
-            # never about them.
             for override in _overrides(ical):
                 if override is not master:
                     _shift_override(override, delta, zone)
@@ -215,11 +192,8 @@ def delete_event(
 
     if this_and_future:
         if "RECURRENCE-ID" in master and len(ical.walk("VEVENT")) > 1:
-            # No series head, so _master fell back to a detached instance and
-            # which one it picked is the order the server listed them in.
-            # Whether the range then reads as "before the first occurrence" and
-            # takes the whole resource with it, instances ahead of the cut
-            # included, would come down to that order alone.
+            # No series head, so which instance stands in for it is the
+            # order the server listed them in.
             raise Refused("not_recurring")
         # Capping before the first occurrence would leave an empty series.
         if to_utc(occurrence) <= to_utc(master["DTSTART"].dt):
@@ -253,9 +227,8 @@ def delete_event(
 def parse_recurrence_id(value: str) -> datetime | date:
     """Parse the recurrence id Home Assistant echoes back.
 
-    Dates are tried first: parse_datetime also accepts a date-only string and
-    would turn an all day occurrence into midnight, losing the value type that
-    EXDATE and UNTIL have to match.
+    Dates first: parse_datetime accepts a date-only string too and would lose
+    the value type EXDATE and UNTIL have to match.
     """
     parsed = dt_util.parse_date(value) or dt_util.parse_datetime(value)
     if parsed is None:
@@ -263,10 +236,6 @@ def parse_recurrence_id(value: str) -> datetime | date:
     return parsed
 
 
-# RFC 2445 allowed some of these more than once and old clients still write
-# them so. icalendar then hands back a list where every reader here expects one
-# value, and the event fails every rename, move, occurrence edit and occurrence
-# delete with a server error while sitting visibly in the panel.
 def _collapsed(ical: Any) -> Any:
     """Return the object with each repeated single-value property reduced."""
     for component in ical.walk("VEVENT"):
@@ -287,10 +256,7 @@ def _master(ical: Any) -> Any:
 def _dated(vevent: Any) -> Any:
     """Return the component, refusing one stored without a start.
 
-    RFC 5545 leaves DTSTART out once an object carries a METHOD, and the read
-    path drops such events for that reason. Every comparison here is anchored
-    on it, so one reaching this far raised KeyError from somewhere deep and
-    reported a server error for something the server did nothing wrong in.
+    RFC 5545 leaves DTSTART out once an object carries a METHOD.
     """
     if "DTSTART" not in vevent:
         raise Refused("no_start_in_object")
@@ -309,10 +275,8 @@ def _overrides(ical: Any) -> list[Any]:
 def _check_no_ranged_override(ical: Any) -> None:
     """Refuse an object whose exception covers everything from a day onwards.
 
-    RFC 5545 has RANGE=THISANDFUTURE stand for the named occurrence and every
-    later one. Nothing here reads the parameter, so such an override would be
-    cloned or dropped as though it covered a single day, silently reverting
-    every occurrence after it. Apple Calendar and Outlook do write it.
+    RFC 5545 RANGE=THISANDFUTURE is read nowhere here, so such an override
+    would be handled as a single day. Apple Calendar and Outlook write it.
     """
     for override in _overrides(ical):
         params = getattr(override["RECURRENCE-ID"], "params", None) or {}
@@ -330,10 +294,8 @@ def _override(ical: Any, occurrence: datetime | date) -> Any | None:
 
 def _new_override(ical: Any, master: Any, occurrence: datetime | date) -> Any:
     override = ICalEvent.from_ical(master.to_ical())
-    # RECURRENCE-ID among them: an object holding only overrides has one on the
-    # component _master falls back to, and RFC 5545 allows a component exactly
-    # one. A second makes icalendar read the property as a list, which every
-    # later edit and delete of that event then trips over.
+    # RECURRENCE-ID too: the master may itself be a detached instance, and
+    # RFC 5545 allows a component exactly one.
     for key in ("RRULE", "RDATE", "EXDATE", "RECURRENCE-ID"):
         if key in override:
             del override[key]
@@ -346,11 +308,7 @@ def _new_override(ical: Any, master: Any, occurrence: datetime | date) -> Any:
 
 
 def _anchor_at(component: Any, master: Any, occurrence: datetime | date) -> None:
-    """Move a component cloned from the master onto the occurrence.
-
-    The clone carries the master's start; a caller that names one of its own
-    applies it afterwards.
-    """
+    """Move a component cloned from the master onto the occurrence."""
     aligned = _align(master, occurrence)
     dtstart = master["DTSTART"].dt
     delta = _wall(master, aligned) - _wall(master, dtstart)
@@ -363,13 +321,8 @@ def _anchor_at(component: Any, master: Any, occurrence: datetime | date) -> None
 def _rule_wall(master: Any, occurrence: datetime | date) -> datetime | None:
     """Return the occurrence as the rule itself dates it, or None if not on it.
 
-    An occurrence whose local time does not exist is resolved to an instant the
-    moment the frontend names it, and that instant converted back into the
-    series zone lands an hour past the slot the rule produces. Anchoring a
-    split-off series on it re-times every later occurrence with it, for good —
-    a yearly meeting on the morning the clocks go forward moves an hour and
-    stays there. The rule still holds the wall clock it meant, so it is asked
-    rather than reconstructed.
+    An occurrence in a DST gap arrives resolved to an instant, which converted
+    back lands an hour past the slot; the rule still holds the wall clock.
     """
     recur = master.get("RRULE")
     dtstart = master["DTSTART"].dt
@@ -391,11 +344,7 @@ def _drop_overrides(
     from_occurrence: bool,
     all_overrides: bool = False,
 ) -> None:
-    """Remove overrides, but never the component _master() returned.
-
-    On an orphan-override object every VEVENT carries a RECURRENCE-ID and the
-    first doubles as the master; removing it would save an empty resource.
-    """
+    """Remove overrides, but never the component _master() returned."""
     target = to_utc(occurrence)
     for vevent in _overrides(ical):
         if vevent is master:
@@ -413,21 +362,12 @@ def _align(master: Any, occurrence: datetime | date) -> datetime | date:
     if not isinstance(occurrence, datetime):
         occurrence = datetime.combine(occurrence, time.min)
     if dtstart.tzinfo is None:
-        # A floating series is dated in local terms, and the frontend echoes an
-        # aware id back; stripping its zone would name a different instant
-        # everywhere but UTC.
+        # A floating series is dated in local terms; the frontend echoes an
+        # aware id back.
         if occurrence.tzinfo is None:
             return occurrence
-        # An instant has two wall clocks in a zone that skips or repeats an
-        # hour, and both are correct inverses; only the rule knows which one it
-        # produced. as_local always picks the later, so a floating series whose
-        # occurrence sits in the skipped hour was cancelled, overridden and
-        # split at a slot it does not have, every time without a word.
-        # as_local is an exact inverse on its own: fold belongs to the value
-        # rather than to the zone, so it survives the strip and a repeated hour
-        # comes back as the same instant. What it cannot know is which of two
-        # equally correct wall clocks the series meant, and that is what asking
-        # the rule settles.
+        # An instant has two wall clocks in a DST gap or fold, and only the
+        # rule knows which one it produced.
         return _rule_wall(master, occurrence) or dt_util.as_local(occurrence).replace(
             tzinfo=None
         )
@@ -445,9 +385,7 @@ def _add_exdate(master: Any, occurrence: datetime | date) -> None:
 
 def _is_occurrence(master: Any, occurrence: datetime | date) -> bool:
     target = to_utc(occurrence)
-    # An excluded slot is not one: writing an override for it would store a
-    # component the EXDATE goes on hiding, and report success for a change
-    # nobody can see.
+    # An excluded slot is not one; an override there would stay hidden.
     if any(to_utc(value) == target for value in _date_values(master, "EXDATE")):
         return False
     if target == to_utc(master["DTSTART"].dt):
@@ -490,31 +428,26 @@ def _tail_document(
 ) -> ICalCalendar:
     """Return the tail of a split as a document.
 
-    The document, not its text: caldav puts a string handed to it through
-    vcal.fix, which rewrites the object.
+    The document, not its text, which caldav would run through vcal.fix.
     """
     tail = ICalCalendar.from_ical(ical.to_ical())
     vevent = _master(tail)
     target = to_utc(_align(master, occurrence))
-    # Where this occurrence actually starts, which is the exception's start
-    # when the split point already carries one. That is the start the frontend
-    # echoes back, while the series master is anchored on the rule slot.
+    # The frontend names the exception's start when the split point carries
+    # one, while the tail master is anchored on the rule slot.
     split = _override(tail, occurrence)
     baseline = split["DTSTART"].dt if split is not None else occurrence
     carried = []
     for override in _overrides(tail):
-        # An exception past the cut belongs to the tail and would otherwise be
-        # dropped by both halves; one whose rule is being replaced outright has
-        # no occurrence left to attach to.
+        # Exceptions past the cut belong to the tail, unless the rule is
+        # being replaced outright.
         stale = to_utc(override["RECURRENCE-ID"].dt) < target
         if stale or _rule_replaced(master, data):
             tail.subcomponents.remove(override)
         else:
             carried.append(override)
-    # The master ahead of the exceptions it carries. caldav reads the first
-    # component that is not a timezone, and on finding a RECURRENCE-ID there it
-    # takes its single-occurrence path, which looks the uid up on the server —
-    # a uid this very call is about to create, so it comes back with nothing.
+    # Master first: caldav reads the first non-timezone component, and a
+    # RECURRENCE-ID there sends it looking for a uid that does not exist yet.
     zones = [sub for sub in tail.subcomponents if sub.name == "VTIMEZONE"]
     rest = [
         sub
@@ -529,8 +462,7 @@ def _tail_document(
         replace(component, "sequence", None)
         # A kept RELATED-TO would make save_event write into other objects.
         replace(component, "related-to", None)
-    # The exceptions carried over are the same instances the attendees already
-    # answered for; the series under them is a new object nobody has seen.
+    # The carried exceptions were answered for; the series under them is new.
     reset_replies(vevent)
     _anchor_at(vevent, master, occurrence)
     _apply(
@@ -566,13 +498,7 @@ def _rebased(
     occurrence: datetime | date,
     baseline: datetime | date,
 ) -> dict[str, Any]:
-    """Return the span moved off the occurrence's own start onto its rule slot.
-
-    A split point that already carries an exception starts where the exception
-    put it, and that is the start the frontend names. The tail master is
-    anchored on the slot the rule produces, so applying that span to it
-    unchanged would move the whole remaining series by the exception's offset.
-    """
+    """Return the span moved off the exception's own start onto its rule slot."""
     if baseline == occurrence or "dtstart" not in data:
         return data
     back = _wall(master, occurrence) - _wall(master, baseline)
@@ -586,11 +512,7 @@ def _rebased(
 
 
 def _shift_override(override: Any, delta: timedelta, zone: Any) -> None:
-    """Move an exception with the series it was carried into.
-
-    Its RECURRENCE-ID has to keep naming a slot the shifted rule produces, or
-    the exception detaches and shows up as an event of its own.
-    """
+    """Move an exception with its series, RECURRENCE-ID included."""
     for key in ("RECURRENCE-ID", "DTSTART", "DTEND"):
         if key in override:
             shifted = _shifted(override[key].dt, delta, zone)
@@ -603,10 +525,7 @@ def _shift_override(override: Any, delta: timedelta, zone: Any) -> None:
 def _tail_uid(uid: str, occurrence: datetime | date) -> str:
     """Return the uid of the series split off at an occurrence.
 
-    Off the value as written, not off the instant: to_utc reads a bare date as
-    local midnight, so an all-day or floating series derived a different uid in
-    every configured zone, and the retry this shape exists for made a second
-    tail rather than overwriting the first.
+    Off the value as written, so a retry derives the same uid in every zone.
     """
     if isinstance(occurrence, datetime) and occurrence.tzinfo is not None:
         stamp = occurrence.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -666,20 +585,15 @@ def _wall(master: Any, value: datetime | date) -> datetime:
         return datetime.combine(aligned, time.min)
     zone = dtstart.tzinfo or dt_util.get_default_time_zone()
     if isinstance(value, datetime) and str(value.tzinfo) == str(zone):
-        # Straight off the value. A wall time this zone does not have, which is
-        # any spring-forward hour, comes back an hour later from a trip through
-        # UTC, and a delta taken from that is an hour too large: every exception
-        # it then moves stops naming a slot the rule produces and detaches into
-        # an event of its own, next to the occurrence it was meant to replace.
+        # Straight off the value: a spring-forward hour comes back an hour
+        # later from a trip through UTC.
         return value.replace(tzinfo=None)
     return to_utc(value).astimezone(zone).replace(tzinfo=None)
 
 
 def _on_rule(master: Any, occurrence: datetime | date) -> bool:
-    # Both sides as instants: an occurrence whose local time falls in a DST gap
-    # or fold compares unequal to the same instant in another zone, which is
-    # PEP 495 working as designed and would make those two occurrences a year
-    # the only ones nobody can edit.
+    # Both sides as instants: PEP 495 makes a wall clock in a DST gap or fold
+    # compare unequal to the same instant in another zone.
     target = to_utc(_align(master, occurrence))
     rule = rule_from(master["RRULE"], master["DTSTART"].dt)
     for count, moment in enumerate(rule):
@@ -695,9 +609,6 @@ def _ends_before(master: Any, occurrence: datetime | date) -> bool:
     """Return whether the rule's own occurrences all lie before the cutoff."""
     recur = master["RRULE"]
     if until := recur.get("UNTIL"):
-        # Through the same frame the rule itself is read in, or an all-day
-        # series carrying an aware UNTIL would end a day early everywhere west
-        # of UTC and refuse to let go of its last occurrence.
         moment = until_frame(master["DTSTART"].dt, until[0])
         return to_utc(moment) < to_utc(_align(master, occurrence))
     if count := recur.get("COUNT"):
@@ -712,10 +623,10 @@ def _has_occurrences_from(master: Any, occurrence: datetime | date) -> bool:
 
 
 def _dts(entry: Any) -> list[Any]:
-    """Yield the value holders of an EXDATE/RDATE entry.
+    """Return the value holders of an EXDATE/RDATE entry.
 
-    A parsed line is a vDDDLists exposing .dts; a single value added at runtime
-    stays a bare vDDDTypes without one.
+    A parsed line is a vDDDLists exposing .dts; a single value added at
+    runtime is a bare vDDDTypes.
     """
     return entry.dts if hasattr(entry, "dts") else [entry]
 
@@ -761,8 +672,7 @@ def _cap_series(master: Any, occurrence: datetime | date) -> None:
     rrule = master.get("RRULE")
     if rrule is None and "RDATE" not in master:
         raise Refused("not_recurring")
-    # A rule already ending before the cutoff stays as is; an UNTIL there
-    # would add occurrences instead of removing them.
+    # An UNTIL on a rule already ending before the cutoff would add occurrences.
     if rrule is not None and not _ends_before(master, occurrence):
         recur = vRecur(dict(rrule))
         recur.pop("COUNT", None)
@@ -817,8 +727,7 @@ def _keep_dates(
 ) -> None:
     """Keep the RDATE or EXDATE values on one side of the occurrence.
 
-    Property lines are filtered one by one: merging them would force every
-    value under a single TZID and shift the instants of the others.
+    Lines are filtered one by one: merged, every value would share one TZID.
     """
     if key not in component:
         return
@@ -860,9 +769,9 @@ def _apply(
 ) -> None:
     """Write the named fields onto a component, keyed on presence throughout.
 
-    A service call may name any subset, so an absent key means "leave it" and a
-    present None means "clear it". The recurrence rule takes an empty string
-    for that, because None is what an absent one already looks like upstream.
+    An absent key means "leave it" and a present None "clear it". The rule
+    takes an empty string for that, since None is what an absent one looks
+    like upstream.
     """
     if "summary" in data:
         replace(component, "summary", data["summary"])
@@ -879,9 +788,6 @@ def _apply(
     if "location" in data:
         replace(component, "location", data["location"])
     if "rrule" in data:
-        # An empty rule is how a caller asks for the recurrence to go, which is
-        # otherwise a one-way door: expand strips RRULE from what the frontend
-        # echoes back, so callers leave the key out rather than sending None.
         rrule = data["rrule"]
         replace(component, "rrule", vRecur.from_ical(rrule) if rrule else None)
         if rrule and "DTSTART" in component:
@@ -891,12 +797,7 @@ def _apply(
 
 
 def _shift_end(component: Any, dtstart: datetime | date) -> None:
-    """Move DTEND with DTSTART, so a start named on its own moves the event.
-
-    Leaving it behind stretches the event when the start goes earlier, and when
-    it goes later past the old end the write is refused for an end the caller
-    never named.
-    """
+    """Move DTEND with DTSTART, so a start named on its own moves the event."""
     if "DTEND" not in component or "DTSTART" not in component:
         return
     old = component["DTSTART"].dt
@@ -910,19 +811,13 @@ def _shift_end(component: Any, dtstart: datetime | date) -> None:
 def _without_rrule(data: dict[str, Any]) -> dict[str, Any]:
     """Return the fields with any recurrence rule left out.
 
-    A rule named in a call belongs to the series, never to the one occurrence
-    being overridden or to the tail being split off, both of which compute
-    their own.
+    A rule belongs to the series, never to one occurrence or the tail.
     """
     return {key: value for key, value in data.items() if key != "rrule"}
 
 
 def _check_span(component: Any) -> None:
-    """RFC 5545: DTEND shares DTSTART's value type and never precedes it.
-
-    Naming one side alone would otherwise write an event Home Assistant refuses
-    to read back, which takes the whole collection down on the next poll.
-    """
+    """RFC 5545: DTEND shares DTSTART's value type and never precedes it."""
     if "DTSTART" not in component or "DTEND" not in component:
         return
     start, end = component["DTSTART"].dt, component["DTEND"].dt
@@ -935,8 +830,8 @@ def _check_span(component: Any) -> None:
 def _set_time(component: Any, key: str, value: Any) -> None:
     """Write a time in the anchor the component already uses.
 
-    Writing values as received would re-anchor a UTC, TZID or floating series
-    on a summary-only edit and shift future occurrences across DST boundaries.
+    Written as received, a summary-only edit would re-anchor a UTC, TZID or
+    floating series and shift its occurrences across DST.
     """
     old = component[key].dt if key in component else None
     if (
@@ -960,40 +855,22 @@ def _set_time(component: Any, key: str, value: Any) -> None:
         if anchor.tzinfo is None:
             value = dt_util.as_local(value).replace(tzinfo=None)
         elif str(value.tzinfo) != str(anchor.tzinfo):
-            # Already in the series zone means the wall clock is the one meant,
-            # and for an hour the zone does not have, converting the instant
-            # back is exactly what moves it onto an hour the zone does have.
+            # A value already in the series zone keeps its wall clock, which
+            # a trip through the instant would move out of a DST gap.
             value = value.astimezone(anchor.tzinfo)
     replace(component, key, value)
 
 
 def _save(dav_event: caldav.Event, ical: Any, touched: Any) -> None:
-    now = dt_util.utcnow()
-    # In an object carrying no METHOD, RFC 5545 3.8.7.2 makes DTSTAMP the time
-    # the information was last revised, so it moves with LAST-MODIFIED rather
-    # than keeping whatever the client before us wrote.
-    replace(touched, "dtstamp", now)
-    replace(touched, "last-modified", now)
-    replace(touched, "sequence", int(touched.get("sequence", 0)) + 1)
-    # caldav bumps a SEQUENCE on the way out whatever increase_seqno says, so
-    # that one is held one low to land back where it belongs. Left alone it
-    # would double-bump a touched master and, worse, announce a new version of
-    # the whole series for an edit to one occurrence.
-    #
-    # The component it picks is the first that is not a timezone, which is not
-    # the first VEVENT: a VTODO sharing the resource sits ahead of it, and
-    # zoned_document keeps that order. Held on the VEVENT instead, the untouched
-    # task announced a revision nobody made and the edit went out with none.
+    stamp(touched)
+    # caldav bumps SEQUENCE regardless of increase_seqno, on the first
+    # component that is not a timezone, which may be a VTODO sharing the
+    # resource.
     hold_sequence(
         next((item for item in ical.subcomponents if item.name != "VTIMEZONE"), touched)
     )
-    # Through the same wrapper the create path uses: an edit can introduce a
-    # TZID the object never defined, which converting an all-day event to a
-    # timed one always does. RFC 5545 requires the definition alongside the
-    # reference; strict servers reject the write, and lenient ones store a
-    # time every other client reads as floating. Assigned as the document
-    # rather than as its text, which caldav would run through vcal.fix.
+    # An edit can introduce a TZID the object never defined. The document,
+    # not its text, which caldav would run through vcal.fix.
     dav_event.icalendar_instance = zoned_document(ical)
-    # only_this_recurrence would have caldav refetch and merge back just the
-    # first component when an override happens to be it.
+    # only_this_recurrence would splice back only the first component.
     dav_event.save(increase_seqno=False, only_this_recurrence=False)

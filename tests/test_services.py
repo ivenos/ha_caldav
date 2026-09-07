@@ -1567,3 +1567,26 @@ async def test_moving_onto_a_calendar_the_account_no_longer_holds_is_refused(
         )
 
     assert refusal.value.translation_key == "unknown_target"
+
+
+async def test_search_returns_the_extra_properties(hass: HomeAssistant) -> None:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    item = Mock()
+    item.vobject_instance = vobject.readOne(
+        ICS.replace(
+            "SUMMARY:Standup", "SUMMARY:Standup\r\nURL:https://meet.example.com/x"
+        )
+    )
+    calendar.search.return_value = [item]
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "search_events",
+        {"entity_id": "calendar.iven_personal", "text": "stand"},
+        blocking=True,
+        return_response=True,
+    )
+
+    events = result["calendar.iven_personal"]["events"]
+    assert events[0]["url"] == "https://meet.example.com/x"

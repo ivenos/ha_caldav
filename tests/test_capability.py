@@ -456,8 +456,8 @@ def test_an_absolute_href_still_names_its_calendar() -> None:
 
 
 def test_a_propstat_without_a_status_is_read_rather_than_crashed_on() -> None:
-    """The status element is what the propstat filter reads. Absent — and a
-    server is free to leave it out of a malformed response — reaching for its
+    """The status element is what the propstat filter reads. Absent - and a
+    server is free to leave it out of a malformed response - reaching for its
     text raises, and one such response costs the whole account its
     capabilities."""
     client = _client(

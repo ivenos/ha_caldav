@@ -21,8 +21,7 @@ WELL_KNOWN = "/.well-known/caldav"
 def calendar_key(url: object) -> str:
     """Return the comparable form of a calendar url.
 
-    A calendar url keeps its percent-encoding, the hrefs it is matched against
-    do not, and the two need not agree on a trailing slash.
+    Hrefs come back unquoted and need not agree with the url on a trailing slash.
     """
     path = str(url)
     if "://" in path:
@@ -34,13 +33,9 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 def account_key(url: str, username: str) -> str:
-    """Return the identity of an account, in the shape its spellings share.
+    """Return the identity of an account, shared by every spelling of its url.
 
-    One account reached as ``…/dav`` and as ``…/dav/``, or through a host typed
-    in another case, is the same account; keyed on the text as entered it would
-    be set up twice and every calendar and to-do list would appear twice with
-    it. Changing this shape needs a config entry migration, because it is what
-    an entry already in the registry is keyed on.
+    Config entries are keyed on this, so changing its shape needs a migration.
     """
     try:
         parsed = urlparse(url)
@@ -62,10 +57,7 @@ def connection_kwargs(
 ) -> dict[str, Any]:
     """Return the DAVClient keyword arguments for these connection details.
 
-    A CA bundle path takes the place of the verify flag, which is the same
-    argument in requests: a string there means "verify against this bundle".
-    The timeout is one number for both the connect and the read budget, which
-    is what requests makes of a scalar.
+    A CA bundle path replaces the verify flag, which is how requests reads it.
     """
     verify: bool | str = data.get(CONF_VERIFY_SSL, True)
     if bundle := data.get(CONF_CA_BUNDLE):
@@ -89,8 +81,7 @@ def display_name(calendar: object) -> str:
 def without_userinfo(url: str) -> str:
     """Return the url with any user:password@ part removed.
 
-    caldav logs the url it was handed twice before stripping those itself, and
-    the form has its own fields for both.
+    caldav logs the url it was handed before stripping those itself.
     """
     try:
         parsed = urlparse(url if "://" in url else f"https://{url}")
@@ -99,31 +90,25 @@ def without_userinfo(url: str) -> str:
         host = parsed.hostname or ""
         port = parsed.port
     except ValueError:
-        # Too malformed for urlparse, so the userinfo comes off by hand rather
-        # than not at all: the connection behind it fails into an ordinary form
-        # error, but caldav logs the url it was handed before that. An @ after
-        # the first slash belongs to the path, not to a credential.
+        # Too malformed for urlparse; an @ after the first slash is path.
         scheme, sep, rest = url.rpartition("://")
         head, at, tail = rest.partition("@")
         if not at or "/" in head:
             return url
         return f"{scheme}{sep}{tail}"
-    # hostname hands an IPv6 literal back without the brackets that keep it one.
+    # hostname drops the brackets of an IPv6 literal.
     if ":" in host:
         host = f"[{host}]"
     return urlunparse(parsed._replace(netloc=f"{host}:{port}" if port else host))
 
 
 def url_candidates(url: str, kwargs: Mapping[str, Any]) -> Iterator[str]:
-    """Yield the urls to try, most specific first. Blocking past the first.
+    """Yield the urls to try, the entered one first. Blocking past the first.
 
-    RFC 6764 puts a bootstrap redirect at /.well-known/caldav, which lets
-    someone enter the bare host name of their server. The entered url comes
-    first: a server that answers it directly must not be second-guessed, and
-    the bootstrap is only resolved once it did not.
+    RFC 6764 puts a bootstrap redirect at /.well-known/caldav, which resolves a
+    bare host name.
     """
-    # A scheme-less entry would reach requests as a relative url and raise;
-    # https is the assumption every CalDAV client makes.
+    # A scheme-less entry would reach requests as a relative url.
     entered = without_userinfo(url if "://" in url else f"https://{url}")
     yield entered
     try:
@@ -139,10 +124,8 @@ def url_candidates(url: str, kwargs: Mapping[str, Any]) -> Iterator[str]:
 def _resolve_bootstrap(probe: str, kwargs: Mapping[str, Any]) -> str | None:
     """Return where the bootstrap points, followed without credentials.
 
-    Resolved here rather than left to the authenticated request. A redirect
-    followed with credentials attached answers a digest challenge from whoever
-    replied, and that answer cracks offline; going unauthenticated first means
-    the account only ever authenticates against an already-settled url.
+    Followed with credentials, a redirect answers a digest challenge from
+    whoever replied, and that answer cracks offline.
     """
     try:
         response = requests.request(
@@ -156,31 +139,22 @@ def _resolve_bootstrap(probe: str, kwargs: Mapping[str, Any]) -> str | None:
     except Exception:  # noqa: BLE001
         _LOGGER.debug("Could not reach %s", WELL_KNOWN)
         return None
-    # RFC 6764 has the bootstrap land wherever the server says, another host
-    # included, so the destination is nothing the entered url vouches for. Two
-    # things about it are still ours to refuse.
     if urlparse(probe).scheme == "https" and any(
         urlparse(str(hop.url)).scheme != "https"
         for hop in (*response.history, response)
     ):
-        # A proxy that terminates TLS without X-Forwarded-Proto writes its
-        # redirects as http. Following one would put the password on the wire
-        # in clear and, worse, store that url for every poll after it.
+        # A proxy terminating TLS without X-Forwarded-Proto redirects to http.
         _LOGGER.debug("Ignoring a bootstrap that steps out of https")
         return None
-    # caldav prefers userinfo in the url over the account handed to it, so a
-    # redirect naming its own would authenticate as whoever it likes.
+    # caldav prefers userinfo in the url over the account handed to it.
     return without_userinfo(str(response.url) or probe)
 
 
 class HostLockedSession(requests.Session):
     """A session that carries no credentials across a change of host.
 
-    The Authorization header is dropped by the library itself, but digest
-    authentication answers its challenge from a response hook registered on the
-    request, and that hook outlives the redirect and re-signs for whatever host
-    now answers. Handing a stranger a digest response gives them the account
-    password to attack offline, so the hooks go with the header.
+    requests drops the Authorization header itself, but the digest response
+    hook outlives the redirect and re-signs for the new host.
     """
 
     def rebuild_auth(self, prepared_request: Any, response: Any) -> None:
@@ -195,8 +169,7 @@ def build_client(
 ) -> caldav.DAVClient:
     """Return a client for these details, locked to the host of its url."""
     client = caldav.DAVClient(url, username=username, password=password, **kwargs)
-    # caldav creates the session and never configures it, so replacing it here
-    # loses nothing. Multiplexing is optional in the same way caldav treats it.
+    # caldav never configures its session; multiplexing is optional to it too.
     try:
         client.session = HostLockedSession(multiplexed=True)
     except TypeError:

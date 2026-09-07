@@ -1,8 +1,7 @@
 """The VEVENT properties Home Assistant's event model has no room for.
 
-Reading happens on vobject components, the shape the coordinator already works
-with; writing happens on icalendar components, the shape :mod:`.recurrence`
-uses. The two libraries model parameters differently, so the paths stay apart.
+Reading happens on vobject components, writing on icalendar ones; the two
+libraries model parameters differently, so the paths stay apart.
 """
 
 from __future__ import annotations
@@ -36,28 +35,19 @@ _MAILTO = "mailto:"
 def rule_from(recur: Any, dtstart: datetime | date) -> Any:
     """Return the dateutil rule for an RRULE anchored at a start.
 
-    dateutil refuses a rule outright when its UNTIL and the start disagree
-    about carrying a zone. Google writes an all-day series as a DATE start with
-    a UTC UNTIL, which every client but this one accepts, so the mismatch has
-    to be reconciled here or the whole series becomes uneditable.
+    dateutil refuses a rule whose UNTIL and start disagree about carrying a
+    zone, which is how Google writes every all-day series.
     """
-    # RFC 5545 3.3.10 wants a positive INTERVAL and icalendar takes a zero
-    # without complaint. dateutil then re-yields the start forever, so nothing
-    # is ever after it: .after() never returns, and it is a thread out of the
-    # executor pool spinning until Home Assistant is restarted, not an error
-    # anything upstream could catch.
+    # RFC 5545 3.3.10 wants a positive INTERVAL; on a zero dateutil re-yields
+    # the start forever and .after() never returns.
     if (interval := recur.get("INTERVAL")) and int(interval[0]) < 1:
         raise Refused("invalid_rrule", reason=f"INTERVAL={interval[0]}")
     _check_ranges(recur)
-    # The value as stored reaches _aligned, not the datetime dateutil is
-    # anchored on: converting first turns a DATE start into a naive datetime
-    # and makes an all-day series indistinguishable from a floating one, which
-    # read the UNTIL beside it in two different frames.
+    # The value as stored: converted first, a DATE start reads as floating.
     return rrulestr(_aligned(recur, dtstart), dtstart=as_datetime(dtstart))
 
 
-# RFC 5545 3.3.10, as ranges of the absolute value; a negative part counts from
-# the end of its period and is bounded the same way.
+# RFC 5545 3.3.10, as ranges of the absolute value.
 _BY_RANGES = {
     "BYSECOND": (0, 60),
     "BYMINUTE": (0, 59),
@@ -73,12 +63,8 @@ _BY_RANGES = {
 def check_rule(recur: Any, dtstart: datetime | date) -> None:
     """Refuse a rule before it is stored rather than after.
 
-    rule_from's guards only run where something reads a rule back, and by then
-    the object is on the server: the poll that would have to load it is the one
-    that never returns, so the event cannot be deleted from Home Assistant
-    either. A rule that produces nothing at all is refused with them, because
-    dateutil looks for its first occurrence as far as the year 9999 and pays
-    that on every poll, for a series no client will ever show.
+    A rule producing nothing has dateutil search to the year 9999 on every
+    poll, and an object stored with one cannot be deleted from here.
     """
     if next(iter(rule_from(recur, dtstart)), None) is None:
         raise Refused("invalid_rrule", reason=recur.to_ical().decode("utf-8"))
@@ -87,11 +73,8 @@ def check_rule(recur: Any, dtstart: datetime | date) -> None:
 def _check_ranges(recur: Any) -> None:
     """Refuse a rule whose BY parts name something no calendar has.
 
-    Such a rule yields nothing at all, and the guard against a dense rule counts
-    the occurrences it yields, so it never fires: dateutil walks to the year
-    9999 instead, minute by minute for a sub-daily frequency, holding the
-    collection's write lock for seconds on this desktop and far longer on the
-    hardware Home Assistant usually runs on.
+    Such a rule yields nothing, so the density guard never fires and dateutil
+    walks to the year 9999 minute by minute.
     """
     for name, (low, high) in _BY_RANGES.items():
         for value in recur.get(name) or ():
@@ -119,34 +102,20 @@ def _aligned(recur: Any, dtstart: datetime | date) -> str:
 def until_frame(dtstart: datetime | date, until: datetime | date) -> datetime | date:
     """Return an UNTIL read in the frame the DTSTART beside it is written in.
 
-    Google writes an aware UNTIL against an all-day start. Read as an instant
-    it names a moment, and every zone west of UTC then reads that moment as the
-    day before, dropping the last occurrence of the series; read in its own
-    wall clock it names the date the server meant, wherever this runs.
-
-    Shared rather than repeated: the same reading is owed by everything that
-    asks where a series ends, and having it in one place and not the other is
-    what made the shape of an imported series depend on the installation.
+    Google writes an aware UNTIL against an all-day start; read as an instant
+    it names the day before everywhere west of UTC.
     """
     if not isinstance(until, datetime):
         return until
     if isinstance(dtstart, datetime) and dtstart.tzinfo is not None:
-        # RFC 5545 3.3.10 has a zoned start take its UNTIL in UTC, and that is
-        # how the expansion behind the read path resolves one written without a
-        # zone anyway. Read in Home Assistant's zone instead, the series ended
-        # on a different occurrence on every installation, and the panel listed
-        # one that every edit and delete then refused as not being there.
+        # RFC 5545 3.3.10: a zoned start takes its UNTIL in UTC.
         return until.replace(tzinfo=UTC) if until.tzinfo is None else to_utc(until)
     if until.tzinfo is None:
         return until
     if isinstance(dtstart, datetime):
-        # Floating: the series is dated in local terms and to_utc reads it that
-        # way, so its end has to be a local wall time too. Read in UTC instead,
-        # the rule ends a whole offset away from its own occurrences, and the
-        # series keeps or loses its last one depending on where this runs.
+        # A floating series is dated in local terms, so its end is too.
         return dt_util.as_local(until).replace(tzinfo=None)
-    # A DATE start: the server meant a day, and the wall clock of the value it
-    # wrote is what names that day wherever this runs.
+    # A DATE start: the wall clock of the value names the day meant.
     return until.astimezone(UTC).replace(tzinfo=None)
 
 
@@ -162,16 +131,12 @@ def to_utc(value: datetime | date) -> datetime:
 def hold_sequence(component: Any) -> None:
     """Set SEQUENCE one low so caldav's bump lands back on the current value.
 
-    RFC 5546 lets only the organizer move SEQUENCE, and a reply naming a
-    version they never issued is one their client is entitled to drop. caldav
-    2.1.0 accepts increase_seqno and bumps regardless; a test pins the number
-    that reaches the wire, so a version that starts honouring the flag fails
-    loudly rather than quietly sending replies one too low.
+    caldav 2.1.0 bumps regardless of increase_seqno, and RFC 5546 lets only
+    the organizer move SEQUENCE. A test pins the number on the wire.
     """
     try:
         current = int(component.get("SEQUENCE"))
     except TypeError, ValueError:
-        # Absent, or written by a server as something that is not a number.
         return
     component["SEQUENCE"] = current - 1
 
@@ -218,14 +183,12 @@ def _categories(vevent: Any) -> list[str]:
     found: list[str] = []
     for holder in getattr(vevent, "categories_list", []) or []:
         value = holder.value
-        # vobject hands back a list for a comma separated line and a bare
-        # string for a single value.
+        # A list for a comma separated line, a bare string for a single value.
         found.extend(value if isinstance(value, list) else [value])
     return [str(item).strip() for item in found if str(item).strip()]
 
 
-# RFC 6868. A ^ in front of anything but these is not an escape, and both
-# characters stand.
+# RFC 6868; a ^ in front of anything else is not an escape.
 _PARAM_ESCAPES = {"^^": "^", "^n": "\n", "^'": '"'}
 _PARAM_ESCAPE = re.compile(r"\^[\^n']")
 
@@ -233,10 +196,7 @@ _PARAM_ESCAPE = re.compile(r"\^[\^n']")
 def _param(params: dict[str, Any], name: str) -> str | None:
     """Return the first value of a vobject parameter, RFC 6868 decoded.
 
-    Reading is vobject and writing is icalendar, and only one of the pair
-    implements the escaping: an attendee named with a quote in it reached the
-    dashboard as ^', and every edit that wrote the name back escaped the ^ of
-    the last one again, so the name grew on each one.
+    vobject reads without unescaping while icalendar writes with escaping.
     """
     values = params.get(name)
     if not values:
@@ -263,23 +223,19 @@ def _read_attendees(vevent: Any) -> list[dict[str, Any]]:
 def _read_alarms(vevent: Any) -> list[dict[str, Any]]:
     """Return the relative alarms as minutes before the event.
 
-    An absolute trigger has no offset to report and is left out; it would need
-    an anchor the attribute shape cannot carry.
+    An absolute trigger has no offset to report and is left out.
     """
     alarms = []
     for valarm in getattr(vevent, "valarm_list", []) or []:
         trigger = getattr(valarm, "trigger", None)
         if trigger is None or not isinstance(trigger.value, timedelta):
             continue
-        # Rounded away from zero, so a sub-minute offset still reads as a
-        # reminder before the event rather than one minute after it.
+        # Rounded away from zero, so a sub-minute offset stays "before".
         alarm: dict[str, Any] = {
             "minutes_before": -int(trigger.value.total_seconds() // 60)
         }
         related = _param(getattr(trigger, "params", {}) or {}, "RELATED")
         if related and related.upper() == "END":
-            # Written back as-is; reporting it as an offset from the start
-            # would move the alarm by the length of the event.
             alarm["related"] = "END"
         if (action := _text(valarm, "action")) is not None:
             alarm["action"] = action.upper()
@@ -290,19 +246,12 @@ def _read_alarms(vevent: Any) -> list[dict[str, Any]]:
 
 
 def strip_scheme(value: str) -> str:
-    """Return a CAL-ADDRESS without its mailto: prefix.
-
-    RFC 3986 makes the scheme case-insensitive, and clients do write "MailTo:".
-    """
+    """Return a CAL-ADDRESS without its mailto: prefix, whatever its case."""
     return value[len(_MAILTO) :] if value.lower().startswith(_MAILTO) else value
 
 
 def comparable_address(value: str) -> str:
-    """Return the form in which two CAL-ADDRESS values may be compared.
-
-    Trimmed before the scheme is taken off, or padding a server left in front
-    of it would hide the prefix and leave the two forms uncomparable.
-    """
+    """Return the form in which two CAL-ADDRESS values may be compared."""
     return strip_scheme(value.strip()).lower()
 
 
@@ -311,9 +260,7 @@ def apply_extras(
 ) -> None:
     """Write the extra properties onto an icalendar component.
 
-    Only keys present in ``data`` are touched: a service call that names none of
-    them must leave what the server already holds untouched, and an explicit
-    None clears the property.
+    Only keys present in ``data`` are touched; an explicit None clears one.
     """
     if ATTR_URL in data and data[ATTR_URL]:
         data = {**data, ATTR_URL: _one_line(data[ATTR_URL])}
@@ -341,15 +288,9 @@ def apply_extras(
 def _name_an_organizer(component: Any, own_address: str | None) -> None:
     """Name the account as organizer of an event that lists attendees.
 
-    RFC 5546 3 requires ORGANIZER wherever ATTENDEE appears. sabre/dav, which
-    is Baikal and much else, hands the missing one straight to its scheduling
-    plugin when the object is deleted and answers 500, and the event cannot be
-    removed at all after that. Nextcloud guards its own copy of that plugin and
-    the two servers that do no scheduling never look, which is why only Baikal
-    showed it.
-
-    Only where there is none: an organizer the server already holds belongs to
-    whoever set it, and a stored event of somebody else's is not ours to claim.
+    RFC 5546 3 requires ORGANIZER wherever ATTENDEE appears, and sabre/dav
+    answers 500 on deleting an object without one. An organizer already there
+    belongs to whoever set it.
     """
     if not own_address or "ATTENDEE" not in component or "ORGANIZER" in component:
         return
@@ -357,21 +298,15 @@ def _name_an_organizer(component: Any, own_address: str | None) -> None:
 
 
 def _one_line(value: Any) -> str:
-    """Return text with the line breaks a content line cannot carry removed.
-
-    icalendar asserts on an unescaped one and the failure reaches the user as a
-    server error, though nothing about it came from the server. A template in a
-    service call is enough to produce one.
-    """
+    """Return text without the line breaks icalendar asserts on."""
     return " ".join(str(value).splitlines()).strip()
 
 
 def _set_organizer(component: Any, organizer: Any) -> None:
     """Write the organizer, keeping the parameters of the one already there.
 
-    read_extras reports the bare address, so an edit that touches anything else
-    names the same organizer again. Rebuilt from the address alone the line
-    loses its CN and the SENT-BY that authorises an assistant to act for them.
+    read_extras reports the bare address, so an unrelated edit names the same
+    organizer again and would lose the CN and SENT-BY.
     """
     held = component.get("ORGANIZER")
     if "ORGANIZER" in component:
@@ -389,9 +324,8 @@ def _set_organizer(component: Any, organizer: Any) -> None:
 def reset_replies(component: Any) -> None:
     """Put the attendees of a split-off series back to NEEDS-ACTION.
 
-    RFC 5546 has an organizer's REQUEST for a new event carry NEEDS-ACTION, and
-    a tail is a new object under a uid nobody has seen. Carried over, the
-    replies would assert acceptances that were never given for it.
+    RFC 5546 has a REQUEST for a new event carry NEEDS-ACTION, and a tail is
+    a new object under a uid nobody has answered for.
     """
     current = component.get("ATTENDEE")
     if current is None:
@@ -404,9 +338,8 @@ def reset_replies(component: Any) -> None:
 def _set_attendees(component: Any, attendees: list[Any]) -> None:
     """Rewrite the attendee list, keeping the lines of attendees that stay.
 
-    An attendee that stays on the list keeps their line, so a reply already
-    given and the parameters this integration does not model (CUTYPE,
-    DELEGATED-FROM, SCHEDULE-STATUS) are not reset by an unrelated edit.
+    A kept line keeps its reply and the parameters this integration does not
+    model (CUTYPE, DELEGATED-FROM, SCHEDULE-STATUS).
     """
     held = {}
     if (current := component.get("ATTENDEE")) is not None:
@@ -423,9 +356,7 @@ def _set_attendees(component: Any, attendees: list[Any]) -> None:
         _set_param(address, "ROLE", spec.get("role"), "REQ-PARTICIPANT")
         _set_param(address, "PARTSTAT", spec.get("status"), "NEEDS-ACTION")
         rsvp = spec.get("rsvp")
-        # Only ever defaulted onto a line being written for the first time. An
-        # attendee the server already holds without it has been asked once
-        # already, and adding it asks again for a reply they may have given.
+        # Defaulted onto a new line only; a stored attendee was asked already.
         _set_param(
             address,
             "RSVP",
@@ -444,16 +375,11 @@ def _set_param(address: Any, name: str, value: Any, default: str | None) -> None
 
 
 def _set_alarms(component: Any, alarms: list[Any]) -> None:
-    """Replace the alarms with the given offsets.
+    """Replace the relative alarms with the given offsets.
 
-    RFC 5545 requires a DESCRIPTION on a DISPLAY alarm and does not permit one
-    on an AUDIO alarm, so it is written for the first only. The action itself
-    is constrained by the service schema, not here.
+    RFC 5545 requires a DESCRIPTION on a DISPLAY alarm and forbids one on
+    AUDIO. Absolute triggers stay: read_extras never showed them.
     """
-    # Only the relative alarms are replaced. An absolute trigger has no offset
-    # the attribute shape can carry, so read_extras leaves it out of what the
-    # caller saw; clearing it here as well would have every edit that touches
-    # alarms delete a reminder nobody was ever shown.
     component.subcomponents = [
         sub
         for sub in component.subcomponents
@@ -480,10 +406,8 @@ def _is_relative(valarm: Any) -> bool:
 
 
 def _mailto(address: str) -> str:
-    # A CAL-ADDRESS is a URI; anything already carrying a scheme is left alone,
-    # and so is a path. RFC 6638 lets the address set name a principal by its
-    # url, which is what sabre/dav and Nextcloud return for an account with no
-    # mail address on it, and mailto: in front of one addresses nobody.
+    # A CAL-ADDRESS is a URI, and RFC 6638 lets the address set name a
+    # principal by its path.
     if ":" in address or address.startswith("/"):
         return address
     return f"{_MAILTO}{address}" if "@" in address else address
@@ -492,8 +416,7 @@ def _mailto(address: str) -> str:
 def replace(component: Any, key: str, value: Any) -> None:
     """Overwrite a property, removing it outright when the value is None.
 
-    icalendar's add() appends rather than replaces, so a plain add on a
-    property that is already there produces a second line of it.
+    icalendar's add() appends rather than replaces.
     """
     if key in component:
         del component[key]

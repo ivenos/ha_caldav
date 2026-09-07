@@ -611,7 +611,7 @@ async def test_the_builtin_conflict_is_found_through_another_spelling(
     hass: HomeAssistant,
 ) -> None:
     """The built-in integration is set up on its own, so the one spelling that
-    would not warn is the one where the two were typed differently — which is
+    would not warn is the one where the two were typed differently - which is
     most of them, and the user sees every calendar and to-do list twice."""
     builtin = MockConfigEntry(
         domain="caldav",
@@ -773,3 +773,13 @@ async def test_an_account_without_the_option_gets_the_default(
         await hass.async_block_till_done()
 
     assert client.call_args.kwargs["timeout"] == 30
+
+
+async def test_a_server_without_sync_collection_is_not_asked_for_a_token(
+    hass: HomeAssistant,
+) -> None:
+    entry = await _setup(hass, sync_collection=False)
+    calendar = entry.principal.return_value.calendars.return_value[0]
+
+    calendar.objects_by_sync_token.assert_not_called()
+    assert calendar.search.called

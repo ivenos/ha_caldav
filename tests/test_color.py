@@ -472,12 +472,8 @@ async def test_color_is_polled_without_anyone_asking(hass: HomeAssistant) -> Non
     }
 
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=16))
-    # Twice: the poll writes the color through async_update_entry, and the
-    # listener that stores it is scheduled by that write rather than awaited by
-    # it. One cycle happens to be enough on an idle machine and is not under
-    # load, which is a test that goes red in CI for no reason.
-    await hass.async_block_till_done()
-    await hass.async_block_till_done()
+    # The scheduled poll is a background task.
+    await hass.async_block_till_done(wait_background_tasks=True)
 
     assert _options(hass)["calendar"]["color"] == "#123456"
 

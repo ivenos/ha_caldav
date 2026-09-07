@@ -467,7 +467,7 @@ def test_calendar_color_round_trips(calendar) -> None:
         # The calendar is shared with every test in this module. Cleared by
         # writing a color rather than an empty value: SOGo validates the
         # property and answers 400 for anything that is not #RRGGBBAA, and no
-        # path in the integration writes an empty one — the service field is
+        # path in the integration writes an empty one - the service field is
         # required and normalized.
         calendar.set_properties([ical.CalendarColor("#FFFFFFFF")])
 

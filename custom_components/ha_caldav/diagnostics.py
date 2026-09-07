@@ -34,7 +34,7 @@ async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: HaCaldavConfigEntry
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
-    # runtime_data is unset when the entry never finished setup or was unloaded.
+    # Unset when the entry never finished setup or was unloaded.
     data: HaCaldavRuntimeData | None = getattr(entry, "runtime_data", None)
     calendars: Any = {"error": "entry not loaded"}
     scheduling = False
@@ -50,11 +50,9 @@ async def async_get_config_entry_diagnostics(
 
 
 def _options(entry: HaCaldavConfigEntry) -> dict[str, Any]:
-    """Return the options with the account out of every collection path.
+    """Return the options with each collection path cut to its last segment.
 
-    Both the selection and the per-calendar settings are keyed by collection
-    path, which on most servers spells out the account name the redaction above
-    strips; only the last segment names the calendar.
+    The path usually spells out the account name the redaction strips.
     """
     options = dict(entry.options)
     if isinstance(per_calendar := options.get(CONF_CALENDAR_OPTIONS), dict):
@@ -67,7 +65,6 @@ def _options(entry: HaCaldavConfigEntry) -> dict[str, Any]:
 
 
 def _leaf(key: object) -> str:
-    """Return the last path segment of a collection key."""
     return str(key).rstrip("/").rsplit("/", 1)[-1]
 
 
@@ -76,23 +73,20 @@ def _calendars(data: HaCaldavRuntimeData) -> Any:
     try:
         found = data.client.principal().calendars()
     except Exception as err:  # noqa: BLE001
-        # Error text embeds the server URL and username, which the redaction
-        # above strips; only the error type is safe to include.
+        # The error text embeds the server url and the username.
         return {"error": type(err).__name__}
     colors: dict[str, str | None] = {}
     color_error = None
     try:
         colors = fetch_colors(data.client)
     except Exception as err:  # noqa: BLE001
-        # A malformed multistatus has caldav raising anything from
-        # AssertionError to TypeError.
+        # Anything from AssertionError to TypeError on a malformed multistatus.
         color_error = type(err).__name__
     managed = {item.calendar.url: item for item in data.calendars}
     calendars = []
     for calendar in found:
         info: dict[str, Any] = {"name": calendar.name}
-        # Reported apart from a missing color, which is a thing a server is
-        # allowed to say.
+        # Apart from a missing color, which a server is allowed to report.
         if color_error is not None:
             info["color_error"] = color_error
         else:

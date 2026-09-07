@@ -823,7 +823,7 @@ async def test_one_bad_object_does_not_cost_the_collection_its_poll(
     This is the whole point of the module. A raise anywhere in the read path
     fails the poll, and a failed poll takes the calendar entity and the to-do
     list of the same collection unavailable for as long as the object sits in
-    the window — which, for an object nobody in the household knows is there,
+    the window - which, for an object nobody in the household knows is there,
     is indefinitely.
     """
     coordinator = await poll(hass, [StoredObject(dated(case.ics)), SENTINEL])
@@ -1685,7 +1685,7 @@ INVITATIONS = (
             )
         ),
         "RFC 5546 lets only the organizer move SEQUENCE, so a reply holds it"
-        " where it was — which means reading it first.",
+        " where it was - which means reading it first.",
     ),
     Case(
         "a_todo_ahead_of_the_event",

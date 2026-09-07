@@ -318,8 +318,8 @@ async def test_diagnostics_report_how_current_each_half_is(
         hass, entry, calendar, capability, 7, True, timedelta(minutes=15)
     )
     coordinator._fetched_at = dt_util.utcnow() - timedelta(hours=2)
-    coordinator._misses["events"] = 2
-    coordinator.dead["todos"] = True
+    coordinator.halves["events"].misses = 2
+    coordinator.halves["todos"].dead = True
     entry.runtime_data = _runtime(
         _client([calendar]),
         [

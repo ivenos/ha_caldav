@@ -24,9 +24,8 @@ from .coordinator import (
 )
 from .entity import HaCaldavEntity
 
-# Service calls only; the to-do panel, reordering included, comes in over the
-# websocket and never reaches it. What actually keeps two writes off the same
-# object is the per-collection lock in HaCaldavEntity.async_write.
+# Service calls only; the panel comes in over the websocket, and the lock in
+# HaCaldavEntity.async_write is what serializes writes.
 PARALLEL_UPDATES = 1
 
 
@@ -123,11 +122,7 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
         await self.async_write(
             partial(reorder_todos, self.calendar, order),
             "reorder",
-            # The moved item is written, and so is every other one whenever the
-            # list has to be renumbered, which is the first drag of any list the
-            # server never numbered. Their etags are stale either way, and the
-            # refresh behind this is debounced, so the next tick of one of them
-            # would be refused as a conflict the user made themselves.
+            # A renumbering rewrites every item, and the refresh is debounced.
             forget=("todo_etags", tuple(order)),
         )
 

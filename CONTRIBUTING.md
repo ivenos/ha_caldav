@@ -17,6 +17,9 @@ Unit tests, from the repo root:
 .venv/bin/pytest
 ```
 
+CI runs them twice: against the Home Assistant `requirements_test.txt` pins and
+against the oldest one `hacs.json` allows.
+
 Lint and format:
 
 ```bash

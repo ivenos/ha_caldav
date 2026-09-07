@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  RUFF_VERSION: "0.15.21"
+  RUFF_VERSION: "0.16.6"
   PYTHON_VERSION: "3.14"
   # Home Assistant 2026.3.4, the floor hacs.json sets.
   OLDEST_HARNESS: "0.13.320"

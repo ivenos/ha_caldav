@@ -15,10 +15,8 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType, section
-from homeassistant.helpers import config_validation as cv
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-import voluptuous_serialize
 
 from custom_components.ha_caldav.config_flow import _labelled
 from custom_components.ha_caldav.const import (
@@ -1044,14 +1042,12 @@ async def test_the_account_form_opens_on_the_stored_timeout(
         result["flow_id"], {"next_step_id": "account"}
     )
 
-    fields = voluptuous_serialize.convert(
-        result["data_schema"], custom_serializer=cv.custom_serializer
-    )
-    timeout = next(item for item in fields if item["name"] == CONF_TIMEOUT)
+    schema = result["data_schema"].schema
+    timeout = next(key for key in schema if key == CONF_TIMEOUT)
 
-    assert timeout["default"] == 90
-    number = timeout["selector"]["number"]
-    assert (number["min"], number["max"]) == (5, 120)
+    assert timeout.default() == 90
+    config = schema[timeout].config
+    assert (config["min"], config["max"]) == (5, 120)
 
 
 async def test_inputs_are_trimmed(hass: HomeAssistant) -> None:

@@ -472,7 +472,7 @@ def _todo(body: str) -> Mock:
 
     def save(**_kwargs: object) -> None:
         # caldav 2.1.0 bumps SEQUENCE on the way out whatever increase_seqno
-        # says, and only when the property is already there. Modelled, or the
+        # says, and only when the property is already there. Modeled, or the
         # double bump this fake used to hide stays invisible.
         component = todo.icalendar_component
         if "SEQUENCE" in component:
@@ -722,7 +722,7 @@ def test_a_refusal_of_ours_reaches_the_user_by_its_own_key() -> None:
 
     reported = as_reported(Refused("etag_conflict"), "update")
 
-    # Refused is a ValueError, so it has to be recognised before the arm that
+    # Refused is a ValueError, so it has to be recognized before the arm that
     # forwards a library message verbatim.
     assert reported.translation_key == "etag_conflict"
 
@@ -764,7 +764,7 @@ def test_a_reply_keeps_the_sequence_the_organizer_issued() -> None:
 
     Written against a real caldav.Event rather than a stub, because the value
     that matters is the one on the wire: caldav 2.1.0 accepts increase_seqno
-    and bumps regardless, so this fails loudly if that behaviour ever changes.
+    and bumps regardless, so this fails loudly if that behavior ever changes.
     """
     import caldav
 

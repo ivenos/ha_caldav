@@ -1420,7 +1420,7 @@ def test_renaming_a_whole_series_keeps_its_overrides_and_exdates() -> None:
         },
     )
 
-    # Neither the rule nor the start moved, so the moved and the cancelled
+    # Neither the rule nor the start moved, so the moved and the canceled
     # occurrence both have to survive; dropping them cannot be undone.
     stored = calendar.event.stored()
     master = _master(stored)
@@ -2847,7 +2847,7 @@ def test_moving_a_series_onto_a_gap_keeps_its_exceptions_attached() -> None:
 
 
 def test_a_series_nudge_keeps_its_excluded_dates_on_the_clock() -> None:
-    # Same delta, same reason: an hour too much resurrects the cancelled
+    # Same delta, same reason: an hour too much resurrects the canceled
     # occurrence and cancels a different one.
     ny = ZoneInfo("America/New_York")
     series = (
@@ -2942,7 +2942,7 @@ def test_a_rule_too_dense_to_walk_is_refused_rather_than_walked(call) -> None:
 
 @pytest.mark.parametrize("this_and_future", [False, True])
 def test_deleting_from_a_dense_series_does_not_walk_it(this_and_future: bool) -> None:
-    # Cancelling an occurrence and capping a series are both answered without
+    # Canceling an occurrence and capping a series are both answered without
     # asking the rule how many occurrences lie in between, so the density guard
     # has nothing to protect here and must not fire.
     calendar = FakeCalendar(DENSE)
@@ -3176,7 +3176,7 @@ def test_this_and_future_at_the_first_occurrence_keeps_what_the_series_carries(
 ) -> None:
     """That range covers every occurrence there is, so it is the whole-series
     edit under another name. Its own path dropped every exception and every
-    extra and cancelled date, which no other path over the same range does."""
+    extra and canceled date, which no other path over the same range does."""
     calendar = FakeCalendar(TIMED_WITH_EXTRAS)
 
     update_event(

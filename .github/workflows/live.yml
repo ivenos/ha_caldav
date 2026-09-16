@@ -8,7 +8,6 @@ on:
       - tests/**
       - requirements_test.txt
       - pytest.ini
-      - .github/scripts/live-test.sh
       - .github/workflows/live.yml
   pull_request:
     branches: [main]
@@ -17,7 +16,6 @@ on:
       - tests/**
       - requirements_test.txt
       - pytest.ini
-      - .github/scripts/live-test.sh
       - .github/workflows/live.yml
   workflow_dispatch:
   schedule:
@@ -34,9 +32,7 @@ env:
   PYTHON_VERSION: "3.14"
 
 jobs:
-  # Nextcloud is tested on the current major and the one behind it, resolved at
-  # run time from Docker Hub so the pair stays current without anyone bumping a
-  # pin. Radicale, Xandikos, Baikal and SOGo publish rolling images.
+  # The two newest Nextcloud majors, resolved from Docker Hub at run time.
   matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -45,18 +41,15 @@ jobs:
       - id: build
         run: |
           set -euo pipefail
-          # Two pages so an actively patched previous major is not buried past
-          # the last_updated window by a flood of newer-major variant tags.
+          # Two pages, as variant tags of the newest major can fill the first one.
           names=""
           for page in 1 2; do
-            # Failures swallowed here, or set -e would abort the step before
-            # the fallback below ever runs.
+            # || true, or set -e ends the step before the fallback below.
             names+=$(curl -fsS --retry 3 --retry-all-errors --max-time 30 \
               "https://hub.docker.com/v2/repositories/library/nextcloud/tags/?page_size=100&page=$page&ordering=last_updated" \
               | jq '.results[].name | select(test("^[0-9]+$")) | tonumber' || true)$'\n'
           done
           majors=$(jq -cs 'unique | sort | reverse | .[0:2]' <<<"$names")
-          # A rate-limited Docker Hub must not fail a run that broke nothing.
           if test "$(jq length <<<"$majors")" -ne 2; then
             echo "::warning::could not resolve two Nextcloud majors, using the fallback"
             majors='[32, 31]'
@@ -89,4 +82,4 @@ jobs:
         run: pip install -r requirements_test.txt
 
       - name: Run live tests against ${{ matrix.server }} ${{ matrix.tag }}
-        run: .github/scripts/live-test.sh ${{ matrix.server }} ${{ matrix.tag }} -- -v
+        run: tests/live-test.sh ${{ matrix.server }} ${{ matrix.tag }} -- -v

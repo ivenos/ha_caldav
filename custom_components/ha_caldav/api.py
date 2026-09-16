@@ -39,7 +39,7 @@ _LOGGER = logging.getLogger(__name__)
 # request per uid.
 _SCAN_THRESHOLD = 8
 
-# Left between to-do positions so an item dropped between two neighbours has
+# Left between to-do positions so an item dropped between two neighbors has
 # a whole number to take.
 _SORT_GAP = 1024
 
@@ -309,7 +309,7 @@ def reorder_todos(calendar: caldav.Calendar, uids: list[str]) -> None:
     """Write the given order onto the items.
 
     Core sends the whole ordering for a single drag, so the moved item is
-    picked out and given a number between its new neighbours; renumbering
+    picked out and given a number between its new neighbors; renumbering
     everything would be a PUT per item.
     """
     by_uid = {uid: item for item, uid in _scan(calendar, todo=True)}
@@ -368,7 +368,7 @@ def _single_move(now: list[str], wanted: list[str]) -> str | None:
 def _between(
     wanted: list[str], positions: dict[str, float | None], moved: str
 ) -> int | None:
-    """Return a whole number strictly between the moved item's new neighbours."""
+    """Return a whole number strictly between the moved item's new neighbors."""
     index = wanted.index(moved)
     low = int(positions[wanted[index - 1]]) if index else None
     high = int(positions[wanted[index + 1]]) if index + 1 < len(wanted) else None

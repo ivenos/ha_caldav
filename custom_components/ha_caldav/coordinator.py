@@ -47,7 +47,7 @@ def _bounded[T](cache: dict[str, T]) -> dict[str, T]:
     return dict(list(cache.items())[:_CACHE_LIMIT])
 
 
-# CalDAV knows four states, Home Assistant two; cancelled folds onto completed.
+# CalDAV knows four states, Home Assistant two; canceled folds onto completed.
 TODO_STATUS = {
     "NEEDS-ACTION": TodoItemStatus.NEEDS_ACTION,
     "IN-PROCESS": TodoItemStatus.NEEDS_ACTION,

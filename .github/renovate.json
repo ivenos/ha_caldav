@@ -1,14 +1,11 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
-  "description": [
-    "Managed here: GitHub Actions, both pinned ruff versions (validate.yml and requirements_test.txt), and the test harness.",
-    "Deliberately not managed: caldav, icalendar and vobject. Home Assistant installs them into the same environment as the built-in caldav integration, so they must match the versions core pins, not the latest release on PyPI. They live in manifest.json and are mirrored in requirements_test.txt; the rule below leaves them alone in both.",
-    "Automerged: everything a pull request run actually exercises. Renovate merges only once the branch is green, so a failing run leaves the PR open. Nothing is proposed before the release is three days old."
-  ],
   "dependencyDashboard": false,
   "labels": ["dependencies"],
   "minimumReleaseAge": "3 days",
+  "minimumReleaseAgeBehaviour": "timestamp-optional",
+  "platformAutomerge": false,
   "automergeStrategy": "squash",
   "packageRules": [
     {
@@ -18,13 +15,12 @@
       "automerge": true
     },
     {
-      "description": "The release workflow runs on a tag only, so no pull request check covers this action.",
+      "description": "Runs on tags only, so no pull request check covers it.",
       "matchPackageNames": ["softprops/action-gh-release"],
       "groupName": "release action",
       "automerge": false
     },
     {
-      "description": "Mirrors the manifest.json pins, which follow Home Assistant core.",
       "matchPackageNames": ["caldav", "icalendar", "vobject"],
       "enabled": false
     },
@@ -35,7 +31,7 @@
       "automerge": true
     },
     {
-      "description": "One PR for both ruff pins, so CI and the local venv cannot drift apart. Last, because a later rule wins per field and the catch-all above matches ruff in requirements_test.txt too.",
+      "description": "Last, because a later rule wins and the rule above matches ruff too.",
       "matchPackageNames": ["ruff"],
       "groupName": "ruff",
       "commitMessagePrefix": "ci:",

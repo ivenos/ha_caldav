@@ -11,7 +11,7 @@ fi
 [[ "${1:-}" == "--" ]] && shift
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(cd "$here/../.." && pwd)"
+root="$(cd "$here/.." && pwd)"
 name="ha-caldav-live-$server"
 database="$name-db"
 network="$name-net"
@@ -88,13 +88,8 @@ case "$server" in
   baikal)
     docker run -d --name "$name" -p 8082:80 "ckulka/baikal:$tag" >/dev/null
     wait_for http://localhost:8082/ 40 2
-    # Baikal ships an install wizard and nothing else, so the config file, the
-    # database schema and the account are seeded here instead. Written through
-    # php rather than sqlite3, which only the nginx variant of the image has.
-    # The account is left without an email address, as the Nextcloud one is.
-    # Given one, sabre/dav answers 500 to a DELETE of any object that names it
-    # as an ATTENDEE without also naming an ORGANIZER, which is the shape we
-    # write today; its scheduling broker dereferences the missing organizer.
+    # Baikal has only an install wizard, so this seeds it through php; only the nginx image has sqlite3.
+    # No email on the account, or sabre/dav answers 500 when deleting an event with it as attendee but no organizer.
     docker exec -i -e BAIKAL_USER="$username" -e BAIKAL_PASSWORD="$password" \
       "$name" php >/dev/null <<'PHP'
 <?php
@@ -136,8 +131,7 @@ file_put_contents("$root/config/baikal.yaml", implode("\n", [
     "",
 ]));
 
-// The apache and the nginx variant of the image serve as different users, and
-// Baikal refuses to start unless its config file is writable by that one.
+// The apache and nginx variants serve as different users, and Baikal needs its config writable.
 $owner = stat("$root/html");
 foreach ([$file, dirname($file), "$root/config/baikal.yaml"] as $path) {
     chown($path, $owner["uid"]);
@@ -155,9 +149,7 @@ PHP
       -e MARIADB_USER=sogo \
       -e MARIADB_PASSWORD="$password" \
       mariadb:11 >/dev/null
-    # Over tcp on purpose: the temporary server the entrypoint runs while it is
-    # still creating the account listens on the socket only, and answers a ping
-    # there long before that account exists.
+    # Over tcp: the entrypoint's temporary server listens on the socket before the account exists.
     echo -n "Waiting for the sogo database"
     for _ in $(seq 1 60); do
       if docker exec -e MYSQL_PWD="$password" "$database" \
@@ -168,8 +160,7 @@ PHP
       echo -n "."
       sleep 2
     done
-    # SOGo authenticates against a plain SQL view it never creates itself; the
-    # column names are the ones its sql user source insists on.
+    # SOGo's sql user source expects this table and these column names but never creates them.
     docker exec -e MYSQL_PWD="$password" "$database" mariadb -h 127.0.0.1 -usogo sogo -e "
       CREATE TABLE sogo_users (
         c_uid varchar(64) PRIMARY KEY,
@@ -183,9 +174,8 @@ PHP
     docker run -d --name "$name" --network "$network" -p 8084:80 \
       "pmietlicki/sogo:$tag" >/dev/null
     wait_for http://localhost:8084/SOGo/ 60 3
-    # The image writes a config of its own only when none is there, and the one
-    # it ships has every setting commented out. Mail is off throughout: without
-    # it SOGo would try to reach an IMAP and an SMTP server on every write.
+    # The shipped config has every setting commented out.
+    # Mail is off, or SOGo contacts IMAP and SMTP on every write.
     docker exec -i "$name" sh -c \
       'cat > /srv/etc/sogo.conf && install -o root -g sogo -m 640 /srv/etc/sogo.conf /etc/sogo/sogo.conf' <<EOF
 {
@@ -214,8 +204,7 @@ PHP
   WOPidFile = "/var/run/sogo/sogo.pid";
 }
 EOF
-    # supervisord brings sogod straight back, and it reads the config on the
-    # way up. There is no other way in: it only ever loads it at startup.
+    # supervisord restarts sogod, which reads its config only at startup.
     docker exec "$name" pkill sogod >/dev/null 2>&1 || true
     echo -n "Waiting for sogo to accept the seeded account"
     for _ in $(seq 1 40); do

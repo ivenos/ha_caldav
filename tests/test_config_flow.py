@@ -940,7 +940,7 @@ def test_two_calendars_whose_paths_nest_still_get_a_label_each() -> None:
     """A label is the shortest tail of the path no other calendar shares, and a
     path that is wholly the tail of another has none: every depth down to the
     whole key still matches the longer one. Without the fallback the loop runs
-    out and the calendar comes back labelled with nothing to tell it apart."""
+    out and the calendar comes back labeled with nothing to tell it apart."""
     nested = Mock(name="a")
     nested.name = "Personal"
     nested.calendar.url = "https://cloud.example.com/personal"

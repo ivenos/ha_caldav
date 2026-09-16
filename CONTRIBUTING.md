@@ -1,92 +1,78 @@
 # Contributing
 
-## Setup
+## Build
 
-Python 3.14:
+Python 3.14 in a virtual environment:
 
 ```bash
 python3.14 -m venv .venv
 .venv/bin/pip install -r requirements_test.txt
 ```
 
-## Tests
+- There is nothing to compile. Home Assistant loads `custom_components/ha_caldav/` from its own `custom_components` folder.
 
-Unit tests, from the repo root:
+## Tests
 
 ```bash
 .venv/bin/pytest
-```
-
-CI runs them twice: against the Home Assistant `requirements_test.txt` pins and
-against the oldest one `hacs.json` allows.
-
-Lint and format:
-
-```bash
 .venv/bin/ruff check
 .venv/bin/ruff format --check
 ```
 
-Live tests exercise a real CalDAV server in a throwaway Docker container and are
-excluded unless you ask for them. Bring one up and run them with:
+- CI runs the unit tests against the Home Assistant pinned in `requirements_test.txt` and against the oldest one `hacs.json` allows.
+- The live tests run against a real CalDAV server in throwaway Docker containers, which are removed afterwards:
 
 ```bash
-.github/scripts/live-test.sh nextcloud    # also: baikal, radicale, sogo, xandikos
-.github/scripts/live-test.sh nextcloud 31 -- -v    # a given tag, then pytest args
+tests/live-test.sh nextcloud             # also baikal, radicale, sogo, xandikos
+tests/live-test.sh nextcloud 31 -- -v    # an image tag, then pytest arguments
 ```
 
-The containers are removed afterwards, on failure included. Baikal and SOGo
-need more than a start: the script seeds Baikal's config file and database in
-place of its install wizard, and gives SOGo a MariaDB container plus the SQL
-view it authenticates against. CI runs the same script against Nextcloud (the
-current major and the one behind), Radicale, Xandikos, Baikal and SOGo.
-
-## Config entry versions
-
-Changing the shape of the account key or of an entity `unique_id` needs
-`MINOR_VERSION` on the config flow moved as well. Home Assistant compares the
-stored version against the handler's and returns before loading the component
-when they agree, so a migration written for entries that already carry the
-current number never runs at all.
+- CI runs the live tests against the current and previous Nextcloud major, Radicale, Xandikos, Baikal and SOGo, on changes and weekly.
+- `.github/scripts/screenshots.sh` rebuilds the README screenshots from a throwaway Home Assistant and Radicale with sample calendars. Run it when a change alters what the calendar or the to-do list shows.
 
 ## Code style
 
-- A comment only earns its place when it records something the code cannot: an
-  RFC 5545 rule, a library pitfall, the reason for a non-obvious flag. One or
-  two lines. Never restate what the code already says.
-- Docstrings on public functions. Private helpers stay bare unless the behaviour
-  is non-obvious.
-- Python 3.14, ruff-formatted, line length 88.
+- Python 3.14, formatted with ruff, line length 88.
+- Docstrings on public functions. Private helpers only get one when the behavior is not obvious.
+- A comment only earns its place when it records something the code cannot, such as an RFC 5545 rule or a library pitfall. One or two lines.
 
-## Commits
+## Adding an option
 
-Conventional Commits (https://www.conventionalcommits.org/en/v1.0.0/), with a
-short imperative subject.
+- The default in `const.py`, the field in the options flow in `config_flow.py`, and where it is read, usually `options.py`.
+- The label and description in `strings.json` and in every file under `translations/`.
+- A row in the README table.
+- An option that is not in the README does not exist.
 
-## Releases
+## Config entries
 
-The changelog lives in the GitHub release notes, in Keep a Changelog style
-(https://keepachangelog.com/en/1.1.0/). There is no CHANGELOG.md file.
-
-## Dependencies
-
-`caldav`, `icalendar` and `vobject` are pinned to the versions Home Assistant
-core ships, not the latest on PyPI, so the integration runs in the same
-environment as the built-in `caldav` integration. Do not bump them on their own.
-
-`dateutil` is imported directly but not listed: `icalendar` and `vobject` both
-require it, and since those two are pinned to an exact version, so is what they
-pull in. Declaring it here could only conflict with them.
+- A change to the shape of the account key or an entity `unique_id` raises `MINOR_VERSION` in `config_flow.py` and gets a migration in `async_migrate_entry`.
 
 ## Translations
 
-`strings.json` is the source. Every key in it has to exist in all five files
-under `translations/`, `en.json` included, with the same `{placeholders}`.
-Adding a user-facing string therefore means touching six files.
+- `strings.json` is the source. Every key in it exists in all five files under `translations/`, `en.json` included, with the same `{placeholders}`.
+
+## Commits
+
+Conventional Commits (https://www.conventionalcommits.org/en/v1.0.0/) with a short imperative subject.
+
+## Releases
+
+- A `v1.2.0` tag builds a draft release with `ha_caldav.zip`, with the version from the tag in `manifest.json`. The version in the repository is a placeholder.
+- HACS shows the README of the latest release.
+- Rebuild the README screenshots before every release.
+- The changelog lives in the GitHub release notes, in Keep a Changelog style (https://keepachangelog.com/en/1.1.0/). There is no CHANGELOG.md.
+
+## Dependencies
+
+- GitHub Actions stay on version tags, never commit SHAs. hassfest publishes no tags and runs from `master`.
+- Renovate opens the bumps. Other PRs leave dependencies alone.
+- `caldav`, `icalendar` and `vobject` follow the versions Home Assistant core pins, in `manifest.json` and `requirements_test.txt`. They move by hand.
+- `dateutil` is not listed. It comes pinned through `icalendar` and `vobject`.
 
 ## Pull requests
 
-- One concern per PR. Add tests for behaviour changes.
-- Tests and `ruff` must pass.
-- Fill in the PR template, including the test plan (which server, which
-  operations) and the CLA checkbox.
+- One concern per PR, with tests for behavior changes.
+- Only the PR author and the maintainer commit to it.
+- `pytest`, `ruff check` and `ruff format --check` must pass.
+- The test plan names the CalDAV server and what you exercised: the calendar, the to-do list or which actions.
+- Fill in the PR template, including the CLA checkbox.

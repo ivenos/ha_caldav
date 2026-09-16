@@ -184,7 +184,7 @@ def _slots(start, rule):
 
 
 def document(start, end, rule, exdates=(), rdates=(), overrides=()):
-    """Return the ICS text for a series and its extra, cancelled and moved days."""
+    """Return the ICS text for a series and its extra, canceled and moved days."""
     calendar = ICalendar()
     calendar.add("prodid", "-//ha_caldav//properties//EN")
     calendar.add("version", "2.0")
@@ -705,7 +705,7 @@ def wall_shifted(value, days, zone):
 def test_moving_a_series_keeps_every_wall_clock(zone, day, moment, days, local) -> None:
     """A series nudged by whole days keeps the hour it is held at, over DST.
 
-    The extra and the cancelled dates go with it: a shift taken as an instant
+    The extra and the canceled dates go with it: a shift taken as an instant
     rather than on the clock moves them by an hour on one side of the change.
     """
     anchor = ZoneInfo(zone)

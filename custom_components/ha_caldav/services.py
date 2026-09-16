@@ -251,7 +251,7 @@ EXPORT_SCHEMA = {vol.Optional("uid"): cv.string}
 
 
 def _hex_color(value: Any) -> str:
-    """Return a color in the one shape the read path recognises again."""
+    """Return a color in the one shape the read path recognizes again."""
     if (color := normalize_color(cv.string(value))) is None:
         raise vol.Invalid("expected a hex color such as #00679e")
     return color

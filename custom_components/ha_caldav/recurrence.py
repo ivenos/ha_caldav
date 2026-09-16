@@ -160,7 +160,7 @@ def _update_series(
             _clear_dates(master)
         elif delta := _wall(master, master["DTSTART"].dt) - _wall(master, old_start):
             # The rule stands and the series moved, so the exceptions, extra
-            # and cancelled dates move with it.
+            # and canceled dates move with it.
             dtstart = master["DTSTART"].dt
             zone = dtstart.tzinfo if isinstance(dtstart, datetime) else None
             for override in _overrides(ical):

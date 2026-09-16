@@ -263,7 +263,7 @@
       "options": {
         "tentative": "Tentative",
         "confirmed": "Confirmed",
-        "cancelled": "Cancelled"
+        "cancelled": "Canceled"
       }
     },
     "transparency": {
@@ -364,7 +364,7 @@
         },
         "status": {
           "name": "Status",
-          "description": "Whether the event is confirmed, tentative or cancelled."
+          "description": "Whether the event is confirmed, tentative or canceled."
         },
         "transparency": {
           "name": "Transparency",
@@ -456,7 +456,7 @@
         },
         "status": {
           "name": "Status",
-          "description": "Whether the event is confirmed, tentative or cancelled."
+          "description": "Whether the event is confirmed, tentative or canceled."
         },
         "transparency": {
           "name": "Transparency",

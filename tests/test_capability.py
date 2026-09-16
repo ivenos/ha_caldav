@@ -304,7 +304,7 @@ def test_a_principal_named_by_path_is_read_as_the_uri_it_stands_for() -> None:
 
 def test_an_address_the_account_url_cannot_be_joined_to_is_kept() -> None:
     """A client with no usable url must not cost the account its own address:
-    matched against nothing, no ATTENDEE line is ever recognised as ours and
+    matched against nothing, no ATTENDEE line is ever recognized as ours and
     the reply service reports the user is not on their own event."""
     client = Mock()
     type(client).url = property(

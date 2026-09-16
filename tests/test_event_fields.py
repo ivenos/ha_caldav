@@ -460,7 +460,7 @@ def test_a_floating_until_is_read_in_local_terms_not_in_utc() -> None:
 def test_naming_the_same_organizer_again_keeps_their_parameters() -> None:
     """read_extras reports the bare address, so an unrelated edit names it
     again; rebuilt from that alone the line loses CN and the SENT-BY that
-    authorises an assistant to act for them."""
+    authorizes an assistant to act for them."""
     event = ICalEvent.from_ical(
         "BEGIN:VEVENT\r\nUID:u\r\nDTSTAMP:20260101T000000Z\r\n"
         "DTSTART:20260706T090000Z\r\n"

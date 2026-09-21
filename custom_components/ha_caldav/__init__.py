@@ -15,10 +15,11 @@ from homeassistant.const import (
     CONF_USERNAME,
     Platform,
 )
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import (
     config_validation as cv,
+    device_registry as dr,
     entity_registry as er,
     issue_registry as ir,
 )
@@ -198,8 +199,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
         address_set=address_set,
         sync_collection=sync_collection,
     )
+    _async_drop_account_device(hass, entry)
     _async_prune_entities(hass, entry, managed, calendars)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    loaded = {calendar_key(item.calendar.url) for item in managed}
+    entry.async_on_unload(
+        _async_follow_the_server(hass, entry, colors, loaded, not selected)
+    )
     _async_check_for_issues(hass, entry)
     return True
 
@@ -249,6 +255,69 @@ def _is_selected(calendar: caldav.Calendar, selected: list[str]) -> bool:
     Entries written before v1.2.0 selected by display name rather than url.
     """
     return calendar_key(calendar.url) in selected or display_name(calendar) in selected
+
+
+@callback
+def _async_drop_account_device(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> None:
+    """Remove the account device earlier versions put every entity under.
+
+    Removing a device removes its entities too, so they are moved off it first.
+    """
+    devices = dr.async_get(hass)
+    registry = er.async_get(hass)
+    for device in dr.async_entries_for_config_entry(devices, entry.entry_id):
+        if (DOMAIN, entry.entry_id) not in device.identifiers:
+            continue
+        for record in er.async_entries_for_device(
+            registry, device.id, include_disabled_entities=True
+        ):
+            disabled_by = record.disabled_by
+            if disabled_by is er.RegistryEntryDisabler.DEVICE:
+                disabled_by = er.RegistryEntryDisabler.USER
+            registry.async_update_entity(
+                record.entity_id,
+                device_id=None,
+                area_id=record.area_id or device.area_id,
+                disabled_by=disabled_by,
+            )
+        devices.async_remove_device(device.id)
+
+
+@callback
+def _async_follow_the_server(
+    hass: HomeAssistant,
+    entry: HaCaldavConfigEntry,
+    colors: HaCaldavColorCoordinator,
+    loaded: set[str],
+    include_new: bool,
+) -> CALLBACK_TYPE:
+    """Reload the entry once the color poll finds a loaded calendar renamed.
+
+    With include_new, also once it finds a collection it has not seen. Both
+    against the previous poll, not the calendar list: the poll reads every
+    child of the home set, the inbox and outbox too.
+    """
+    previous = colors.data
+
+    @callback
+    def check() -> None:
+        nonlocal previous
+        if (found := colors.data) is None:
+            return
+        if previous is not None and (
+            (include_new and found.keys() - previous.keys())
+            or any(
+                key in found
+                and key in previous
+                and found[key].name != previous[key].name
+                for key in loaded
+            )
+        ):
+            _LOGGER.debug("Reloading %s for a change on the server", entry.title)
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+        previous = found
+
+    return colors.async_add_listener(check)
 
 
 @callback

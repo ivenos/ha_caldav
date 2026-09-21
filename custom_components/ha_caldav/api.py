@@ -763,6 +763,11 @@ def set_calendar_color(calendar: caldav.Calendar, color: str) -> None:
     calendar.set_properties([ical.CalendarColor(color)])
 
 
+def set_calendar_name(calendar: caldav.Calendar, name: str) -> None:
+    """Write the display name of a calendar back to the server."""
+    calendar.set_properties([dav.DisplayName(name)])
+
+
 def create_calendar(
     client: caldav.DAVClient, name: str, components: list[str] | None
 ) -> None:

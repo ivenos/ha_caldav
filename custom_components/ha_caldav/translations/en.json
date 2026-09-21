@@ -494,6 +494,24 @@
         }
       }
     },
+    "delete_event": {
+      "name": "Delete event",
+      "description": "Deletes an event, a single occurrence of a series, or an occurrence and everything after it.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "The uid of the event to delete."
+        },
+        "recurrence_id": {
+          "name": "Recurrence ID",
+          "description": "The occurrence to delete, for a recurring series."
+        },
+        "recurrence_range": {
+          "name": "Recurrence range",
+          "description": "THISANDFUTURE to delete the occurrence and everything after it."
+        }
+      }
+    },
     "move_event": {
       "name": "Move event",
       "description": "Moves an event to another calendar.",

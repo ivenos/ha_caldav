@@ -22,7 +22,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 import homeassistant.util.dt as dt_util
 
 from .capability import Capability
-from .color import fetch_colors
+from .color import Collection, fetch_collections
 from .connection import calendar_key
 from .errors import NETWORK_ERRORS
 from .event import read_extras
@@ -537,8 +537,8 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         return etags, rules
 
 
-class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, str | None]]):
-    """Track the color each calendar carries on the server."""
+class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, Collection]]):
+    """Track the color and name each calendar carries on the server."""
 
     def __init__(
         self,
@@ -557,14 +557,16 @@ class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, str | None]]):
         )
         self.client = client
 
-    async def _async_update_data(self) -> dict[str, str | None]:
-        """Return the color of every calendar on the account.
+    async def _async_update_data(self) -> dict[str, Collection]:
+        """Return the color and name of every calendar on the account.
 
-        A failure keeps the previous colors; an empty result means the server
-        reports none and clears them.
+        A failure keeps the previous result; an empty one means the server
+        reports no colors and clears them.
         """
         try:
-            return await self.hass.async_add_executor_job(fetch_colors, self.client)
+            return await self.hass.async_add_executor_job(
+                fetch_collections, self.client
+            )
         except Exception as err:
             # A caldav error carries the url it was reading.
             _LOGGER.debug("Could not read calendar colors: %s", err)

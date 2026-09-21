@@ -163,6 +163,11 @@ def test_declared_defaults_match_the_schema(service: str) -> None:
             (const.RANGE_THIS_AND_FUTURE,),
         ),
         (
+            const.SERVICE_DELETE_EVENT,
+            "recurrence_range",
+            (const.RANGE_THIS_AND_FUTURE,),
+        ),
+        (
             const.SERVICE_RESPOND_TO_INVITATION,
             "response",
             tuple(const.PARTSTAT_BY_RESPONSE),

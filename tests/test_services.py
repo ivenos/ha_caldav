@@ -88,12 +88,12 @@ async def test_search_returns_what_the_server_matched(hass: HomeAssistant) -> No
     result = await hass.services.async_call(
         DOMAIN,
         "search_events",
-        {"entity_id": "calendar.iven_personal", "text": "dent"},
+        {"entity_id": "calendar.personal", "text": "dent"},
         blocking=True,
         return_response=True,
     )
 
-    events = result["calendar.iven_personal"]["events"]
+    events = result["calendar.personal"]["events"]
     assert [event["summary"] for event in events] == ["Dentist"]
     assert calendar.search.call_args.kwargs["summary"] == "dent"
     assert calendar.search.call_args.kwargs["event"] is True
@@ -107,7 +107,7 @@ async def test_search_can_target_another_field(hass: HomeAssistant) -> None:
         DOMAIN,
         "search_events",
         {
-            "entity_id": "calendar.iven_personal",
+            "entity_id": "calendar.personal",
             "text": "Berlin",
             "field": "location",
         },
@@ -135,7 +135,7 @@ async def test_free_busy_flattens_the_periods(hass: HomeAssistant) -> None:
         DOMAIN,
         "get_free_busy",
         {
-            "entity_id": "calendar.iven_personal",
+            "entity_id": "calendar.personal",
             "start": "2026-07-06 00:00:00",
             "end": "2026-07-07 00:00:00",
         },
@@ -143,7 +143,7 @@ async def test_free_busy_flattens_the_periods(hass: HomeAssistant) -> None:
         return_response=True,
     )
 
-    periods = result["calendar.iven_personal"]["periods"]
+    periods = result["calendar.personal"]["periods"]
     assert len(periods) == 2
     assert periods[0]["start"].startswith("2026-07-06T09:00:00")
     assert periods[0]["end"].startswith("2026-07-06T10:00:00")
@@ -159,7 +159,7 @@ async def test_create_event_carries_the_extra_properties(hass: HomeAssistant) ->
             DOMAIN,
             "create_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "summary": "Standup",
                 "start_date_time": "2026-07-06 09:00:00",
                 "end_date_time": "2026-07-06 10:00:00",
@@ -193,7 +193,7 @@ async def test_update_event_only_forwards_the_named_fields(
             DOMAIN,
             "update_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "status": "CANCELLED",
             },
@@ -214,7 +214,7 @@ async def test_update_event_forwards_the_recurrence_range(hass: HomeAssistant) -
             DOMAIN,
             "update_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "summary": "Renamed",
                 "recurrence_id": "2026-07-13 09:00:00+00:00",
@@ -225,6 +225,67 @@ async def test_update_event_forwards_the_recurrence_range(hass: HomeAssistant) -
 
     assert update.call_args.args[3] == "2026-07-13 09:00:00+00:00"
     assert update.call_args.args[4] is True
+
+
+async def test_delete_event_removes_the_whole_series_by_default(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+
+    with patch("custom_components.ha_caldav.calendar.delete_event") as delete:
+        await hass.services.async_call(
+            DOMAIN,
+            "delete_event",
+            {"entity_id": "calendar.personal", "uid": "uid-1"},
+            blocking=True,
+        )
+
+    assert delete.call_args.args[1:] == ("uid-1", None, False)
+
+
+async def test_delete_event_forwards_the_occurrence_and_its_range(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+
+    with patch("custom_components.ha_caldav.calendar.delete_event") as delete:
+        await hass.services.async_call(
+            DOMAIN,
+            "delete_event",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "recurrence_id": "2026-07-13 09:00:00+00:00",
+                "recurrence_range": "thisandfuture",
+            },
+            blocking=True,
+        )
+
+    assert delete.call_args.args[1:] == ("uid-1", "2026-07-13 09:00:00+00:00", True)
+
+
+async def test_a_delete_with_a_range_but_no_occurrence_deletes_nothing(
+    hass: HomeAssistant,
+) -> None:
+    # Without the occurrence the range starts at, the whole series would go.
+    await _setup(hass)
+
+    with (
+        patch("custom_components.ha_caldav.calendar.delete_event") as delete,
+        pytest.raises(vol.Invalid),
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "delete_event",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "recurrence_range": "THISANDFUTURE",
+            },
+            blocking=True,
+        )
+
+    assert delete.call_count == 0
 
 
 async def test_move_event_writes_to_the_target_and_refreshes_it(
@@ -243,9 +304,9 @@ async def test_move_event_writes_to_the_target_and_refreshes_it(
             DOMAIN,
             "move_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
-                "target_entity_id": "calendar.iven_work",
+                "target_entity_id": "calendar.work",
             },
             blocking=True,
         )
@@ -268,7 +329,7 @@ async def test_move_to_something_that_is_not_ours_is_rejected(
             DOMAIN,
             "move_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "target_entity_id": "calendar.somewhere_else",
             },
@@ -288,12 +349,12 @@ async def test_export_returns_the_document(hass: HomeAssistant) -> None:
         result = await hass.services.async_call(
             DOMAIN,
             "export_ics",
-            {"entity_id": "calendar.iven_personal", "uid": "uid-1"},
+            {"entity_id": "calendar.personal", "uid": "uid-1"},
             blocking=True,
             return_response=True,
         )
 
-    assert result["calendar.iven_personal"]["ics"] == ICS
+    assert result["calendar.personal"]["ics"] == ICS
     assert export.call_args.args[1] == "uid-1"
 
 
@@ -304,7 +365,7 @@ async def test_import_forwards_the_document(hass: HomeAssistant) -> None:
         await hass.services.async_call(
             DOMAIN,
             "import_ics",
-            {"entity_id": "calendar.iven_personal", "ics": ICS},
+            {"entity_id": "calendar.personal", "ics": ICS},
             blocking=True,
         )
 
@@ -324,7 +385,7 @@ async def test_setting_a_color_refreshes_the_color_poller(
         await hass.services.async_call(
             DOMAIN,
             "set_calendar_color",
-            {"entity_id": "calendar.iven_personal", "color": "#00679e"},
+            {"entity_id": "calendar.personal", "color": "#00679e"},
             blocking=True,
         )
 
@@ -343,7 +404,7 @@ async def test_invitation_needs_a_scheduling_server(hass: HomeAssistant) -> None
             DOMAIN,
             "respond_to_invitation",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "response": "accept",
             },
@@ -364,7 +425,7 @@ async def test_invitation_maps_the_response_onto_a_partstat(
             DOMAIN,
             "respond_to_invitation",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "response": "decline",
             },
@@ -428,7 +489,7 @@ async def test_deleting_a_calendar_removes_it_and_its_entities(
     calendar = _calendar("Personal")
     entry = await _setup(hass, [calendar])
     registry = er.async_get(hass)
-    assert registry.async_get("calendar.iven_personal") is not None
+    assert registry.async_get("calendar.personal") is not None
 
     with (
         patch("custom_components.ha_caldav.services.delete_calendar") as delete,
@@ -444,8 +505,8 @@ async def test_deleting_a_calendar_removes_it_and_its_entities(
         await hass.async_block_till_done()
 
     assert delete.call_args.args[0] is calendar
-    assert registry.async_get("calendar.iven_personal") is None
-    assert registry.async_get("todo.iven_personal") is None
+    assert registry.async_get("calendar.personal") is None
+    assert registry.async_get("todo.personal") is None
 
 
 async def test_deleting_an_ambiguous_calendar_is_refused(
@@ -513,7 +574,7 @@ async def test_a_server_error_becomes_a_home_assistant_error(
         await hass.services.async_call(
             DOMAIN,
             "search_events",
-            {"entity_id": "calendar.iven_personal", "text": "x"},
+            {"entity_id": "calendar.personal", "text": "x"},
             blocking=True,
             return_response=True,
         )
@@ -531,7 +592,7 @@ async def test_search_window_is_passed_through(hass: HomeAssistant) -> None:
         DOMAIN,
         "search_events",
         {
-            "entity_id": "calendar.iven_personal",
+            "entity_id": "calendar.personal",
             "text": "x",
             "start": start.isoformat(),
             "end": (start + timedelta(days=1)).isoformat(),
@@ -551,7 +612,7 @@ async def test_an_all_day_event_keeps_its_date_value_type(hass: HomeAssistant) -
             DOMAIN,
             "create_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "summary": "Holiday",
                 "start_date": "2026-07-06",
                 "end_date": "2026-07-07",
@@ -574,7 +635,7 @@ async def test_a_start_cannot_be_given_as_a_date_and_a_time_at_once(
             DOMAIN,
             "create_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "summary": "Ambiguous",
                 "start_date": "2026-07-06",
                 "start_date_time": "2026-07-06 09:00:00",
@@ -592,7 +653,7 @@ async def test_an_event_needs_a_start_and_an_end(hass: HomeAssistant) -> None:
             DOMAIN,
             "create_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "summary": "Open ended",
                 "start_date_time": "2026-07-06 09:00:00",
             },
@@ -611,7 +672,7 @@ async def test_an_all_day_field_refuses_a_value_carrying_a_time(
             DOMAIN,
             "create_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "summary": "Holiday",
                 "start_date": datetime(2026, 7, 6, 9, 0),
                 "end_date": date(2026, 7, 7),
@@ -628,7 +689,7 @@ async def test_a_date_paired_with_a_datetime_is_refused(hass: HomeAssistant) -> 
             DOMAIN,
             "create_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "summary": "Broken",
                 "start_date": "2026-07-06",
                 "end_date_time": "2026-07-06 10:00:00",
@@ -649,7 +710,7 @@ async def test_a_misspelled_recurrence_range_is_refused(hass: HomeAssistant) -> 
             DOMAIN,
             "update_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "summary": "Renamed",
                 "recurrence_id": "2026-07-13 09:00:00+00:00",
@@ -675,16 +736,17 @@ async def test_a_read_only_calendar_refuses_every_write_service(
             },
         ),
         ("update_event", {"uid": "uid-1", "summary": "x"}),
+        ("delete_event", {"uid": "uid-1"}),
         ("import_ics", {"ics": ICS}),
         ("set_calendar_color", {"color": "#00679e"}),
-        ("move_event", {"uid": "uid-1", "target_entity_id": "calendar.iven_personal"}),
+        ("move_event", {"uid": "uid-1", "target_entity_id": "calendar.personal"}),
         ("respond_to_invitation", {"uid": "uid-1", "response": "accept"}),
     ):
         with pytest.raises(ServiceValidationError) as refusal:
             await hass.services.async_call(
                 DOMAIN,
                 service,
-                {"entity_id": "calendar.iven_personal", **data},
+                {"entity_id": "calendar.personal", **data},
                 blocking=True,
             )
         # Named, because any other failure would satisfy a bare raises() too.
@@ -709,9 +771,9 @@ async def test_moving_into_a_read_only_calendar_is_refused(
             DOMAIN,
             "move_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
-                "target_entity_id": "calendar.iven_work",
+                "target_entity_id": "calendar.work",
             },
             blocking=True,
         )
@@ -742,15 +804,13 @@ async def test_pushing_a_color_makes_the_entity_follow_the_server_again(
 ) -> None:
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    entity = hass.data["entity_components"]["calendar"].get_entity(
-        "calendar.iven_personal"
-    )
+    entity = hass.data["entity_components"]["calendar"].get_entity("calendar.personal")
     entity._picked = True
 
     await hass.services.async_call(
         DOMAIN,
         "set_calendar_color",
-        {"entity_id": "calendar.iven_personal", "color": "#123456"},
+        {"entity_id": "calendar.personal", "color": "#123456"},
         blocking=True,
     )
 
@@ -773,7 +833,7 @@ async def test_an_event_that_ends_before_it_starts_is_refused(
             DOMAIN,
             "create_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "summary": "Backwards",
                 "start_date_time": "2026-07-06 10:00:00",
                 "end_date_time": "2026-07-06 09:00:00",
@@ -808,7 +868,7 @@ async def test_move_to_another_integrations_calendar_is_rejected(
             DOMAIN,
             "move_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "target_entity_id": "calendar.google_work",
             },
@@ -836,9 +896,9 @@ async def test_a_move_refreshes_the_calendar_it_came_from(
             DOMAIN,
             "move_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
-                "target_entity_id": "calendar.iven_work",
+                "target_entity_id": "calendar.work",
             },
             blocking=True,
         )
@@ -861,7 +921,7 @@ async def test_a_free_busy_answer_the_library_cannot_read_is_reported(
             DOMAIN,
             "get_free_busy",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "start": "2026-07-06 00:00:00",
                 "end": "2026-07-07 00:00:00",
             },
@@ -884,7 +944,7 @@ async def test_create_event_forwards_the_recurrence_rule(hass: HomeAssistant) ->
             DOMAIN,
             "create_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "summary": "Standup",
                 "start_date_time": "2026-07-06 09:00:00",
                 "end_date_time": "2026-07-06 10:00:00",
@@ -904,7 +964,7 @@ async def test_update_event_forwards_the_recurrence_rule(hass: HomeAssistant) ->
             DOMAIN,
             "update_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "rrule": "FREQ=DAILY",
             },
@@ -925,7 +985,7 @@ async def test_an_empty_rule_is_how_a_recurrence_is_removed(
         await hass.services.async_call(
             DOMAIN,
             "update_event",
-            {"entity_id": "calendar.iven_personal", "uid": "uid-1", "rrule": ""},
+            {"entity_id": "calendar.personal", "uid": "uid-1", "rrule": ""},
             blocking=True,
         )
 
@@ -948,7 +1008,7 @@ async def test_moving_into_a_calendar_the_caller_may_not_control_is_refused(
     user = MockUser()
     user.add_to_hass(hass)
     user.permissions = PolicyPermissions(
-        {"entities": {"entity_ids": {"calendar.iven_personal": True}}}, user.id
+        {"entities": {"entity_ids": {"calendar.personal": True}}}, user.id
     )
 
     with pytest.raises(Unauthorized):
@@ -956,9 +1016,9 @@ async def test_moving_into_a_calendar_the_caller_may_not_control_is_refused(
             DOMAIN,
             "move_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
-                "target_entity_id": "calendar.iven_private",
+                "target_entity_id": "calendar.private",
             },
             blocking=True,
             context=Context(user_id=user.id),
@@ -1024,9 +1084,9 @@ async def test_a_move_named_by_a_user_who_no_longer_exists_is_refused(
             DOMAIN,
             "move_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
-                "target_entity_id": "calendar.iven_work",
+                "target_entity_id": "calendar.work",
             },
             blocking=True,
             context=Context(user_id="nobody-by-that-id"),
@@ -1041,9 +1101,7 @@ async def test_replying_to_an_invitation_clears_the_events_etag(
     straight afterwards was refused over a conflict that was the user's own
     reply."""
     entry = await _setup(hass)
-    entity = hass.data["entity_components"]["calendar"].get_entity(
-        "calendar.iven_personal"
-    )
+    entity = hass.data["entity_components"]["calendar"].get_entity("calendar.personal")
     entity.coordinator.etags = {"uid-1": '"e"'}
     entry.runtime_data.address_set = ["mailto:iven@example.com"]
 
@@ -1052,7 +1110,7 @@ async def test_replying_to_an_invitation_clears_the_events_etag(
             DOMAIN,
             "respond_to_invitation",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "response": "accept",
             },
@@ -1119,9 +1177,9 @@ async def test_a_move_between_two_accounts_sharing_a_path_is_allowed(
             DOMAIN,
             "move_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
-                "target_entity_id": "calendar.work_personal",
+                "target_entity_id": "calendar.personal_2",
             },
             blocking=True,
         )
@@ -1151,7 +1209,7 @@ async def test_a_search_is_read_off_the_event_loop(hass: HomeAssistant) -> None:
         await hass.services.async_call(
             DOMAIN,
             "search_events",
-            {"entity_id": "calendar.iven_personal", "text": "standup"},
+            {"entity_id": "calendar.personal", "text": "standup"},
             blocking=True,
             return_response=True,
         )
@@ -1178,12 +1236,12 @@ async def test_a_window_that_starts_and_ends_at_the_same_moment_is_allowed(
     response = await hass.services.async_call(
         DOMAIN,
         "get_free_busy",
-        {"entity_id": "calendar.iven_personal", "start": moment, "end": moment},
+        {"entity_id": "calendar.personal", "start": moment, "end": moment},
         blocking=True,
         return_response=True,
     )
 
-    assert response == {"calendar.iven_personal": {"periods": []}}
+    assert response == {"calendar.personal": {"periods": []}}
 
 
 async def test_a_target_named_by_a_user_who_no_longer_exists_is_refused(
@@ -1201,13 +1259,11 @@ async def test_a_target_named_by_a_user_who_no_longer_exists_is_refused(
     from custom_components.ha_caldav.services import _async_check_control
 
     await _setup(hass)
-    entity = hass.data["entity_components"]["calendar"].get_entity(
-        "calendar.iven_personal"
-    )
+    entity = hass.data["entity_components"]["calendar"].get_entity("calendar.personal")
     call = Mock(context=Context(user_id="nobody-by-that-id"))
 
     with pytest.raises(UnknownUser):
-        await _async_check_control(entity, call, "calendar.iven_work")
+        await _async_check_control(entity, call, "calendar.work")
 
 
 @pytest.mark.parametrize(
@@ -1232,7 +1288,7 @@ async def test_a_lowercase_option_reaches_the_write_path_as_its_rfc_name(
             DOMAIN,
             "create_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "summary": "Standup",
                 "start_date_time": "2026-07-06 09:00:00",
                 "end_date_time": "2026-07-06 10:00:00",
@@ -1253,7 +1309,7 @@ async def test_the_rfc_spelling_is_still_accepted(hass: HomeAssistant) -> None:
             DOMAIN,
             "create_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "summary": "Standup",
                 "start_date_time": "2026-07-06 09:00:00",
                 "end_date_time": "2026-07-06 10:00:00",
@@ -1282,7 +1338,7 @@ async def test_a_recurrence_range_without_an_occurrence_is_refused(
             DOMAIN,
             "update_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "summary": "Renamed",
                 # The RFC spelling, which the schema took before this check
@@ -1310,7 +1366,7 @@ async def test_a_search_window_that_ends_before_it_starts_is_refused(
             DOMAIN,
             "search_events",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "text": "dent",
                 "start": "2026-07-07 00:00:00",
                 "end": "2026-07-06 00:00:00",
@@ -1336,7 +1392,7 @@ async def test_a_free_busy_window_that_ends_before_it_starts_is_refused(
             DOMAIN,
             "get_free_busy",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "start": "2026-07-07 00:00:00",
                 "end": "2026-07-06 00:00:00",
             },
@@ -1372,7 +1428,7 @@ async def test_an_event_created_with_attendees_names_the_account_as_organizer(
         DOMAIN,
         "create_event",
         {
-            "entity_id": "calendar.iven_personal",
+            "entity_id": "calendar.personal",
             "summary": "Review",
             "start_date_time": "2026-07-06 09:00:00",
             "end_date_time": "2026-07-06 10:00:00",
@@ -1405,12 +1461,12 @@ async def test_a_search_hit_the_read_path_cannot_place_is_left_out(
     result = await hass.services.async_call(
         DOMAIN,
         "search_events",
-        {"entity_id": "calendar.iven_personal", "text": "dent"},
+        {"entity_id": "calendar.personal", "text": "dent"},
         blocking=True,
         return_response=True,
     )
 
-    events = result["calendar.iven_personal"]["events"]
+    events = result["calendar.personal"]["events"]
     assert [event["summary"] for event in events] == ["Dentist"]
 
 
@@ -1437,7 +1493,7 @@ async def test_free_busy_periods_written_on_one_line_are_all_reported(
         DOMAIN,
         "get_free_busy",
         {
-            "entity_id": "calendar.iven_personal",
+            "entity_id": "calendar.personal",
             "start": "2026-07-06 00:00:00",
             "end": "2026-07-07 00:00:00",
         },
@@ -1445,7 +1501,7 @@ async def test_free_busy_periods_written_on_one_line_are_all_reported(
         return_response=True,
     )
 
-    periods = result["calendar.iven_personal"]["periods"]
+    periods = result["calendar.personal"]["periods"]
     assert [period["end"] for period in periods] == [
         "2026-07-06T10:00:00+00:00",
         "2026-07-06T15:00:00+00:00",
@@ -1465,7 +1521,7 @@ async def test_an_update_carries_the_window_it_was_given(hass: HomeAssistant) ->
             DOMAIN,
             "update_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "start_date_time": "2026-07-06 11:00:00",
                 "end_date_time": "2026-07-06 12:00:00",
@@ -1494,9 +1550,9 @@ async def test_moving_an_event_onto_its_own_calendar_is_refused(
             DOMAIN,
             "move_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
-                "target_entity_id": "calendar.iven_personal",
+                "target_entity_id": "calendar.personal",
             },
             blocking=True,
         )
@@ -1530,7 +1586,7 @@ async def test_moving_into_an_account_that_is_not_loaded_is_refused(
             DOMAIN,
             "move_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "target_entity_id": "calendar.work_personal",
             },
@@ -1550,7 +1606,7 @@ async def test_moving_onto_a_calendar_the_account_no_longer_holds_is_refused(
         "calendar",
         DOMAIN,
         f"{entry.entry_id}-/remote.php/dav/Gone",
-        suggested_object_id="iven_gone",
+        suggested_object_id="gone",
         config_entry=entry,
     )
 
@@ -1559,9 +1615,9 @@ async def test_moving_onto_a_calendar_the_account_no_longer_holds_is_refused(
             DOMAIN,
             "move_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "uid": "uid-1",
-                "target_entity_id": "calendar.iven_gone",
+                "target_entity_id": "calendar.gone",
             },
             blocking=True,
         )
@@ -1583,10 +1639,10 @@ async def test_search_returns_the_extra_properties(hass: HomeAssistant) -> None:
     result = await hass.services.async_call(
         DOMAIN,
         "search_events",
-        {"entity_id": "calendar.iven_personal", "text": "stand"},
+        {"entity_id": "calendar.personal", "text": "stand"},
         blocking=True,
         return_response=True,
     )
 
-    events = result["calendar.iven_personal"]["events"]
+    events = result["calendar.personal"]["events"]
     assert events[0]["url"] == "https://meet.example.com/x"

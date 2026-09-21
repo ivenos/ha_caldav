@@ -9,7 +9,7 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 
-from .color import fetch_colors
+from .color import Collection, fetch_collections
 from .connection import calendar_key
 from .const import (
     CONF_CA_BUNDLE,
@@ -75,10 +75,10 @@ def _calendars(data: HaCaldavRuntimeData) -> Any:
     except Exception as err:  # noqa: BLE001
         # The error text embeds the server url and the username.
         return {"error": type(err).__name__}
-    colors: dict[str, str | None] = {}
+    collections: dict[str, Collection] = {}
     color_error = None
     try:
-        colors = fetch_colors(data.client)
+        collections = fetch_collections(data.client)
     except Exception as err:  # noqa: BLE001
         # Anything from AssertionError to TypeError on a malformed multistatus.
         color_error = type(err).__name__
@@ -90,7 +90,8 @@ def _calendars(data: HaCaldavRuntimeData) -> Any:
         if color_error is not None:
             info["color_error"] = color_error
         else:
-            info["color"] = colors.get(calendar_key(calendar.url))
+            reported = collections.get(calendar_key(calendar.url))
+            info["color"] = None if reported is None else reported.color
         if (item := managed.get(calendar.url)) is not None:
             info["components"] = sorted(item.capability.components)
             info["writable"] = item.capability.writable

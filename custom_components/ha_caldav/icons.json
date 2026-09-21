@@ -2,6 +2,7 @@
   "services": {
     "create_event": "mdi:calendar-plus",
     "update_event": "mdi:calendar-edit",
+    "delete_event": "mdi:calendar-remove",
     "search_events": "mdi:calendar-search",
     "get_free_busy": "mdi:calendar-clock",
     "move_event": "mdi:calendar-arrow-right",

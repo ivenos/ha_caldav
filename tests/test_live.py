@@ -452,7 +452,7 @@ def test_calendar_color_round_trips(calendar) -> None:
     """The color the server holds must come back keyed by the calendar's path."""
     from caldav.elements import ical
 
-    from custom_components.ha_caldav.color import fetch_colors
+    from custom_components.ha_caldav.color import fetch_collections
     from custom_components.ha_caldav.connection import calendar_key
 
     client = calendar.client
@@ -462,7 +462,7 @@ def test_calendar_color_round_trips(calendar) -> None:
         # straight back; turning it into #rrggbb is on us.
         assert calendar.get_property(ical.CalendarColor()) == "#00679EFF"
 
-        colors = fetch_colors(client)
+        collections = fetch_collections(client)
     finally:
         # The calendar is shared with every test in this module. Cleared by
         # writing a color rather than an empty value: SOGo validates the
@@ -471,7 +471,7 @@ def test_calendar_color_round_trips(calendar) -> None:
         # required and normalized.
         calendar.set_properties([ical.CalendarColor("#FFFFFFFF")])
 
-    assert colors[calendar_key(calendar.url)] == "#00679e"
+    assert collections[calendar_key(calendar.url)].color == "#00679e"
     # Two calendars reducing to one key would hand one of them the other's
     # color. Spare keys are fine: a depth-1 PROPFIND also reaches subscriptions
     # and trashed calendars, which are not calendars() results.
@@ -624,19 +624,41 @@ def test_moving_an_event_between_calendars(calendar) -> None:
 
 def test_writing_a_calendar_color_back(calendar) -> None:
     from custom_components.ha_caldav.api import set_calendar_color
-    from custom_components.ha_caldav.color import fetch_colors
+    from custom_components.ha_caldav.color import fetch_collections
     from custom_components.ha_caldav.connection import calendar_key
 
-    before = fetch_colors(calendar.client).get(calendar_key(calendar.url))
+    key = calendar_key(calendar.url)
+    before = fetch_collections(calendar.client).get(key)
     try:
         set_calendar_color(calendar, "#00679e")
 
-        assert fetch_colors(calendar.client)[calendar_key(calendar.url)] == "#00679e"
+        assert fetch_collections(calendar.client)[key].color == "#00679e"
     finally:
         # The calendar is shared with every test in this module.
         enable_sockets()
-        if before is not None:
-            set_calendar_color(calendar, before)
+        if before is not None and before.color is not None:
+            set_calendar_color(calendar, before.color)
+
+
+def test_writing_a_calendar_name_back(calendar) -> None:
+    from custom_components.ha_caldav.api import set_calendar_name
+    from custom_components.ha_caldav.color import fetch_collections
+    from custom_components.ha_caldav.connection import calendar_key
+
+    key = calendar_key(calendar.url)
+    assert fetch_collections(calendar.client)[key].name == CALENDAR_NAME
+    try:
+        set_calendar_name(calendar, "ha_caldav live renamed")
+
+        assert fetch_collections(calendar.client)[key].name == "ha_caldav live renamed"
+        listed = {
+            calendar_key(found.url): found.name
+            for found in calendar.client.principal().calendars()
+        }
+        assert listed[key] == "ha_caldav live renamed"
+    finally:
+        enable_sockets()
+        set_calendar_name(calendar, CALENDAR_NAME)
 
 
 def test_responding_to_an_invitation_sets_our_partstat(calendar) -> None:

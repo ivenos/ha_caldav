@@ -66,6 +66,7 @@ from .const import (
     SERVICE_CREATE_CALENDAR,
     SERVICE_CREATE_EVENT,
     SERVICE_DELETE_CALENDAR,
+    SERVICE_DELETE_EVENT,
     SERVICE_EXPORT_ICS,
     SERVICE_GET_FREE_BUSY,
     SERVICE_IMPORT_ICS,
@@ -239,6 +240,17 @@ UPDATE_EVENT_SCHEMA = vol.All(
     ),
 )
 
+DELETE_EVENT_SCHEMA = vol.All(
+    cv.make_entity_service_schema(
+        {
+            vol.Required("uid"): cv.string,
+            vol.Optional("recurrence_id"): cv.string,
+            vol.Optional("recurrence_range"): _named((RANGE_THIS_AND_FUTURE,)),
+        }
+    ),
+    _range_needs_occurrence,
+)
+
 MOVE_EVENT_SCHEMA = {
     vol.Required("uid"): cv.string,
     vol.Required(ATTR_TARGET_ENTITY_ID): cv.entity_id,
@@ -321,6 +333,9 @@ def async_register_entity_services(platform: EntityPlatform) -> None:
     )
     platform.async_register_entity_service(
         SERVICE_UPDATE_EVENT, UPDATE_EVENT_SCHEMA, _async_update_event
+    )
+    platform.async_register_entity_service(
+        SERVICE_DELETE_EVENT, DELETE_EVENT_SCHEMA, _async_delete_event
     )
     platform.async_register_entity_service(
         SERVICE_MOVE_EVENT, MOVE_EVENT_SCHEMA, _async_move_event
@@ -460,6 +475,18 @@ async def _async_update_event(
     await entity.async_update_full_event(
         call.data["uid"],
         data,
+        call.data.get("recurrence_id"),
+        call.data.get("recurrence_range"),
+    )
+
+
+async def _async_delete_event(
+    entity: HaCaldavCalendarEntity, call: ServiceCall
+) -> None:
+    """Delete an event, one occurrence of it, or an occurrence onwards."""
+    _require_writable(entity)
+    await entity.async_delete_event(
+        call.data["uid"],
         call.data.get("recurrence_id"),
         call.data.get("recurrence_range"),
     )

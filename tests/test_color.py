@@ -18,7 +18,11 @@ from pytest_homeassistant_custom_component.common import (
 import requests
 
 from custom_components.ha_caldav.calendar import COLOR_STATE
-from custom_components.ha_caldav.color import fetch_colors, normalize_color
+from custom_components.ha_caldav.color import (
+    Collection,
+    fetch_collections,
+    normalize_color,
+)
 from custom_components.ha_caldav.connection import calendar_key
 from custom_components.ha_caldav.const import DOMAIN
 from custom_components.ha_caldav.coordinator import HaCaldavColorCoordinator
@@ -81,7 +85,7 @@ def _client(colors: dict[str, str | None] | None = None, calendars=None) -> Mock
     return client
 
 
-def test_fetch_colors_keys_by_path_and_reports_the_colorless() -> None:
+def test_fetch_collections_keys_by_path_and_reports_the_colorless() -> None:
     client = _client(
         {
             "/remote.php/dav/calendars/iven/personal/": "#00679E",
@@ -94,11 +98,11 @@ def test_fetch_colors_keys_by_path_and_reports_the_colorless() -> None:
 
     # Every href answered for is a key: absent has to stay distinguishable from
     # colorless, or a lookup that went wrong would clear everyone's color.
-    assert fetch_colors(client) == {
-        "/remote.php/dav/calendars/iven/personal": "#00679e",
-        "/remote.php/dav/calendars/iven/work": "#ff0000",
-        "/remote.php/dav/calendars/iven": None,
-        "/remote.php/dav/calendars/iven/broken": None,
+    assert fetch_collections(client) == {
+        "/remote.php/dav/calendars/iven/personal": Collection("#00679e", None),
+        "/remote.php/dav/calendars/iven/work": Collection("#ff0000", None),
+        "/remote.php/dav/calendars/iven": Collection(None, None),
+        "/remote.php/dav/calendars/iven/broken": Collection(None, None),
     }
 
 
@@ -121,7 +125,7 @@ MULTISTATUS = """<?xml version="1.0" encoding="utf-8"?>
   <d:response>
     <d:href>/remote.php/dav/calendars/iven/a%2520b/</d:href>
     <d:propstat>
-      <d:prop><i:calendar-color>#E9D859</i:calendar-color></d:prop>
+      <d:prop><i:calendar-color>#E9D859</i:calendar-color><d:displayname/></d:prop>
       <d:status>HTTP/1.1 200 OK</d:status></d:propstat>
   </d:response>
   <d:response>
@@ -129,13 +133,14 @@ MULTISTATUS = """<?xml version="1.0" encoding="utf-8"?>
     <d:propstat>
       <d:prop>
         <i:calendar-color symbolic-color="blue">#00679EFF</i:calendar-color>
+        <d:displayname>Iven</d:displayname>
       </d:prop>
       <d:status>HTTP/1.1 200 OK</d:status></d:propstat>
   </d:response>
 </d:multistatus>"""
 
 
-def test_fetch_colors_reads_the_unparsed_response() -> None:
+def test_fetch_collections_reads_the_unparsed_response() -> None:
     # Run a real caldav response through it: only the unparsed form carries a
     # row per calendar, and asking for the parsed one leaves nothing to read.
     client = Mock()
@@ -147,28 +152,28 @@ def test_fetch_colors_reads_the_unparsed_response() -> None:
     # Alpha off, and Apple's symbolic-color attribute does not get in the way.
     # caldav resolves the encoding on an href exactly once, so the literal
     # percent sequence has to come back intact.
-    assert fetch_colors(client) == {
-        "/remote.php/dav/calendars/iven": None,
-        "/remote.php/dav/calendars/iven/a%20b": "#e9d859",
-        "/remote.php/dav/calendars/iven/personal": "#00679e",
+    assert fetch_collections(client) == {
+        "/remote.php/dav/calendars/iven": Collection(None, None),
+        "/remote.php/dav/calendars/iven/a%20b": Collection("#e9d859", None),
+        "/remote.php/dav/calendars/iven/personal": Collection("#00679e", "Iven"),
     }
 
 
-def test_fetch_colors_keeps_a_literal_percent_sequence() -> None:
+def test_fetch_collections_keeps_a_literal_percent_sequence() -> None:
     # caldav resolved the encoding on the href once already. Resolving it again
     # would key this under a path no calendar url ever reduces to.
     client = _client({"/dav/a%20b/": "#00679e"})
 
-    colors = fetch_colors(client)
+    collections = fetch_collections(client)
 
-    assert colors == {"/dav/a%20b": "#00679e"}
-    assert calendar_key("https://cloud.example.com/dav/a%2520b/") in colors
+    assert collections == {"/dav/a%20b": Collection("#00679e", None)}
+    assert calendar_key("https://cloud.example.com/dav/a%2520b/") in collections
 
 
-def test_fetch_colors_asks_once_for_every_calendar() -> None:
+def test_fetch_collections_asks_once_for_every_calendar() -> None:
     client = _client({"/dav/personal/": "#00679e"})
 
-    fetch_colors(client)
+    fetch_collections(client)
 
     home = client.principal.return_value.calendar_home_set
     assert home.get_properties.call_count == 1
@@ -189,12 +194,12 @@ async def test_failed_fetch_keeps_the_last_known_colors(
     client = _client({"/dav/personal/": "#00679e"})
     coordinator = HaCaldavColorCoordinator(hass, entry, client, timedelta(minutes=15))
     await coordinator.async_refresh()
-    assert coordinator.data == {"/dav/personal": "#00679e"}
+    assert coordinator.data == {"/dav/personal": Collection("#00679e", None)}
 
     client.principal.return_value.calendar_home_set.get_properties.side_effect = failure
     await coordinator.async_refresh()
 
-    assert coordinator.data == {"/dav/personal": "#00679e"}
+    assert coordinator.data == {"/dav/personal": Collection("#00679e", None)}
 
 
 @pytest.mark.parametrize("failure", FAILURES)
@@ -245,7 +250,7 @@ async def _setup(
     return entry
 
 
-def _options(hass: HomeAssistant, entity_id: str = "calendar.iven_personal") -> dict:
+def _options(hass: HomeAssistant, entity_id: str = "calendar.personal") -> dict:
     return dict(er.async_get(hass).async_get(entity_id).options)
 
 
@@ -277,7 +282,7 @@ def _register_existing(
         "calendar",
         DOMAIN,
         f"{entry.entry_id}-{PERSONAL_URL}",
-        suggested_object_id="iven_personal",
+        suggested_object_id="personal",
         config_entry=entry,
     )
     for domain, values in (options or {}).items():
@@ -308,9 +313,7 @@ async def test_hand_picked_color_survives(hass: HomeAssistant) -> None:
 
 
 def _entity(hass: HomeAssistant):
-    return hass.data["entity_components"]["calendar"].get_entity(
-        "calendar.iven_personal"
-    )
+    return hass.data["entity_components"]["calendar"].get_entity("calendar.personal")
 
 
 async def _recolor(hass: HomeAssistant, color: str | None) -> None:
@@ -350,7 +353,7 @@ async def test_cleared_color_stays_cleared(hass: HomeAssistant) -> None:
     # Clearing the color in the UI is a choice too, and a later poll must not
     # quietly undo it.
     er.async_get(hass).async_update_entity_options(
-        "calendar.iven_personal", "calendar", None
+        "calendar.personal", "calendar", None
     )
 
     await _recolor(hass, "#00679e")
@@ -379,7 +382,7 @@ async def test_cleared_color_survives_the_server_dropping_its_own(
     # and let the next server-side color back in.
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     er.async_get(hass).async_update_entity_options(
-        "calendar.iven_personal", "calendar", None
+        "calendar.personal", "calendar", None
     )
 
     await _recolor(hass, None)
@@ -391,7 +394,7 @@ async def test_cleared_color_survives_the_server_dropping_its_own(
 async def test_cleared_color_survives_a_failed_poll(hass: HomeAssistant) -> None:
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     er.async_get(hass).async_update_entity_options(
-        "calendar.iven_personal", "calendar", None
+        "calendar.personal", "calendar", None
     )
     entity = _entity(hass)
     home = entity.colors.client.principal.return_value.calendar_home_set
@@ -411,13 +414,13 @@ async def test_hand_picked_color_stays_protected_once_it_matches_the_server(
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     registry = er.async_get(hass)
     registry.async_update_entity_options(
-        "calendar.iven_personal", "calendar", {"color": "#abcdef"}
+        "calendar.personal", "calendar", {"color": "#abcdef"}
     )
     await _recolor(hass, "#00679e")
     # Settling on the color the server happens to carry must not hand the
     # entity back to automatic tracking.
     registry.async_update_entity_options(
-        "calendar.iven_personal", "calendar", {"color": "#00679e"}
+        "calendar.personal", "calendar", {"color": "#00679e"}
     )
     await _recolor(hass, "#00679e")
 
@@ -435,7 +438,7 @@ async def test_color_picked_and_changed_again_between_polls_is_caught(
     registry = er.async_get(hass)
     for color in ("#abcdef", "#00679e"):
         registry.async_update_entity_options(
-            "calendar.iven_personal", "calendar", {"color": color}
+            "calendar.personal", "calendar", {"color": color}
         )
         await hass.async_block_till_done()
 
@@ -459,7 +462,7 @@ async def test_each_calendar_gets_its_own_color(hass: HomeAssistant) -> None:
     )
 
     assert _options(hass)["calendar"]["color"] == "#00679e"
-    assert _options(hass, "calendar.iven_work")["calendar"]["color"] == "#e9d859"
+    assert _options(hass, "calendar.work")["calendar"]["color"] == "#e9d859"
 
 
 async def test_color_is_polled_without_anyone_asking(hass: HomeAssistant) -> None:
@@ -500,7 +503,7 @@ async def _reload(hass: HomeAssistant, entry: MockConfigEntry, color: str) -> No
 async def test_hand_picked_color_survives_a_restart(hass: HomeAssistant) -> None:
     entry = await _setup(hass, {PERSONAL_HREF: "#00679e"})
     er.async_get(hass).async_update_entity_options(
-        "calendar.iven_personal", "calendar", {"color": "#abcdef"}
+        "calendar.personal", "calendar", {"color": "#abcdef"}
     )
     await hass.async_block_till_done()
 
@@ -518,7 +521,7 @@ async def test_color_picked_while_unloaded_survives(hass: HomeAssistant) -> None
     # Nothing is watching the registry now, so the pick can only be noticed by
     # comparing against what we last wrote.
     er.async_get(hass).async_update_entity_options(
-        "calendar.iven_personal", "calendar", {"color": "#abcdef"}
+        "calendar.personal", "calendar", {"color": "#abcdef"}
     )
 
     await _setup(hass, {PERSONAL_HREF: "#00679e"}, entry)
@@ -532,7 +535,7 @@ async def test_pick_matching_the_server_survives_a_restart(hass: HomeAssistant) 
     registry = er.async_get(hass)
     for color in ("#abcdef", "#00679e"):
         registry.async_update_entity_options(
-            "calendar.iven_personal", "calendar", {"color": color}
+            "calendar.personal", "calendar", {"color": color}
         )
         await hass.async_block_till_done()
 
@@ -545,10 +548,10 @@ async def test_pick_matching_the_server_survives_a_restart(hass: HomeAssistant) 
 
 
 async def test_unrelated_registry_edit_is_not_a_pick(hass: HomeAssistant) -> None:
-    # Renaming an entity writes to the same registry the pick watcher listens
+    # Changing an icon writes to the same registry the pick watcher listens
     # on, and must not read as the user choosing a color.
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
-    er.async_get(hass).async_update_entity("calendar.iven_personal", name="My calendar")
+    er.async_get(hass).async_update_entity("calendar.personal", icon="mdi:calendar")
     await hass.async_block_till_done()
 
     await _recolor(hass, "#123456")
@@ -568,7 +571,7 @@ async def test_clearing_without_a_record_survives(hass: HomeAssistant) -> None:
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
         er.async_get(hass).async_update_entity_options(
-            "calendar.iven_personal", "calendar", None
+            "calendar.personal", "calendar", None
         )
         await hass.async_block_till_done()
         home.get_properties.side_effect = None
@@ -600,7 +603,7 @@ async def test_overridden_calendar_stops_writing(hass: HomeAssistant) -> None:
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     registry = er.async_get(hass)
     registry.async_update_entity_options(
-        "calendar.iven_personal", "calendar", {"color": "#abcdef"}
+        "calendar.personal", "calendar", {"color": "#abcdef"}
     )
     await hass.async_block_till_done()
     writes = []
@@ -641,7 +644,7 @@ async def test_color_cleared_while_unloaded_survives(hass: HomeAssistant) -> Non
     # Same as picking one while unloaded: nothing is watching, so an empty
     # color has to read as a choice from the stored state alone.
     er.async_get(hass).async_update_entity_options(
-        "calendar.iven_personal", "calendar", None
+        "calendar.personal", "calendar", None
     )
 
     await _setup(hass, {PERSONAL_HREF: "#00679e"}, entry)
@@ -653,7 +656,7 @@ async def test_color_cleared_while_unloaded_survives(hass: HomeAssistant) -> Non
 async def test_cleared_color_survives_a_restart(hass: HomeAssistant) -> None:
     entry = await _setup(hass, {PERSONAL_HREF: "#00679e"})
     er.async_get(hass).async_update_entity_options(
-        "calendar.iven_personal", "calendar", None
+        "calendar.personal", "calendar", None
     )
     await hass.async_block_till_done()
 
@@ -694,7 +697,7 @@ async def test_entity_enabled_later_follows_the_server(hass: HomeAssistant) -> N
     await _setup(hass, {PERSONAL_HREF: "#00679e"}, entry)
     assert _options(hass)["calendar"]["color"] == "#00679e"
 
-    er.async_get(hass).async_update_entity("calendar.iven_personal", disabled_by=None)
+    er.async_get(hass).async_update_entity("calendar.personal", disabled_by=None)
     await _reload(hass, entry, "#123456")
 
     assert _options(hass)["calendar"]["color"] == "#123456"
@@ -713,7 +716,7 @@ async def test_setup_survives_a_server_that_cannot_answer(
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-    assert hass.states.get("calendar.iven_personal") is not None
+    assert hass.states.get("calendar.personal") is not None
     assert "color" not in _options(hass).get("calendar", {})
 
 
@@ -755,7 +758,7 @@ async def test_writing_a_color_after_a_hand_pick_makes_the_calendar_follow_again
     the service reports success and nothing on screen ever changes again."""
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     er.async_get(hass).async_update_entity_options(
-        "calendar.iven_personal", "calendar", {"color": "#abcdef"}
+        "calendar.personal", "calendar", {"color": "#abcdef"}
     )
     await hass.async_block_till_done()
     assert _options(hass)[COLOR_STATE]["override"] is True

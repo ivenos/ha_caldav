@@ -42,11 +42,11 @@ Or open **Settings → Devices & services → Add integration** and search for *
 
 Setup asks for the server URL, username and password. The host name is usually enough, the CalDAV address is found through `/.well-known/caldav`. Certificate verification can be turned off, and under **Certificates** a CA bundle and a client certificate and key can be set.
 
-Each calendar gets a `calendar.<account>_<calendar>` entity for its events and a `todo.<account>_<calendar>` entity for its to-dos, depending on what it holds. The last three options can also be set per calendar.
+Each calendar gets a `calendar.<calendar>` entity for its events and a `todo.<calendar>` entity for its to-dos, depending on what it holds. Both are named after the calendar on the server, which is also the name Assist uses for them. A calendar renamed on the server is renamed in Home Assistant at the next poll, and renaming one of its entities in Home Assistant renames the calendar on the server, unless it is read-only. The last three options can also be set per calendar.
 
 | Option | Default | Description |
 |---|---|---|
-| Calendars to include | `all` | The calendars that get entities |
+| Calendars to include | `all` | The calendars that get entities. With `all`, a calendar added on the server gets them at the next poll |
 | Minutes between polls | `15` | How often to look for changes made outside Home Assistant, 1-1440 |
 | Seconds a request may take | `30` | How long to wait for the server to answer, 5-120 |
 | Days ahead | `7` | How far ahead to look for the upcoming event, 1-365 |
@@ -60,6 +60,7 @@ All actions except `create_calendar` and `delete_calendar` target a calendar ent
 | Action | What it does |
 |---|---|
 | `ha_caldav.create_event` / `update_event` | Create or change an event with alarms, attendees, organizer, URL, categories, status, transparency, classification and priority |
+| `ha_caldav.delete_event` | Delete an event, a single occurrence of a series or an occurrence and everything after it |
 | `ha_caldav.search_events` | Search by summary, description, location, category, status or uid, returns `events` |
 | `ha_caldav.get_free_busy` | Busy periods in a time window, returns `periods` |
 | `ha_caldav.move_event` | Move or copy an event to another calendar |

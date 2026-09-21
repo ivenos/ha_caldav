@@ -230,19 +230,6 @@ async function open(scheme) {
     return [context, page];
 }
 
-const [setup, page] = await open('light');
-await page.goto(BASE + '/calendar');
-await page.locator('.fc-event').first().waitFor({ timeout: 60000 });
-// A name set in Home Assistant replaces the account prefix in the calendar list.
-await page.evaluate(async () => {
-    const hass = document.querySelector('home-assistant').hass;
-    const entities = await hass.callWS({ type: 'config/entity_registry/list' });
-    for (const entity of entities.filter(e => e.platform === 'ha_caldav')) {
-        await hass.callWS({ type: 'config/entity_registry/update', entity_id: entity.entity_id, name: entity.original_name });
-    }
-});
-await setup.close();
-
 {
     const [context, page] = await open('light');
     await page.goto(BASE + '/calendar');

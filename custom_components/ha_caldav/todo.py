@@ -53,7 +53,7 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
         entry: HaCaldavConfigEntry,
     ) -> None:
         """Initialize the to-do list entity."""
-        super().__init__(managed, entry)
+        super().__init__(managed)
         self._attr_supported_features = (
             TodoListEntityFeature.CREATE_TODO_ITEM
             | TodoListEntityFeature.UPDATE_TODO_ITEM

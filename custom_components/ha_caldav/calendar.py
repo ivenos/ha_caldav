@@ -71,7 +71,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         entry: HaCaldavConfigEntry,
     ) -> None:
         """Initialize the calendar entity."""
-        super().__init__(managed, entry)
+        super().__init__(managed)
         self.runtime_data = data
         self.colors = data.colors
         self._attr_supported_features = (
@@ -108,6 +108,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
     @callback
     def async_registry_entry_updated(self) -> None:
         """Note a color the user picked the moment they pick it."""
+        super().async_registry_entry_updated()
         if (entry := self.registry_entry) is None:
             return
         if entry.options.get(CALENDAR_DOMAIN, {}).get("color") == self._written_color:
@@ -163,7 +164,8 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         )
 
     def _server_color(self) -> str | None:
-        return (self.colors.data or {}).get(self._color_key)
+        collection = (self.colors.data or {}).get(self._color_key)
+        return None if collection is None else collection.color
 
     @callback
     def async_follow_server_color(self) -> None:

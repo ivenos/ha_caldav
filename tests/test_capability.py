@@ -217,10 +217,10 @@ async def test_component_set_decides_which_entities_exist(
     )
 
     # An event-only calendar has no to-do list, and a task list is no calendar.
-    assert hass.states.get("calendar.iven_events") is not None
-    assert hass.states.get("todo.iven_events") is None
-    assert hass.states.get("todo.iven_tasks") is not None
-    assert hass.states.get("calendar.iven_tasks") is None
+    assert hass.states.get("calendar.events") is not None
+    assert hass.states.get("todo.events") is None
+    assert hass.states.get("todo.tasks") is not None
+    assert hass.states.get("calendar.tasks") is None
 
 
 async def test_a_calendar_we_may_not_write_to_hides_its_controls(
@@ -234,8 +234,8 @@ async def test_a_calendar_we_may_not_write_to_hides_its_controls(
         },
     )
 
-    assert hass.states.get("calendar.iven_events").attributes["supported_features"] == 0
-    assert hass.states.get("calendar.iven_tasks").attributes["supported_features"] != 0
+    assert hass.states.get("calendar.events").attributes["supported_features"] == 0
+    assert hass.states.get("calendar.tasks").attributes["supported_features"] != 0
 
 
 def test_an_empty_component_set_stays_permissive() -> None:

@@ -494,6 +494,24 @@
         }
       }
     },
+    "delete_event": {
+      "name": "Supprimer un événement",
+      "description": "Supprime un événement, une occurrence d'une série ou une occurrence et toutes les suivantes.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "L'UID de l'événement à supprimer."
+        },
+        "recurrence_id": {
+          "name": "ID de récurrence",
+          "description": "L'occurrence à supprimer, pour une série récurrente."
+        },
+        "recurrence_range": {
+          "name": "Portée de la récurrence",
+          "description": "THISANDFUTURE pour supprimer cette occurrence et toutes les suivantes."
+        }
+      }
+    },
     "move_event": {
       "name": "Déplacer un événement",
       "description": "Déplace un événement vers un autre calendrier.",

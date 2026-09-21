@@ -494,6 +494,24 @@
         }
       }
     },
+    "delete_event": {
+      "name": "Termin löschen",
+      "description": "Löscht einen Termin, eine einzelne Wiederholung einer Serie oder eine Wiederholung und alle folgenden.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "Die UID des zu löschenden Termins."
+        },
+        "recurrence_id": {
+          "name": "Wiederholungs-ID",
+          "description": "Die einzelne Wiederholung einer Serie, die gelöscht werden soll."
+        },
+        "recurrence_range": {
+          "name": "Wiederholungsbereich",
+          "description": "THISANDFUTURE löscht diese Wiederholung und alle folgenden."
+        }
+      }
+    },
     "move_event": {
       "name": "Termin verschieben",
       "description": "Verschiebt einen Termin in einen anderen Kalender.",

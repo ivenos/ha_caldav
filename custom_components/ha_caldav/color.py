@@ -1,11 +1,12 @@
-"""Calendar colors read from the CalDAV server."""
+"""Calendar colors and names read from the CalDAV server."""
 
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 import caldav
-from caldav.elements import ical
+from caldav.elements import dav, ical
 
 _HEX = re.compile(r"[0-9a-fA-F]+")
 _EXPANDABLE = (3, 4)
@@ -27,22 +28,31 @@ def normalize_color(value: object) -> str | None:
     return f"#{digits[:6].lower()}"
 
 
-def fetch_colors(client: caldav.DAVClient) -> dict[str, str | None]:
-    """Return calendar key -> color for everything the home set reports on.
+class Collection(NamedTuple):
+    """The color and display name the server reports for one collection."""
 
-    A calendar without a color is a key holding None.
+    color: str | None
+    name: str | None
+
+
+def fetch_collections(client: caldav.DAVClient) -> dict[str, Collection]:
+    """Return calendar key -> color and name for everything the home set holds.
+
+    Whatever a calendar lacks holds None.
     """
     home = client.principal().calendar_home_set
     # The parsed form collapses to the home set itself.
     response = home.get_properties(
-        [ical.CalendarColor()], depth=1, parse_response_xml=False
+        [ical.CalendarColor(), dav.DisplayName()], depth=1, parse_response_xml=False
     )
-    colors: dict[str, str | None] = {}
+    collections: dict[str, Collection] = {}
     # The element itself: caldav's expansion logs an error for an unknown
     # attribute, and Apple sends one. The href is already unquoted.
     for href, props in response.find_objects_and_props().items():
-        element = props.get(ical.CalendarColor.tag)
-        colors[href.rstrip("/")] = (
-            None if element is None else normalize_color(element.text)
+        color = props.get(ical.CalendarColor.tag)
+        name = props.get(dav.DisplayName.tag)
+        collections[href.rstrip("/")] = Collection(
+            None if color is None else normalize_color(color.text),
+            None if name is None else name.text or None,
         )
-    return colors
+    return collections

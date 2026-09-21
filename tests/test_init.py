@@ -1,8 +1,10 @@
 """Tests for the account setup, the shared poller and the repair issues."""
 
+from datetime import timedelta
 from unittest.mock import Mock, patch
 
 from caldav.davclient import requests
+from caldav.elements import dav
 from caldav.lib.error import AuthorizationError
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import (
@@ -13,17 +15,30 @@ from homeassistant.const import (
     CONF_VERIFY_SSL,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er, issue_registry as ir
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+    issue_registry as ir,
+)
 from homeassistant.helpers.entity_component import EntityComponent
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.util import dt as dt_util
+import pytest
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 from custom_components.ha_caldav import async_migrate_entry
+from custom_components.ha_caldav.connection import calendar_key
 from custom_components.ha_caldav.const import (
     CONF_CALENDARS,
+    CONF_READ_ONLY,
     DOMAIN,
     ISSUE_BUILTIN_CALDAV,
     ISSUE_NO_SYNC_COLLECTION,
 )
+from custom_components.ha_caldav.coordinator import todo_unique_id
 
 ENTRY_DATA = {
     CONF_URL: "https://cloud.example.com/remote.php/dav",
@@ -68,8 +83,8 @@ def _entity(hass: HomeAssistant, domain: str, entity_id: str):
 async def test_calendar_and_todo_share_one_poller(hass: HomeAssistant) -> None:
     await _setup(hass)
 
-    calendar = _entity(hass, "calendar", "calendar.iven_personal")
-    todo = _entity(hass, "todo", "todo.iven_personal")
+    calendar = _entity(hass, "calendar", "calendar.personal")
+    todo = _entity(hass, "todo", "todo.personal")
 
     # Both live in the same collection under one sync token; polling twice
     # would double the work for nothing.
@@ -141,7 +156,7 @@ async def test_entities_for_a_component_the_calendar_lost_are_removed(
 
     entry = await _setup(hass)
     registry = er.async_get(hass)
-    assert registry.async_get("todo.iven_personal") is not None
+    assert registry.async_get("todo.personal") is not None
 
     # The server now says the calendar only holds events.
     with (
@@ -162,8 +177,8 @@ async def test_entities_for_a_component_the_calendar_lost_are_removed(
         await hass.config_entries.async_reload(entry.entry_id)
         await hass.async_block_till_done()
 
-    assert registry.async_get("todo.iven_personal") is None
-    assert registry.async_get("calendar.iven_personal") is not None
+    assert registry.async_get("todo.personal") is None
+    assert registry.async_get("calendar.personal") is not None
 
 
 async def test_the_builtin_integration_on_the_same_account_is_flagged(
@@ -258,7 +273,7 @@ async def test_upcoming_event_attributes_come_from_the_snapshot(
     hass: HomeAssistant,
 ) -> None:
     await _setup(hass)
-    entity = _entity(hass, "calendar", "calendar.iven_personal")
+    entity = _entity(hass, "calendar", "calendar.personal")
     entity.coordinator.data.extras = {"url": "https://meet.example.com/x"}
 
     assert entity.extra_state_attributes["url"] == "https://meet.example.com/x"
@@ -449,7 +464,7 @@ async def test_an_entry_with_an_empty_selection_falls_back_to_every_calendar(
     # broken integration; the form is where the choice is made.
     await _setup_with(hass, [_calendar("Personal")], options={CONF_CALENDARS: []})
 
-    assert hass.states.get("calendar.iven_personal") is not None
+    assert hass.states.get("calendar.personal") is not None
 
 
 async def test_an_entry_keyed_before_normalization_is_rekeyed(
@@ -500,7 +515,7 @@ async def test_a_calendar_missing_from_one_answer_keeps_its_entities(
     before = {
         e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)
     }
-    assert "calendar.iven_work" in before
+    assert "calendar.work" in before
 
     await _reload_with(hass, entry, [personal])
 
@@ -532,7 +547,7 @@ async def test_a_calendar_the_user_unticked_loses_its_entities(
     kept = {
         e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)
     }
-    assert kept == {"calendar.iven_personal", "todo.iven_personal"}
+    assert kept == {"calendar.personal", "todo.personal"}
 
 
 async def test_the_migration_is_reachable_at_all(hass: HomeAssistant) -> None:
@@ -783,3 +798,252 @@ async def test_a_server_without_sync_collection_is_not_asked_for_a_token(
 
     calendar.objects_by_sync_token.assert_not_called()
     assert calendar.search.called
+
+
+async def test_an_entity_carries_the_calendar_name_alone(hass: HomeAssistant) -> None:
+    await _setup(hass)
+
+    assert hass.states.get("calendar.personal").name == "Personal"
+    assert hass.states.get("todo.personal").name == "Personal"
+
+
+def _older_install(hass: HomeAssistant, **entity: object) -> MockConfigEntry:
+    """Register the account device earlier versions made, one entity under it."""
+    entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        entry_type=dr.DeviceEntryType.SERVICE,
+        name=entry.title,
+    )
+    er.async_get(hass).async_get_or_create(
+        "todo",
+        DOMAIN,
+        todo_unique_id(entry.entry_id, _calendar("Personal").url),
+        suggested_object_id="iven_personal",
+        config_entry=entry,
+        device_id=device.id,
+        **entity,
+    )
+    return entry
+
+
+async def _setup_existing(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.return_value.calendars.return_value = [
+            _calendar("Personal")
+        ]
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_entities_outlive_the_account_device_of_an_older_version(
+    hass: HomeAssistant,
+) -> None:
+    entry = _older_install(hass)
+    devices = dr.async_get(hass)
+    [device] = dr.async_entries_for_config_entry(devices, entry.entry_id)
+    kitchen = ar.async_get(hass).async_create("Kitchen")
+    devices.async_update_device(device.id, area_id=kitchen.id)
+
+    await _setup_existing(hass, entry)
+
+    record = er.async_get(hass).async_get("todo.iven_personal")
+    assert record.device_id is None
+    assert record.area_id == kitchen.id
+    assert devices.async_get(device.id) is None
+    assert hass.states.get("todo.iven_personal").name == "Personal"
+
+
+async def test_an_entity_disabled_with_the_account_device_stays_disabled(
+    hass: HomeAssistant,
+) -> None:
+    # Only a device being enabled again clears a device disabler.
+    entry = _older_install(hass, disabled_by=er.RegistryEntryDisabler.DEVICE)
+
+    await _setup_existing(hass, entry)
+
+    record = er.async_get(hass).async_get("todo.iven_personal")
+    assert record.disabled_by is er.RegistryEntryDisabler.USER
+
+
+def _home_set(principal: Mock) -> None:
+    """Answer the color poll with the home set, its inbox and what is listed."""
+    found: dict[str, dict] = {"/remote.php/dav/": {}, "/remote.php/dav/inbox/": {}}
+    for calendar in principal.calendars.return_value:
+        found[f"{calendar_key(calendar.url)}/"] = {
+            dav.DisplayName.tag: Mock(text=calendar.name)
+        }
+    answer = principal.calendar_home_set.get_properties.return_value
+    answer.find_objects_and_props.return_value = found
+
+
+@pytest.fixture
+def principal():
+    """An account holding Personal, which a test may add calendars to."""
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        principal = client.return_value.principal.return_value
+        principal.calendars.return_value = [_calendar("Personal")]
+        _home_set(principal)
+        yield principal
+
+
+async def _setup_on_account(
+    hass: HomeAssistant, options: dict | None = None
+) -> MockConfigEntry:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="iven",
+        data=ENTRY_DATA,
+        options=options or {},
+        unique_id="x",
+    )
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    return entry
+
+
+def _add_shopping(principal: Mock) -> None:
+    principal.calendars.return_value = [_calendar("Personal"), _calendar("Shopping")]
+    _home_set(principal)
+
+
+async def _next_poll(hass: HomeAssistant) -> None:
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=16))
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+
+async def test_a_calendar_added_on_the_server_is_loaded_at_the_next_poll_only(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    await _setup_on_account(hass)
+
+    _add_shopping(principal)
+    await _next_poll(hass)
+
+    assert hass.states.get("todo.shopping") is not None
+    await _next_poll(hass)
+    assert principal.calendars.call_count == 2
+
+
+async def test_a_calendar_added_on_the_server_stays_out_of_a_selection(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    await _setup_on_account(hass, {CONF_CALENDARS: ["/remote.php/dav/Personal"]})
+
+    _add_shopping(principal)
+    await _next_poll(hass)
+
+    assert principal.calendars.call_count == 1
+
+
+async def test_a_failed_first_color_read_does_not_make_every_calendar_new(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    home = principal.calendar_home_set
+    home.get_properties.side_effect = OSError("boom")
+    await _setup_on_account(hass)
+
+    home.get_properties.side_effect = None
+    await _next_poll(hass)
+
+    assert principal.calendars.call_count == 1
+
+
+def _rename_on_server(principal: Mock, name: str) -> None:
+    principal.calendars.return_value[0].name = name
+    _home_set(principal)
+
+
+@pytest.mark.parametrize(
+    "options", [{}, {CONF_CALENDARS: ["/remote.php/dav/Personal"]}]
+)
+async def test_a_calendar_renamed_on_the_server_is_renamed_at_the_next_poll(
+    hass: HomeAssistant, principal: Mock, options: dict
+) -> None:
+    await _setup_on_account(hass, options)
+
+    _rename_on_server(principal, "Private")
+    await _next_poll(hass)
+
+    assert hass.states.get("calendar.personal").name == "Private"
+    assert hass.states.get("todo.personal").name == "Private"
+    await _next_poll(hass)
+    assert principal.calendars.call_count == 2
+
+
+def _renamed_by_the_server(principal: Mock) -> Mock:
+    """Return the calendar, answering a rename the way a server would."""
+    calendar = principal.calendars.return_value[0]
+    calendar.set_properties.side_effect = lambda props: setattr(
+        calendar, "name", props[0].value
+    )
+    return calendar
+
+
+@pytest.mark.parametrize("entity_id", ["calendar.personal", "todo.personal"])
+async def test_a_rename_in_home_assistant_renames_the_calendar_on_the_server(
+    hass: HomeAssistant, principal: Mock, entity_id: str
+) -> None:
+    await _setup_on_account(hass)
+    calendar = _renamed_by_the_server(principal)
+
+    er.async_get(hass).async_update_entity(entity_id, name="Private")
+    await hass.async_block_till_done()
+
+    calendar.set_properties.assert_called_once()
+    assert calendar.set_properties.call_args.args[0][0].value == "Private"
+    # The server holds the name now, so a later rename there comes through.
+    assert er.async_get(hass).async_get(entity_id).name is None
+    assert hass.states.get("calendar.personal").name == "Private"
+    assert hass.states.get("todo.personal").name == "Private"
+
+
+async def test_a_rename_of_a_read_only_calendar_stays_in_home_assistant(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    await _setup_on_account(hass, {CONF_READ_ONLY: True})
+    calendar = _renamed_by_the_server(principal)
+
+    er.async_get(hass).async_update_entity("calendar.personal", name="Private")
+    await hass.async_block_till_done()
+
+    calendar.set_properties.assert_not_called()
+    assert er.async_get(hass).async_get("calendar.personal").name == "Private"
+
+
+async def test_a_rename_the_server_refuses_stays_in_home_assistant(
+    hass: HomeAssistant, principal: Mock, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _setup_on_account(hass)
+    principal.calendars.return_value[0].set_properties.side_effect = OSError("boom")
+
+    er.async_get(hass).async_update_entity("calendar.personal", name="Private")
+    await hass.async_block_till_done()
+
+    assert er.async_get(hass).async_get("calendar.personal").name == "Private"
+    assert principal.calendars.call_count == 1
+    assert "Could not rename Personal on the server" in caplog.text
+
+
+async def test_a_name_given_before_the_update_is_not_written_to_the_server(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    er.async_get(hass).async_get_or_create(
+        "calendar",
+        DOMAIN,
+        f"{entry.entry_id}-/remote.php/dav/Personal",
+        suggested_object_id="personal",
+        config_entry=entry,
+    )
+    er.async_get(hass).async_update_entity("calendar.personal", name="My calendar")
+
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    principal.calendars.return_value[0].set_properties.assert_not_called()
+    assert hass.states.get("calendar.personal").name == "My calendar"

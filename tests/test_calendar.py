@@ -78,9 +78,9 @@ def _entity(hass: HomeAssistant, entity_id: str):
 async def test_entity_per_calendar_with_full_crud(hass: HomeAssistant) -> None:
     await _setup(hass, [_calendar("Personal"), _calendar("Work")])
 
-    state = hass.states.get("calendar.iven_personal")
+    state = hass.states.get("calendar.personal")
     assert state is not None
-    assert hass.states.get("calendar.iven_work") is not None
+    assert hass.states.get("calendar.work") is not None
 
     features = state.attributes["supported_features"]
     assert features & CalendarEntityFeature.CREATE_EVENT
@@ -95,29 +95,27 @@ async def test_calendar_selection_filters_entities(hass: HomeAssistant) -> None:
         options={CONF_CALENDARS: ["Personal"]},
     )
 
-    assert hass.states.get("calendar.iven_personal") is not None
-    assert hass.states.get("calendar.iven_contact_birthdays") is None
+    assert hass.states.get("calendar.personal") is not None
+    assert hass.states.get("calendar.contact_birthdays") is None
 
 
 async def test_read_only_hides_write_features(hass: HomeAssistant) -> None:
     await _setup(hass, [_calendar("Personal")], options={CONF_READ_ONLY: True})
 
-    features = hass.states.get("calendar.iven_personal").attributes[
-        "supported_features"
-    ]
+    features = hass.states.get("calendar.personal").attributes["supported_features"]
     assert features == 0
 
 
 async def test_scan_interval_option_drives_polling(hass: HomeAssistant) -> None:
     await _setup(hass, [_calendar("Personal")], options={CONF_SCAN_INTERVAL: 5})
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     assert entity.coordinator.update_interval == timedelta(minutes=5)
 
 
 async def test_scan_interval_defaults_to_fifteen_minutes(hass: HomeAssistant) -> None:
     await _setup(hass, [_calendar("Personal")])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     assert entity.coordinator.update_interval == timedelta(minutes=15)
 
@@ -161,7 +159,7 @@ async def test_an_event_that_already_ended_is_not_the_upcoming_one(
     ]
     await _setup(hass, [calendar])
 
-    assert _entity(hass, "calendar.iven_personal").event.summary == "Upcoming"
+    assert _entity(hass, "calendar.personal").event.summary == "Upcoming"
 
 
 async def test_a_window_holding_only_past_events_has_no_upcoming_one(
@@ -171,7 +169,7 @@ async def test_a_window_holding_only_past_events_has_no_upcoming_one(
     calendar.search.return_value = [_search_item("Over", timedelta(hours=-4))]
     await _setup(hass, [calendar])
 
-    assert _entity(hass, "calendar.iven_personal").event is None
+    assert _entity(hass, "calendar.personal").event is None
 
 
 async def test_next_event_ignores_server_result_order(hass: HomeAssistant) -> None:
@@ -184,13 +182,13 @@ async def test_next_event_ignores_server_result_order(hass: HomeAssistant) -> No
     ]
     await _setup(hass, [calendar])
 
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     assert entity.event.summary == "Sooner"
 
 
 async def test_delete_forwards_recurrence_range(hass: HomeAssistant) -> None:
     await _setup(hass, [_calendar("Personal")])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     with patch("custom_components.ha_caldav.calendar.delete_event") as delete:
         await entity.async_delete_event(
@@ -206,7 +204,7 @@ async def test_delete_single_occurrence_is_not_this_and_future(
     hass: HomeAssistant,
 ) -> None:
     await _setup(hass, [_calendar("Personal")])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     with patch("custom_components.ha_caldav.calendar.delete_event") as delete:
         await entity.async_delete_event(
@@ -218,7 +216,7 @@ async def test_delete_single_occurrence_is_not_this_and_future(
 
 async def test_server_error_becomes_home_assistant_error(hass: HomeAssistant) -> None:
     await _setup(hass, [_calendar("Personal")])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     with (
         patch(
@@ -240,7 +238,7 @@ async def test_unchanged_calendar_skips_the_expand(hass: HomeAssistant) -> None:
     # A stable sync-token means nothing was touched between polls.
     calendar.objects_by_sync_token.return_value.sync_token = "token-1"
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     calls = calendar.search.call_count
     await entity.coordinator.async_refresh()
@@ -254,7 +252,7 @@ async def test_changed_calendar_refetches(hass: HomeAssistant) -> None:
         sync_token=object()
     )
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     calls = calendar.search.call_count
     await entity.coordinator.async_refresh()
@@ -325,7 +323,7 @@ async def test_update_forwards_etag_and_clears_it_after_write(
     hass: HomeAssistant,
 ) -> None:
     await _setup(hass, [_calendar("Personal")])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     entity.coordinator.etags = {"uid-1": '"e"'}
 
     with patch("custom_components.ha_caldav.calendar.update_event") as update:
@@ -339,7 +337,7 @@ async def test_delete_forwards_etag_and_clears_it_after_write(
     hass: HomeAssistant,
 ) -> None:
     await _setup(hass, [_calendar("Personal")])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     entity.coordinator.etags = {"uid-1": '"e"'}
 
     with patch("custom_components.ha_caldav.calendar.delete_event") as delete:
@@ -369,7 +367,7 @@ async def test_get_events_caches_etags(hass: HomeAssistant) -> None:
         [_etag_item("uid-1", '"e"')] if kw.get("expand") is False else []
     )
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     await entity.async_get_events(
         hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
@@ -382,7 +380,7 @@ async def test_failed_write_keeps_etag_for_retry(hass: HomeAssistant) -> None:
     # The pop must run only after a successful write; a failed one leaves the
     # cached etag so the retry still validates against the unchanged server copy.
     await _setup(hass, [_calendar("Personal")])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     entity.coordinator.etags = {"uid-1": '"e"'}
 
     with (
@@ -407,7 +405,7 @@ async def test_get_events_survives_etag_refresh_failure(hass: HomeAssistant) -> 
 
     calendar.search.side_effect = search
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     events = await entity.async_get_events(
         hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
@@ -422,7 +420,7 @@ async def test_a_rejected_password_starts_a_reauth_flow(hass: HomeAssistant) -> 
 
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
     calendar.objects_by_sync_token.side_effect = AuthorizationError(
         reason="Unauthorized"
     )
@@ -444,7 +442,7 @@ async def test_a_server_failure_is_reported_once_not_as_a_traceback(
 ) -> None:
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
     calendar.objects_by_sync_token.side_effect = DAVError("boom")
     calendar.search.side_effect = DAVError("boom")
 
@@ -477,7 +475,7 @@ async def test_a_failing_todo_half_does_not_take_the_calendar_down(
         sync_token=object()
     )
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     await coordinator.async_refresh()
 
@@ -488,7 +486,7 @@ async def test_a_failing_todo_half_does_not_take_the_calendar_down(
 async def test_a_rejected_sync_token_is_dropped(hass: HomeAssistant) -> None:
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
     coordinator._sync_token = "stale"
     calendar.objects_by_sync_token.side_effect = DAVError("403 valid-sync-token")
 
@@ -517,7 +515,7 @@ async def test_etags_are_cached_by_the_poll_not_only_by_the_panel(
 
     # An automation writing after a restart is conflict-checked without the
     # frontend ever having opened the calendar.
-    assert _entity(hass, "calendar.iven_personal").coordinator.etags == {
+    assert _entity(hass, "calendar.personal").coordinator.etags == {
         "Standup": '"etag-1"'
     }
 
@@ -542,7 +540,7 @@ async def test_the_panel_window_caches_its_own_etags(hass: HomeAssistant) -> Non
 
     calendar.search.side_effect = search
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
     assert coordinator.etags == {}
 
     await coordinator.async_get_events(hass, window, window + timedelta(days=20))
@@ -570,8 +568,8 @@ async def test_a_half_that_never_answered_takes_only_its_own_entity_down(
     entry = await _setup(hass, [calendar])
 
     assert entry.state is ConfigEntryState.LOADED
-    assert hass.states.get("calendar.iven_personal").state == STATE_UNAVAILABLE
-    assert hass.states.get("todo.iven_personal").state != STATE_UNAVAILABLE
+    assert hass.states.get("calendar.personal").state == STATE_UNAVAILABLE
+    assert hass.states.get("todo.personal").state != STATE_UNAVAILABLE
 
 
 async def test_a_half_that_answered_before_keeps_its_last_result(
@@ -590,7 +588,7 @@ async def test_a_half_that_answered_before_keeps_its_last_result(
 
     calendar.search.side_effect = search
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     fail_todos = True
     calendar.objects_by_sync_token.side_effect = Timeout("boom")
@@ -619,7 +617,7 @@ async def test_an_event_core_refuses_does_not_take_the_calendar_down(
 
     calendar.search.side_effect = search
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     assert coordinator.last_update_success is True
     assert coordinator.data.next_event.summary == "Standup"
@@ -629,7 +627,7 @@ async def test_the_extra_attributes_stay_out_of_the_recorder(
     hass: HomeAssistant,
 ) -> None:
     await _setup(hass, [_calendar("Personal")])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     # Core reads the combined set, not the per-entity attribute, so this is
     # what proves the exclusion is actually wired up.
@@ -664,8 +662,8 @@ async def test_an_all_day_event_is_skipped_when_the_option_is_off(
 
     await _setup(hass, [calendar], options={CONF_INCLUDE_ALL_DAY: False})
 
-    assert hass.states.get("calendar.iven_personal").state == "off"
-    assert hass.states.get("calendar.iven_personal").attributes.get("message") is None
+    assert hass.states.get("calendar.personal").state == "off"
+    assert hass.states.get("calendar.personal").attributes.get("message") is None
 
 
 async def test_an_all_day_event_is_used_when_the_option_is_on(
@@ -682,7 +680,7 @@ async def test_an_all_day_event_is_used_when_the_option_is_on(
 
     await _setup(hass, [calendar], options={CONF_INCLUDE_ALL_DAY: True})
 
-    assert hass.states.get("calendar.iven_personal").attributes["message"] == "Holiday"
+    assert hass.states.get("calendar.personal").attributes["message"] == "Holiday"
 
 
 async def test_an_event_without_a_start_does_not_take_the_calendar_down(
@@ -702,7 +700,7 @@ async def test_an_event_without_a_start_does_not_take_the_calendar_down(
 
     await _setup(hass, [calendar])
 
-    assert hass.states.get("calendar.iven_personal").attributes["message"] == "Standup"
+    assert hass.states.get("calendar.personal").attributes["message"] == "Standup"
 
 
 async def test_the_poll_does_not_ask_caldav_to_split_the_expansion(
@@ -741,7 +739,7 @@ async def test_a_calendar_without_a_name_still_gets_one(hass: HomeAssistant) -> 
     nameless = _calendar("Personal")
     nameless.name = None
     await _setup(hass, [nameless])
-    entity = _entity(hass, "calendar.iven_caldav")
+    entity = _entity(hass, "calendar.caldav")
 
     # A collection is not required to carry a display name, and the coordinator
     # name reaches the log lines and the entity id.
@@ -763,7 +761,7 @@ async def test_the_only_half_of_a_calendar_rides_out_a_failure_then_gives_up(
         },
     ):
         await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     # The server says something changed, so the poll really does go and fetch.
     calendar.objects_by_sync_token.return_value.sync_token = "moved-on"
     calendar.search.side_effect = Timeout("gone")
@@ -786,7 +784,7 @@ async def test_a_poll_drops_the_etag_of_an_event_it_no_longer_finds(
 ) -> None:
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     # Seen by the polled window before, so its absence now means it is gone.
     entity.coordinator._etag_window = {"deleted-1"}
     entity.coordinator.etags = {"deleted-1": "old-etag"}
@@ -804,7 +802,7 @@ async def test_a_poll_keeps_the_etags_of_a_window_it_did_not_read(
 ) -> None:
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     # Cached by the panel for a month the poll window does not reach.
     entity.coordinator.etags = {"next-month-1": "panel-etag"}
     entity.coordinator.halves["events"].cached = None
@@ -831,7 +829,7 @@ async def test_a_failed_panel_read_is_reported_as_a_home_assistant_error(
     # then waits forever, and the REST view answers a plain-text traceback.
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     calendar.search.side_effect = failure
 
     with pytest.raises(HomeAssistantError):
@@ -848,7 +846,7 @@ async def test_a_partly_failed_poll_does_not_commit_the_sync_token(
     calendar = _calendar("Personal")
     calendar.objects_by_sync_token.return_value.sync_token = "token-1"
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     calendar.objects_by_sync_token.return_value.sync_token = "token-2"
 
     def half(**kw):
@@ -868,7 +866,7 @@ async def test_the_window_rolls_over_at_midnight(hass: HomeAssistant) -> None:
     calendar = _calendar("Personal")
     calendar.objects_by_sync_token.return_value.sync_token = "steady"
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     calls = calendar.search.call_count
     with patch(
@@ -893,7 +891,7 @@ async def test_an_event_without_a_uid_does_not_take_the_poll_down(
     item.props = {dav.GetEtag.tag: '"e"'}
     calendar.search.return_value = [item]
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     assert entity.coordinator.last_update_success is True
 
@@ -929,7 +927,7 @@ async def test_the_panel_gets_the_recurrence_rule_of_a_series(
         [master] if kw.get("expand") is False else [occurrence]
     )
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     events = await entity.async_get_events(
         hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
@@ -941,7 +939,7 @@ async def test_the_panel_gets_the_recurrence_rule_of_a_series(
 async def test_a_single_event_carries_no_recurrence_rule(hass: HomeAssistant) -> None:
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     calendar.search.return_value = [_search_item("Dentist", timedelta(days=1))]
 
     events = await entity.async_get_events(
@@ -975,7 +973,7 @@ async def test_a_series_that_stops_recurring_loses_its_recorded_rule(
         [body("RRULE:FREQ=WEEKLY\n")] if kw.get("expand") is False else [body("")]
     )
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     await entity.async_get_events(
         hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
     )
@@ -1004,7 +1002,7 @@ async def test_an_edit_leaves_the_etag_the_refresh_read_back(
 
     calendar.search.side_effect = search
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     assert entity.coordinator.etags == {"uid-1": '"v1"'}
 
     seen: dict = {}
@@ -1037,7 +1035,7 @@ async def test_a_poll_that_could_not_read_the_etags_keeps_its_token(
     calendar.search.side_effect = search
     calendar.objects_by_sync_token.return_value = Mock(sync_token="t2")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     assert coordinator.last_update_success
     assert coordinator._sync_token is None
@@ -1049,7 +1047,7 @@ async def test_a_half_that_keeps_failing_stops_looking_healthy(
     """A months-old snapshot nobody can tell is old also validates writes."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     tokens = iter(f"t{n}" for n in range(99))
     calendar.objects_by_sync_token.side_effect = lambda _token: Mock(
@@ -1069,8 +1067,8 @@ async def test_a_half_that_keeps_failing_stops_looking_healthy(
     assert coordinator.halves["todos"].dead
     assert not coordinator.halves["events"].dead
     await hass.async_block_till_done()
-    assert hass.states.get("todo.iven_personal").state == STATE_UNAVAILABLE
-    assert hass.states.get("calendar.iven_personal").state != STATE_UNAVAILABLE
+    assert hass.states.get("todo.personal").state == STATE_UNAVAILABLE
+    assert hass.states.get("calendar.personal").state != STATE_UNAVAILABLE
 
 
 def _raise(err: Exception):
@@ -1084,7 +1082,7 @@ async def test_a_server_that_never_moves_its_sync_token_is_read_again(
     calendar = _calendar("Personal")
     calendar.objects_by_sync_token.return_value = Mock(sync_token="frozen")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     calendar.search.reset_mock()
     await coordinator.async_refresh()
@@ -1102,7 +1100,7 @@ async def test_an_edit_without_a_rule_leaves_the_recurrence_alone(
     """expand strips RRULE from what the frontend echoes back, so an absent
     rule is never a request to drop the series."""
     await _setup(hass, [_calendar("Personal")])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     with patch("custom_components.ha_caldav.calendar.update_event") as update:
         await entity.async_update_event("uid-1", _event_fields())
@@ -1114,7 +1112,7 @@ async def test_a_cleared_description_is_removed_not_emptied(
     hass: HomeAssistant,
 ) -> None:
     await _setup(hass, [_calendar("Personal")])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     with patch("custom_components.ha_caldav.calendar.update_event") as update:
         await entity.async_update_event("uid-1", _event_fields() | {"description": ""})
@@ -1137,7 +1135,7 @@ async def test_the_panel_etags_and_the_polled_ones_live_side_by_side(
 
     calendar.search.side_effect = search
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
     assert coordinator.etags == {"near-1": '"near"'}
 
     window = dt_util.now() + timedelta(days=80)
@@ -1157,7 +1155,7 @@ async def test_a_server_that_puts_no_etag_on_a_window_still_reports_a_read(
         sync_token=object()
     )
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     await coordinator.async_refresh()
 
@@ -1171,7 +1169,7 @@ async def test_a_transient_403_during_a_poll_does_not_force_a_reauth(
     """caldav raises the same error for 403, which a proxy produces in passing."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
     calendar.search.side_effect = AuthorizationError(
         url="https://cloud.example.com/dav/", reason="Forbidden"
     )
@@ -1200,7 +1198,7 @@ async def test_a_window_the_server_put_no_etag_on_reads_as_unread(
         [stripped] if kw.get("expand") is False else []
     )
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     start = dt_util.utcnow()
 
@@ -1229,7 +1227,7 @@ async def test_the_recorded_rule_comes_off_the_master_of_the_object(
     )
 
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     assert entity.coordinator.rrules == {"series-1": "FREQ=WEEKLY"}
 
@@ -1241,7 +1239,7 @@ async def test_a_dead_half_still_lets_the_other_one_read(
     freeze at whatever they held when the other broke."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     tokens = iter(f"t{n}" for n in range(99))
     calendar.objects_by_sync_token.side_effect = lambda _token: Mock(
@@ -1273,7 +1271,7 @@ async def test_a_dead_half_keeps_the_other_ones_data_and_etags_together(
     never showed, and overwrite the change that had arrived with it."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     tokens = iter(f"t{n}" for n in range(99))
     calendar.objects_by_sync_token.side_effect = lambda _token: Mock(
@@ -1315,7 +1313,7 @@ async def test_a_half_that_recovers_starts_counting_again(
     over days of ordinary flakiness and then fails every poll for good."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     tokens = iter(f"t{n}" for n in range(99))
     calendar.objects_by_sync_token.side_effect = lambda _token: Mock(
@@ -1365,7 +1363,7 @@ async def test_one_unplaceable_event_does_not_cost_the_collection_its_entities(
     dt_util.set_default_time_zone(ZoneInfo("Europe/Berlin"))
     try:
         await _setup(hass, [calendar])
-        entity = _entity(hass, "calendar.iven_personal")
+        entity = _entity(hass, "calendar.personal")
 
         assert entity.coordinator.last_update_success
         assert entity.event.summary == "Upcoming"
@@ -1385,7 +1383,7 @@ async def test_a_polled_window_survives_an_etag_cache_at_its_limit(
 
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
     coordinator.etags = {f"old-{n}": f'"o{n}"' for n in range(_CACHE_LIMIT)}
     # Left behind by a window the panel asked for, so the poll's window does
     # not name them and none of them counts as gone. They are exactly what the
@@ -1407,7 +1405,7 @@ async def test_a_todo_report_without_etags_does_not_empty_the_cache(
     of those items goes out with nothing to check against - silently."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     tokens = iter(f"t{n}" for n in range(99))
     calendar.objects_by_sync_token.side_effect = lambda _token: Mock(
@@ -1441,7 +1439,7 @@ async def test_a_poll_already_reading_cannot_restore_an_etag_a_write_dropped(
     has the user's own next edit refused as somebody else's change."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     read_at = coordinator._etag_epoch
     coordinator.etags = {"uid-1": '"v1"'}
@@ -1487,7 +1485,7 @@ async def test_two_edits_of_one_collection_do_not_run_at_the_same_time(
     overlap, so a mock here reports no conflict whatever the lock does.
     """
     await _setup(hass, [_calendar("Personal")])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     inside = 0
     overlapped = False
 
@@ -1520,7 +1518,7 @@ async def test_the_panel_creates_an_event_through_the_platform_call(
             "calendar",
             "create_event",
             {
-                "entity_id": "calendar.iven_personal",
+                "entity_id": "calendar.personal",
                 "summary": "Standup",
                 "start_date_time": "2026-07-06 09:00:00",
                 "end_date_time": "2026-07-06 10:00:00",
@@ -1544,7 +1542,7 @@ async def test_an_edit_from_the_panel_carries_the_rule_it_was_given(
     the recurrence editor did set has to reach the write path all the same."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
 
     with patch("custom_components.ha_caldav.calendar.update_event") as write:
         await entity.async_update_event(
@@ -1568,7 +1566,7 @@ async def test_a_colour_hook_that_arrives_before_registration_is_ignored(
     made from a service against a freshly built entity would."""
     calendar = _calendar("Personal")
     entry = await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.iven_personal")
+    entity = _entity(hass, "calendar.personal")
     entity.registry_entry = None
 
     entity.async_registry_entry_updated()
@@ -1594,7 +1592,7 @@ async def test_a_collection_that_holds_no_events_is_not_searched(
     ):
         await _setup(hass, [calendar])
     coordinator = (
-        hass.data["entity_components"]["todo"].get_entity("todo.iven_tasks").coordinator
+        hass.data["entity_components"]["todo"].get_entity("todo.tasks").coordinator
     )
     calendar.search.reset_mock()
 
@@ -1622,7 +1620,7 @@ async def test_a_dead_half_beside_one_still_serving_is_not_a_failed_poll(
         sync_token=object()
     )
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
     # Never read at all, so the list is dead from the very first poll.
     assert coordinator.halves["todos"].dead
 
@@ -1632,8 +1630,8 @@ async def test_a_dead_half_beside_one_still_serving_is_not_a_failed_poll(
 
     assert coordinator.last_update_success is True
     assert coordinator.data.next_event.summary == "Standup"
-    assert hass.states.get("calendar.iven_personal").state != STATE_UNAVAILABLE
-    assert hass.states.get("todo.iven_personal").state == STATE_UNAVAILABLE
+    assert hass.states.get("calendar.personal").state != STATE_UNAVAILABLE
+    assert hass.states.get("todo.personal").state == STATE_UNAVAILABLE
 
 
 async def test_a_401_beside_a_half_that_read_cleanly_is_not_a_reauth(
@@ -1644,7 +1642,7 @@ async def test_a_401_beside_a_half_that_read_cleanly_is_not_a_reauth(
         sync_token=object()
     )
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     def search(**kwargs):
         if kwargs.get("todo"):
@@ -1674,7 +1672,7 @@ async def test_a_401_beside_one_bad_minute_is_not_a_reauth(
         sync_token=object()
     )
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
 
     def search(**kwargs):
         if kwargs.get("todo"):
@@ -1704,7 +1702,7 @@ async def test_a_401_reauths_beside_a_half_that_has_been_broken_for_good(
         sync_token=object()
     )
     await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.iven_personal").coordinator
+    coordinator = _entity(hass, "calendar.personal").coordinator
     broken = "events" if unauthorized == "todos" else "todos"
 
     def half_of(kwargs):

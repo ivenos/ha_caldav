@@ -238,6 +238,26 @@ update_event:
           selector:
             object:
 
+delete_event:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: calendar
+  fields:
+    uid:
+      required: true
+      selector:
+        text:
+    recurrence_id:
+      selector:
+        text:
+    recurrence_range:
+      selector:
+        select:
+          translation_key: recurrence_range
+          options:
+            - thisandfuture
+
 move_event:
   target:
     entity:

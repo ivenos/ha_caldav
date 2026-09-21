@@ -54,13 +54,13 @@ async def _setup(hass: HomeAssistant, options: dict | None = None):
 
 def _entity(hass: HomeAssistant):
     component: EntityComponent = hass.data["entity_components"]["todo"]
-    return component.get_entity("todo.iven_personal")
+    return component.get_entity("todo.personal")
 
 
 async def test_todo_list_per_calendar_with_full_crud(hass: HomeAssistant) -> None:
     await _setup(hass)
 
-    state = hass.states.get("todo.iven_personal")
+    state = hass.states.get("todo.personal")
     assert state is not None
 
     features = state.attributes["supported_features"]
@@ -74,7 +74,7 @@ async def test_todo_list_per_calendar_with_full_crud(hass: HomeAssistant) -> Non
 async def test_read_only_hides_write_features(hass: HomeAssistant) -> None:
     await _setup(hass, options={CONF_READ_ONLY: True})
 
-    assert hass.states.get("todo.iven_personal").attributes["supported_features"] == 0
+    assert hass.states.get("todo.personal").attributes["supported_features"] == 0
 
 
 async def test_create_forwards_mapped_status(hass: HomeAssistant) -> None:
@@ -308,7 +308,7 @@ async def test_dropping_an_item_where_it_already_is_writes_nothing(
 async def test_move_is_offered_as_a_feature(hass: HomeAssistant) -> None:
     await _setup(hass)
 
-    features = hass.states.get("todo.iven_personal").attributes["supported_features"]
+    features = hass.states.get("todo.personal").attributes["supported_features"]
     assert features & TodoListEntityFeature.MOVE_TODO_ITEM
 
 
@@ -453,7 +453,7 @@ async def test_a_new_item_carries_its_due_date_and_description(
             "todo",
             "add_item",
             {
-                "entity_id": "todo.iven_personal",
+                "entity_id": "todo.personal",
                 "item": "Buy milk",
                 "due_date": "2026-07-10",
                 "description": "Two litres",

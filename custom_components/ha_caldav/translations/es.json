@@ -494,6 +494,24 @@
         }
       }
     },
+    "delete_event": {
+      "name": "Eliminar evento",
+      "description": "Elimina un evento, una ocurrencia concreta de una serie o una ocurrencia y todas las siguientes.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "El UID del evento a eliminar."
+        },
+        "recurrence_id": {
+          "name": "ID de recurrencia",
+          "description": "La ocurrencia concreta a eliminar, en una serie recurrente."
+        },
+        "recurrence_range": {
+          "name": "Alcance de la recurrencia",
+          "description": "THISANDFUTURE para eliminar esta ocurrencia y todas las siguientes."
+        }
+      }
+    },
     "move_event": {
       "name": "Mover evento",
       "description": "Mueve un evento a otro calendario.",

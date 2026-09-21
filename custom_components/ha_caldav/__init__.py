@@ -40,6 +40,7 @@ from .connection import (
     url_candidates,
 )
 from .const import (
+    CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
     CONF_DAYS,
     CONF_INCLUDE_ALL_DAY,
@@ -77,16 +78,19 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_migrate_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> bool:
     """Normalize the account key of an entry, and the keys of its entities.
 
-    Home Assistant runs this only while the stored MINOR_VERSION is behind the
-    handler's, so the number has to move with every change of key shape.
+    Home Assistant runs this whenever the stored MINOR_VERSION differs from
+    the handler's, so the number has to move with every change of key shape.
     """
+    if entry.version > 1:
+        return False
     _LOGGER.debug("Migrating %s to the normalized keys", entry.title)
     _async_migrate_entity_keys(hass, entry)
-    hass.config_entries.async_update_entry(
-        entry,
-        unique_id=account_key(entry.data[CONF_URL], entry.data[CONF_USERNAME]),
-        minor_version=2,
-    )
+    unique_id = account_key(entry.data[CONF_URL], entry.data[CONF_USERNAME])
+    held = hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, unique_id)
+    if held is not None and held.entry_id != entry.entry_id:
+        _LOGGER.warning("%s is set up twice, as %s too", entry.title, held.title)
+        unique_id = entry.unique_id
+    hass.config_entries.async_update_entry(entry, unique_id=unique_id, minor_version=2)
     return True
 
 
@@ -128,6 +132,7 @@ def _normalized_unique_id(entry_id: str, unique_id: str, domain: str) -> str | N
 async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> bool:
     """Set up the CalDAV account from a config entry."""
     client, calendars = await _async_connect(hass, entry)
+    _async_key_by_url(hass, entry, calendars)
 
     async def close_client() -> None:
         # Tearing down pooled sockets blocks.
@@ -219,8 +224,13 @@ async def _async_connect(
     # Driven from the executor: reaching the bootstrap url asks the server.
     candidates = url_candidates(entry.data[CONF_URL], kwargs)
     while url := await hass.async_add_executor_job(next, candidates, None):
-        client = build_client(
-            url, entry.data[CONF_USERNAME], entry.data[CONF_PASSWORD], kwargs
+        # In the executor: a niquests session imports its resolver on creation.
+        client = await hass.async_add_executor_job(
+            build_client,
+            url,
+            entry.data[CONF_USERNAME],
+            entry.data[CONF_PASSWORD],
+            kwargs,
         )
         try:
             calendars = await hass.async_add_executor_job(_list_calendars, client)
@@ -243,6 +253,43 @@ async def _async_connect(
     raise ConfigEntryNotReady(
         f"Cannot connect to CalDAV server: {type(last_error).__name__}"
     )
+
+
+@callback
+def _async_key_by_url(
+    hass: HomeAssistant, entry: HaCaldavConfigEntry, calendars: list[caldav.Calendar]
+) -> None:
+    """Rewrite what an entry keeps by display name onto the calendar's url.
+
+    Entries written before v1.2.0 selected and overrode by name, which a
+    rename breaks. A name no calendar carries right now stays as it is.
+    """
+    keys = {calendar_key(calendar.url) for calendar in calendars}
+    shown: dict[str, list[str]] = {}
+    named: dict[str, list[str]] = {}
+    for calendar in calendars:
+        key = calendar_key(calendar.url)
+        shown.setdefault(display_name(calendar), []).append(key)
+        named.setdefault(calendar.name or "", []).append(key)
+    options = dict(entry.options)
+    if selected := options.get(CONF_CALENDARS):
+        rewritten: list[str] = []
+        for item in selected:
+            for key in [item] if item in keys else shown.get(item, [item]):
+                if key not in rewritten:
+                    rewritten.append(key)
+        options[CONF_CALENDARS] = rewritten
+    if overrides := options.get(CONF_CALENDAR_OPTIONS):
+        rekeyed = {item: value for item, value in overrides.items() if item in keys}
+        for item, value in overrides.items():
+            if item in keys:
+                continue
+            for key in named.get(item, [item]):
+                rekeyed.setdefault(key, value)
+        options[CONF_CALENDAR_OPTIONS] = rekeyed
+    if options != entry.options:
+        _LOGGER.debug("Keying the calendars of %s by url", entry.title)
+        hass.config_entries.async_update_entry(entry, options=options)
 
 
 def _list_calendars(client: caldav.DAVClient) -> list[caldav.Calendar]:
@@ -291,9 +338,9 @@ def _async_follow_the_server(
     loaded: set[str],
     include_new: bool,
 ) -> CALLBACK_TYPE:
-    """Reload the entry once the color poll finds a loaded calendar renamed.
+    """Reload the entry once the color poll finds a loaded calendar renamed or gone.
 
-    With include_new, also once it finds a collection it has not seen. Both
+    With include_new, also once it finds a collection it has not seen. All
     against the previous poll, not the calendar list: the poll reads every
     child of the home set, the inbox and outbox too.
     """
@@ -307,9 +354,8 @@ def _async_follow_the_server(
         if previous is not None and (
             (include_new and found.keys() - previous.keys())
             or any(
-                key in found
-                and key in previous
-                and found[key].name != previous[key].name
+                key in previous
+                and (key not in found or found[key].name != previous[key].name)
                 for key in loaded
             )
         ):

@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "CalDAV-Konto",
-        "description": "Die URL des CalDAV-Servers und die Zugangsdaten eingeben.",
+        "description": "Gib die URL des CalDAV-Servers und deine Zugangsdaten ein.",
         "data": {
           "url": "Server-URL",
           "username": "Benutzername",
@@ -11,8 +11,8 @@
           "verify_ssl": "SSL-Zertifikat prüfen"
         },
         "data_description": {
-          "url": "Die Adresse des CalDAV-Servers. Bei den meisten Servern reicht der bloße Hostname.",
-          "verify_ssl": "Eingeschaltet lassen, solange kein Grund dagegen spricht. Ist es aus, kann jeder zwischen Home Assistant und dem Server das Passwort mitlesen."
+          "url": "Die Adresse deines CalDAV-Servers. Bei den meisten Servern reicht der bloße Hostname.",
+          "verify_ssl": "Lass das eingeschaltet, solange kein Grund dagegen spricht. Ist es aus, kann sich jeder, der die Verbindung abfängt, als Server ausgeben und das Passwort mitlesen."
         },
         "sections": {
           "certificates": {
@@ -39,8 +39,8 @@
           "verify_ssl": "SSL-Zertifikat prüfen"
         },
         "data_description": {
-          "url": "Die Adresse des CalDAV-Servers. Bei den meisten Servern reicht der bloße Hostname.",
-          "verify_ssl": "Eingeschaltet lassen, solange kein Grund dagegen spricht. Ist es aus, kann jeder zwischen Home Assistant und dem Server das Passwort mitlesen."
+          "url": "Die Adresse deines CalDAV-Servers. Bei den meisten Servern reicht der bloße Hostname.",
+          "verify_ssl": "Lass das eingeschaltet, solange kein Grund dagegen spricht. Ist es aus, kann sich jeder, der die Verbindung abfängt, als Server ausgeben und das Passwort mitlesen."
         },
         "sections": {
           "certificates": {
@@ -61,7 +61,7 @@
       },
       "reauth_confirm": {
         "title": "Bei CalDAV neu anmelden",
-        "description": "Das Passwort für {username} wird nicht mehr akzeptiert. Bitte das aktuelle eingeben.",
+        "description": "Das Passwort für {username} wird nicht mehr akzeptiert. Gib das aktuelle ein.",
         "data": {
           "password": "Passwort"
         }
@@ -70,10 +70,13 @@
     "error": {
       "invalid_auth": "Ungültige Authentifizierung",
       "cannot_connect": "Verbindung fehlgeschlagen",
-      "unknown": "Unerwarteter Fehler"
+      "unknown": "Unerwarteter Fehler",
+      "invalid_url": "Die URL ist keine http- oder https-Adresse",
+      "certificate_not_found": "Ein Pfad unter Zertifikate führt zu keiner Datei",
+      "certificate_failed": "Die TLS-Verbindung ist fehlgeschlagen: Das Serverzertifikat ließ sich nicht prüfen, oder der Server hat das Client-Zertifikat abgelehnt"
     },
     "abort": {
-      "already_configured": "Konto ist bereits konfiguriert",
+      "already_configured": "Dieses Konto ist bereits eingerichtet",
       "reauth_successful": "Die erneute Authentifizierung war erfolgreich",
       "reconfigure_successful": "Die Verbindung wurde aktualisiert",
       "already_in_progress": "Konfigurationsablauf wird bereits ausgeführt"
@@ -130,13 +133,13 @@
       }
     },
     "error": {
-      "no_calendars": "Mindestens einen Kalender auswählen; ein Konto ohne einen hat überhaupt keine Entitäten."
+      "no_calendars": "Wähle mindestens einen Kalender aus; ein Konto ohne Kalender hat keine Entitäten."
     }
   },
   "issues": {
     "builtin_caldav_conflict": {
       "title": "Die eingebaute CalDAV-Integration nutzt dasselbe Konto",
-      "description": "Das Konto {account} ist auch in der eingebauten CalDAV-Integration eingerichtet, sodass jeder Kalender und jede To-do-Liste doppelt erscheint. Eine der beiden entfernen."
+      "description": "Das Konto {account} ist auch in der eingebauten CalDAV-Integration eingerichtet, sodass jeder Kalender und jede To-do-Liste doppelt erscheint. Entferne eine der beiden."
     },
     "no_sync_collection": {
       "title": "Der Server kann keine Änderungen melden",
@@ -148,7 +151,7 @@
       "message": "Eine Serie lässt sich nicht zwischen ganztägig und zeitgebunden umstellen."
     },
     "ambiguous_calendar": {
-      "message": "Dieses Konto hat mehrere Kalender namens {name}; zuerst einen davon umbenennen."
+      "message": "Dieses Konto hat mehrere Kalender namens {name}; benenne zuerst einen davon um."
     },
     "bad_recurrence_id": {
       "message": "{value} ist weder ein Datum noch ein Zeitpunkt."
@@ -159,11 +162,14 @@
     "document_no_uid": {
       "message": "Das Dokument enthält eine Komponente ohne UID."
     },
+    "duplicate_uid": {
+      "message": "Das Dokument enthält mehr als einen Eintrag mit der UID {uid}."
+    },
     "end_before_start": {
       "message": "Das Ende liegt vor dem Start."
     },
     "etag_conflict": {
-      "message": "Dieser Eintrag hat sich auf dem Server geändert, seit Home Assistant ihn zuletzt gelesen hat. Den Kalender neu laden und die Änderung erneut vornehmen."
+      "message": "Dieser Eintrag hat sich auf dem Server geändert, seit Home Assistant ihn zuletzt gelesen hat. Lade den Kalender neu und nimm die Änderung erneut vor."
     },
     "invalid_rrule": {
       "message": "Die Wiederholungsregel ist ungültig: {reason}"
@@ -184,7 +190,7 @@
       "message": "Dieser Eintrag ist nicht als Aufgabe gespeichert und lässt sich hier nicht ändern."
     },
     "not_an_attendee": {
-      "message": "Dieser Termin führt das eigene Konto nicht als Teilnehmer."
+      "message": "Dieser Termin führt dein Konto nicht als Teilnehmer."
     },
     "not_found": {
       "message": "Dieser Eintrag liegt nicht mehr auf dem Server."
@@ -196,7 +202,7 @@
       "message": "Diese Serie hat keine Wiederholung am {recurrence_id}."
     },
     "ranged_override": {
-      "message": "Diese Serie enthält eine Ausnahme, die ab einer Wiederholung für alle folgenden gilt. In der App bearbeiten, die sie erstellt hat."
+      "message": "Diese Serie enthält eine Ausnahme, die ab einer Wiederholung für alle folgenden gilt. Bearbeite sie in der App, die sie erstellt hat."
     },
     "rdate_split": {
       "message": "Diese Wiederholung wurde der Serie von Hand hinzugefügt, und dort lässt sich eine Serie nicht teilen."
@@ -214,7 +220,7 @@
       "message": "Die Wiederholungsregel erzeugt zu viele Wiederholungen, um sie durchzugehen."
     },
     "same_calendar": {
-      "message": "Der Termin liegt bereits in {name}. Einen anderen Kalender wählen."
+      "message": "Der Termin liegt bereits in {name}. Wähle einen anderen Kalender."
     },
     "server_error": {
       "message": "Der Aufruf an den CalDAV-Server ist fehlgeschlagen ({action}). Einzelheiten stehen im Log."
@@ -416,7 +422,7 @@
         },
         "recurrence_range": {
           "name": "Wiederholungsbereich",
-          "description": "THISANDFUTURE ändert diese Wiederholung und alle folgenden."
+          "description": "Ändert auch alle folgenden Wiederholungen."
         },
         "summary": {
           "name": "Titel",
@@ -508,7 +514,7 @@
         },
         "recurrence_range": {
           "name": "Wiederholungsbereich",
-          "description": "THISANDFUTURE löscht diese Wiederholung und alle folgenden."
+          "description": "Löscht auch alle folgenden Wiederholungen."
         }
       }
     },

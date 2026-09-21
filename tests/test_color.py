@@ -58,7 +58,8 @@ PERSONAL_HREF = f"{PERSONAL_PATH}/"
         # Rejected at the last digit, not the first: Home Assistant validates
         # what registration writes but not what a later poll does.
         ("#00679z", None),
-        ("red", None),
+        ("red", "#ff0000"),
+        ("Navy", "#000080"),
         ("", None),
         (None, None),
         (0x00679E, None),
@@ -720,7 +721,7 @@ async def test_setup_survives_a_server_that_cannot_answer(
     assert "color" not in _options(hass).get("calendar", {})
 
 
-async def test_a_failed_colour_read_names_no_url_and_no_body(
+async def test_a_failed_color_read_names_no_url_and_no_body(
     hass: HomeAssistant,
 ) -> None:
     """UpdateFailed is logged at error level, in the plain log.
@@ -772,3 +773,9 @@ async def test_writing_a_color_after_a_hand_pick_makes_the_calendar_follow_again
 
     assert _options(hass)["calendar"]["color"] == "#cccccc"
     assert _options(hass)[COLOR_STATE] == {"color": "#cccccc", "override": False}
+
+
+def test_fetch_collections_keys_an_absolute_href_by_its_path() -> None:
+    client = _client({"https://cloud.example.com/dav/a%20b/": "#00679e"})
+
+    assert fetch_collections(client) == {"/dav/a%20b": Collection("#00679e", None)}

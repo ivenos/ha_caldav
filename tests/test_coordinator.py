@@ -261,11 +261,11 @@ def vtodo(body: str):
 
 def test_to_todo_maps_every_field() -> None:
     item = to_todo(
-        vtodo("SUMMARY:Buy milk\nDESCRIPTION:Two litres\nDUE;VALUE=DATE:20260710")
+        vtodo("SUMMARY:Buy milk\nDESCRIPTION:Two liters\nDUE;VALUE=DATE:20260710")
     )
     assert item.uid == "todo-1"
     assert item.summary == "Buy milk"
-    assert item.description == "Two litres"
+    assert item.description == "Two liters"
     assert item.due == date(2026, 7, 10)
     assert item.status is TodoItemStatus.NEEDS_ACTION
 

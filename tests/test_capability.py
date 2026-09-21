@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 from caldav.davclient import DAVResponse
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ha_caldav.capability import (
@@ -529,3 +530,35 @@ def test_an_absolute_href_is_ignored_when_there_is_nothing_to_check_it_against(
     home.get_properties.return_value = Mock(tree=ET.fromstring(body))
 
     assert fetch_capabilities(client) == {}
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "https://CAL.example.com/dav/bob/tasks/",
+        "https://cal.example.com:443/dav/bob/tasks/",
+    ],
+    ids=["host_case", "default_port"],
+)
+def test_an_absolute_href_on_the_same_server_spelled_otherwise_counts(
+    href: str,
+) -> None:
+    import xml.etree.ElementTree as ET
+
+    from custom_components.ha_caldav.capability import fetch_capabilities
+
+    body = (
+        '<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">'
+        f"<D:response><D:href>{href}</D:href>"
+        "<D:propstat><D:prop><C:supported-calendar-component-set>"
+        '<C:comp name="VTODO"/>'
+        "</C:supported-calendar-component-set></D:prop>"
+        "<D:status>HTTP/1.1 200 OK</D:status></D:propstat>"
+        "</D:response></D:multistatus>"
+    )
+    client = Mock()
+    home = client.principal.return_value.calendar_home_set
+    home.url = "https://cal.example.com/dav/bob/"
+    home.get_properties.return_value = Mock(tree=ET.fromstring(body))
+
+    assert not fetch_capabilities(client)["/dav/bob/tasks"].supports_events

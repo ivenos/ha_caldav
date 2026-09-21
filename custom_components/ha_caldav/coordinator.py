@@ -12,7 +12,6 @@ from typing import Any
 
 import caldav
 from caldav.elements import dav
-from caldav.lib.error import AuthorizationError
 from homeassistant.components.calendar import CalendarEvent
 from homeassistant.components.todo import TodoItem, TodoItemStatus
 from homeassistant.config_entries import ConfigEntry
@@ -24,7 +23,7 @@ import homeassistant.util.dt as dt_util
 from .capability import Capability
 from .color import Collection, fetch_collections
 from .connection import calendar_key
-from .errors import NETWORK_ERRORS
+from .errors import NETWORK_ERRORS, rejected
 from .event import read_extras
 
 _LOGGER = logging.getLogger(__name__)
@@ -140,11 +139,6 @@ class _Half:
     error: Exception | None = None
 
 
-def _rejected(err: Exception | None) -> bool:
-    """Return whether an error is a 401; caldav raises the same type for 403."""
-    return isinstance(err, AuthorizationError) and err.reason == "Unauthorized"
-
-
 def calendar_unique_id(entry_id: str, url: object) -> str:
     """Return the unique id of a calendar entity.
 
@@ -204,6 +198,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         self._window: tuple[datetime, datetime] | None = None
         self._etags_missed = False
         self._fetched_at: datetime | None = None
+        self._moved_on: tuple[Any, CalendarEvent | None, dict[str, Any]] | None = None
         self.halves = {
             "events": _Half(capability.supports_events),
             "todos": _Half(capability.supports_todos),
@@ -219,6 +214,36 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             "kept_polls": {name: half.misses for name, half in halves.items()},
             "dead": {name: half.dead for name, half in halves.items()},
         }
+
+    def upcoming(self) -> tuple[CalendarEvent | None, dict[str, Any]]:
+        """Return the upcoming event and its extras, moving on once one has ended.
+
+        The state is written again when an event ends, which may be long
+        before the next poll.
+        """
+        if (data := self.data) is None:
+            return None, {}
+        now = dt_util.now()
+        if data.next_event is None or now < data.next_event.end_datetime_local:
+            return data.next_event, data.extras
+        held = self._moved_on
+        if (
+            held is None
+            or held[0] is not data
+            or (held[1] is not None and now >= held[1].end_datetime_local)
+        ):
+            found = self._next_event()
+            held = (
+                (data, None, {})
+                if found is None
+                else (
+                    data,
+                    found[1],
+                    read_extras(found[0]),
+                )
+            )
+            self._moved_on = held
+        return held[1], held[2]
 
     async def async_get_events(
         self, hass: HomeAssistant, start_date: datetime, end_date: datetime
@@ -287,12 +312,10 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         """
         try:
             return await self._async_snapshot()
-        except AuthorizationError as err:
-            if err.reason == "Unauthorized":
+        except Exception as err:
+            if rejected(err):
                 _LOGGER.debug("Authorization failed for %s: %s", self.name, err)
                 raise ConfigEntryAuthFailed("Authorization failed") from err
-            raise self._failure(err) from err
-        except Exception as err:
             # caldav asserts its way out of a response it does not expect.
             raise self._failure(err) from err
 
@@ -353,9 +376,9 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             self._commit_todos(read)
         failed = [half for half in self.halves.values() if half.error is not None]
         if failed and len(failed) == self._halves:
-            rejected = [half.error for half in failed if _rejected(half.error)]
-            if rejected and all(half.dead or _rejected(half.error) for half in failed):
-                raise rejected[0]
+            refused = [half.error for half in failed if rejected(half.error)]
+            if refused and all(half.dead or rejected(half.error) for half in failed):
+                raise refused[0]
             if all(half.dead for half in failed):
                 raise failed[0].error
         return not failed

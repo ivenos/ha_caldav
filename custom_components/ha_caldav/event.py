@@ -99,6 +99,24 @@ def _aligned(recur: Any, dtstart: datetime | date) -> str:
     return fixed.to_ical().decode("utf-8")
 
 
+def framed_rule(recur: Any, dtstart: datetime | date) -> Any:
+    """Return the rule with its UNTIL in the form RFC 5545 3.3.10 ties to DTSTART.
+
+    The Home Assistant editor writes the UNTIL of a zoned series as UTC digits
+    without the Z.
+    """
+    values = recur.get("UNTIL")
+    if not values:
+        return recur
+    until = values[0] if isinstance(values, list) else values
+    framed = until_frame(dtstart, until)
+    if not isinstance(dtstart, datetime) and isinstance(framed, datetime):
+        framed = framed.date()
+    fixed = vRecur(dict(recur))
+    fixed["UNTIL"] = [framed]
+    return fixed
+
+
 def until_frame(dtstart: datetime | date, until: datetime | date) -> datetime | date:
     """Return an UNTIL read in the frame the DTSTART beside it is written in.
 
@@ -144,6 +162,46 @@ def hold_sequence(component: Any) -> None:
 def as_datetime(value: datetime | date) -> datetime:
     """Return a value as a datetime, a plain date at the start of its day."""
     return value if isinstance(value, datetime) else datetime.combine(value, time.min)
+
+
+def shifted(value: Any, delta: timedelta, zone: Any) -> Any:
+    """Shift in the series' wall clock, keeping the value's representation."""
+    if isinstance(value, tuple):
+        end = (
+            shifted(value[1], delta, zone)
+            if isinstance(value[1], datetime)
+            else value[1]
+        )
+        return (shifted(value[0], delta, zone), end)
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        return value + delta
+    anchor = zone or dt_util.get_default_time_zone()
+    wall = value.astimezone(anchor).replace(tzinfo=None) + delta
+    return wall.replace(tzinfo=anchor).astimezone(value.tzinfo)
+
+
+def _dts(entry: Any) -> list[Any]:
+    """Return the value holders of an EXDATE/RDATE entry.
+
+    A parsed line is a vDDDLists exposing .dts; a single value added at
+    runtime is a bare vDDDTypes.
+    """
+    return entry.dts if hasattr(entry, "dts") else [entry]
+
+
+def date_values(component: Any, key: str) -> list[Any]:
+    """Return every value of an EXDATE or RDATE property, over all its lines."""
+    if key not in component:
+        return []
+    entries = component[key]
+    if not isinstance(entries, list):
+        entries = [entries]
+    return [item.dt for entry in entries for item in _dts(entry)]
+
+
+def start_of(value: Any) -> datetime | date:
+    """Return the start of an RDATE value, which may be a period."""
+    return value[0] if isinstance(value, tuple) else value
 
 
 def read_extras(vevent: Any) -> dict[str, Any]:
@@ -378,12 +436,12 @@ def _set_alarms(component: Any, alarms: list[Any]) -> None:
     """Replace the relative alarms with the given offsets.
 
     RFC 5545 requires a DESCRIPTION on a DISPLAY alarm and forbids one on
-    AUDIO. Absolute triggers stay: read_extras never showed them.
+    AUDIO. Absolute triggers and email alarms stay: nothing here writes them.
     """
     component.subcomponents = [
         sub
         for sub in component.subcomponents
-        if sub.name != "VALARM" or not _is_relative(sub)
+        if sub.name != "VALARM" or not _is_relative(sub) or not _written_here(sub)
     ]
     for alarm in alarms:
         spec = {"minutes_before": alarm} if isinstance(alarm, int) else dict(alarm)
@@ -397,6 +455,10 @@ def _set_alarms(component: Any, alarms: list[Any]) -> None:
         if action == "DISPLAY":
             valarm.add("DESCRIPTION", spec.get("description") or "Reminder")
         component.add_component(valarm)
+
+
+def _written_here(valarm: Any) -> bool:
+    return str(valarm.get("ACTION", "")).upper() in ("DISPLAY", "AUDIO")
 
 
 def _is_relative(valarm: Any) -> bool:

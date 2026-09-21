@@ -32,6 +32,7 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.ha_caldav import async_migrate_entry
 from custom_components.ha_caldav.connection import calendar_key
 from custom_components.ha_caldav.const import (
+    CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
     CONF_READ_ONLY,
     DOMAIN,
@@ -1047,3 +1048,94 @@ async def test_a_name_given_before_the_update_is_not_written_to_the_server(
 
     principal.calendars.return_value[0].set_properties.assert_not_called()
     assert hass.states.get("calendar.personal").name == "My calendar"
+
+
+async def test_a_selection_stored_by_name_survives_a_rename_on_the_server(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    # Entries written before v1.2.0 selected by display name.
+    entry = await _setup_on_account(hass, {CONF_CALENDARS: ["Personal"]})
+    assert entry.options[CONF_CALENDARS] == ["/remote.php/dav/Personal"]
+
+    _rename_on_server(principal, "Private")
+    await _next_poll(hass)
+
+    assert er.async_get(hass).async_get("calendar.personal") is not None
+    assert hass.states.get("calendar.personal").name == "Private"
+
+
+async def test_an_override_stored_by_name_is_keyed_by_url(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    entry = await _setup_on_account(
+        hass, {CONF_CALENDAR_OPTIONS: {"Personal": {CONF_READ_ONLY: True}}}
+    )
+
+    assert entry.options[CONF_CALENDAR_OPTIONS] == {
+        "/remote.php/dav/Personal": {CONF_READ_ONLY: True}
+    }
+
+
+async def test_a_calendar_deleted_on_the_server_reloads_the_entry(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    await _setup_on_account(hass)
+
+    principal.calendars.return_value = []
+    _home_set(principal)
+    await _next_poll(hass)
+
+    assert principal.calendars.call_count == 2
+
+
+async def test_an_entry_from_a_later_major_version_is_not_migrated(
+    hass: HomeAssistant,
+) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x", version=2)
+    entry.add_to_hass(hass)
+
+    await hass.config_entries.async_setup(entry.entry_id)
+
+    assert entry.state is ConfigEntryState.MIGRATION_ERROR
+
+
+async def test_a_second_spelling_of_one_account_keeps_its_own_key(
+    hass: HomeAssistant,
+) -> None:
+    held = MockConfigEntry(
+        domain=DOMAIN,
+        data=ENTRY_DATA,
+        unique_id="https://cloud.example.com/remote.php/dav#iven",
+        minor_version=2,
+    )
+    held.add_to_hass(hass)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={**ENTRY_DATA, CONF_URL: "https://Cloud.example.com:443/remote.php/dav/"},
+        unique_id="https://Cloud.example.com:443/remote.php/dav/#iven",
+        minor_version=1,
+    )
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry)
+
+    assert entry.unique_id == "https://Cloud.example.com:443/remote.php/dav/#iven"
+    assert entry.minor_version == 2
+
+
+async def test_a_rename_saved_with_a_new_entity_id_reaches_the_server(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    # Core re-adds the entity instead of reporting the update.
+    await _setup_on_account(hass)
+    calendar = _renamed_by_the_server(principal)
+
+    er.async_get(hass).async_update_entity(
+        "calendar.personal", name="Private", new_entity_id="calendar.private"
+    )
+    await hass.async_block_till_done()
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    calendar.set_properties.assert_called_once()
+    assert calendar.set_properties.call_args.args[0][0].value == "Private"

@@ -186,7 +186,7 @@ FLOW=$(curl -sf -X POST "$BASE/api/config/config_entries/flow" -H "$AUTH" -H "$J
     -d '{"handler":"ha_caldav"}' | python3 -c "import json, sys; print(json.load(sys.stdin)['flow_id'])")
 curl -sf -X POST "$BASE/api/config/config_entries/flow/$FLOW" -H "$AUTH" -H "$JSON" \
     -d '{"url":"http://dav.example.com:5232/","username":"jane","password":"screenshots","verify_ssl":true}' \
-    | python3 -c "import json, sys; r = json.load(sys.stdin); sys.exit(r.get('type') != 'create_entry' and print(r))"
+    | python3 -c "import json, sys; r = json.load(sys.stdin); sys.exit(None if r.get('type') == 'create_entry' else str(r))"
 
 printf 'waiting for the calendar colors'
 i=0

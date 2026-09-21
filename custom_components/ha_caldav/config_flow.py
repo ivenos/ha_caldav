@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import logging
+import os
 from typing import Any
 from urllib.parse import urlparse
 
 import caldav
+from caldav.davclient import requests
 from caldav.lib.error import AuthorizationError
 from homeassistant.config_entries import (
     ConfigEntry,
@@ -58,7 +60,7 @@ from .const import (
     DEFAULT_TIMEOUT,
     DOMAIN,
 )
-from .errors import CONNECTION_ERRORS
+from .errors import NETWORK_ERRORS
 from .options import account_settings, request_timeout
 
 _LOGGER = logging.getLogger(__name__)
@@ -226,7 +228,7 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
     ) -> ConfigFlowResult:
         """Offer the account-wide settings and the per-calendar overrides."""
         # The per-calendar step can only offer what this entry loaded.
-        if not await self._async_calendar_choices() or not self._managed():
+        if not self._managed():
             return await self.async_step_account()
         return self.async_show_menu(step_id="init", menu_options=["account", "pick"])
 
@@ -243,9 +245,8 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
             if CONF_CALENDARS in user_input and not user_input[CONF_CALENDARS]:
                 errors[CONF_CALENDARS] = "no_calendars"
             else:
-                # Merged: the calendars field is absent while the server is unreachable.
                 return self.async_create_entry(
-                    data={**options, **_selection(options, choices, user_input)}
+                    data=_account_options(options, choices, user_input)
                 )
 
         fields: dict[Any, Any] = {}
@@ -291,7 +292,7 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
         return self.async_show_form(
             step_id="pick",
             data_schema=vol.Schema(
-                {vol.Required(CONF_CALENDAR): vol.In(_labelled(self._managed()))}
+                {vol.Required(CONF_CALENDAR): vol.In(_labeled(self._managed()))}
             ),
         )
 
@@ -387,7 +388,7 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
             # As broad as the setup path: the options have to stay reachable
             # while the server misbehaves.
             _LOGGER.debug("Could not list calendars: %s", err)
-            return {}
+            self._choices = {}
         return self._choices
 
 
@@ -440,27 +441,30 @@ def _selected_keys(options: Mapping[str, Any], choices: dict[str, str]) -> list[
     return [key for key, name in choices.items() if key in stored or name in stored]
 
 
-def _selection(
+def _account_options(
     options: Mapping[str, Any], choices: dict[str, str], user_input: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Return the submitted settings with the calendar list made safe to store.
+    """Return the options to store after the account step.
 
-    A calendar the server left out of this one listing must not read as
-    deselected, and an entry without a selection keeps following the server.
+    The calendars field is absent while the server is unreachable. A calendar
+    the server left out of this one listing must not read as deselected, and
+    ticking every calendar goes back to following the server.
     """
+    merged = {**options, **user_input}
     submitted = user_input.get(CONF_CALENDARS)
     if submitted is None:
-        return dict(user_input)
-    stored = options.get(CONF_CALENDARS)
-    if stored is None:
-        if set(submitted) == set(choices):
-            return {
-                key: value for key, value in user_input.items() if key != CONF_CALENDARS
-            }
-        return dict(user_input)
+        return merged
     names = set(choices.values())
-    unlisted = [item for item in stored if item not in choices and item not in names]
-    return {**user_input, CONF_CALENDARS: [*submitted, *unlisted]}
+    unlisted = [
+        item
+        for item in options.get(CONF_CALENDARS) or []
+        if item not in choices and item not in names
+    ]
+    if set(submitted) >= set(choices) and not unlisted:
+        del merged[CONF_CALENDARS]
+    else:
+        merged[CONF_CALENDARS] = [*submitted, *unlisted]
+    return merged
 
 
 def _title(url: str, username: str) -> str:
@@ -508,7 +512,7 @@ def _calendar_choices(client: caldav.DAVClient) -> dict[str, str]:
     }
 
 
-def _labelled(managed: list[Any]) -> dict[str, str]:
+def _labeled(managed: list[Any]) -> dict[str, str]:
     """Return url key -> menu label for the loaded calendars.
 
     A shared calendar keeps its owner's name, so two can share one.
@@ -539,12 +543,29 @@ def _distinctive(key: str, managed: list[Any]) -> str:
     return key
 
 
+def _is_http_url(url: str) -> bool:
+    """Return whether a url, a bare host name included, is one to connect to."""
+    try:
+        parsed = urlparse(url if "://" in url else f"https://{url}")
+        port = parsed.port
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.hostname) and port != 0
+
+
 def _test_connection(
     user_input: Mapping[str, Any], timeout: float = DEFAULT_TIMEOUT
 ) -> tuple[str | None, str]:
-    """Return (error key or None, the url that worked)."""
-    kwargs = connection_kwargs(user_input, timeout)
+    """Return (error key or None, the url that worked). Blocking."""
     entered = user_input[CONF_URL]
+    if not _is_http_url(entered):
+        return "invalid_url", entered
+    if any(
+        (path := user_input.get(key)) and not os.path.isfile(path)
+        for key in CERTIFICATE_PATHS
+    ):
+        return "certificate_not_found", entered
+    kwargs = connection_kwargs(user_input, timeout)
     error = "cannot_connect"
     for url in url_candidates(entered, kwargs):
         candidate_error = "cannot_connect"
@@ -560,13 +581,16 @@ def _test_connection(
                 candidate_error = "invalid_auth"
             else:
                 _LOGGER.debug("CalDAV authorization error: %s", err)
-        except CONNECTION_ERRORS as err:
+        except requests.exceptions.SSLError as err:
+            _LOGGER.debug("CalDAV TLS error: %s", err)
+            candidate_error = "certificate_failed"
+        except NETWORK_ERRORS as err:
             _LOGGER.debug("CalDAV connection error: %s", err)
         except Exception:
             _LOGGER.exception("Unexpected error connecting to the CalDAV server")
             candidate_error = "unknown"
         else:
-            return None, url
+            return None, client.session.moved_to or url
         finally:
             client.close()
         # Rejected credentials outrank a candidate that would not answer.

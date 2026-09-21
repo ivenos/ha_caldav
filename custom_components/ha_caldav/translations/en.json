@@ -12,7 +12,7 @@
         },
         "data_description": {
           "url": "The address of your CalDAV server. On most servers the bare host name is enough.",
-          "verify_ssl": "Leave this on unless you know why not. Off, anyone between Home Assistant and the server can read the password."
+          "verify_ssl": "Leave this on unless you know why not. Off, anyone who can intercept the connection can pose as the server and read the password."
         },
         "sections": {
           "certificates": {
@@ -40,7 +40,7 @@
         },
         "data_description": {
           "url": "The address of your CalDAV server. On most servers the bare host name is enough.",
-          "verify_ssl": "Leave this on unless you know why not. Off, anyone between Home Assistant and the server can read the password."
+          "verify_ssl": "Leave this on unless you know why not. Off, anyone who can intercept the connection can pose as the server and read the password."
         },
         "sections": {
           "certificates": {
@@ -70,7 +70,10 @@
     "error": {
       "invalid_auth": "Invalid authentication",
       "cannot_connect": "Failed to connect",
-      "unknown": "Unexpected error"
+      "unknown": "Unexpected error",
+      "invalid_url": "The URL is not an http or https address",
+      "certificate_not_found": "A path under Certificates does not lead to a file",
+      "certificate_failed": "The TLS connection failed: the server certificate could not be verified, or the server refused the client certificate"
     },
     "abort": {
       "already_configured": "This account is already configured",
@@ -158,6 +161,9 @@
     },
     "document_no_uid": {
       "message": "The document has a component without a UID."
+    },
+    "duplicate_uid": {
+      "message": "The document holds more than one item with the UID {uid}."
     },
     "end_before_start": {
       "message": "The end is before the start."
@@ -416,7 +422,7 @@
         },
         "recurrence_range": {
           "name": "Recurrence range",
-          "description": "THISANDFUTURE to change the occurrence and everything after it."
+          "description": "Also change every later occurrence."
         },
         "summary": {
           "name": "Summary",
@@ -508,7 +514,7 @@
         },
         "recurrence_range": {
           "name": "Recurrence range",
-          "description": "THISANDFUTURE to delete the occurrence and everything after it."
+          "description": "Also delete every later occurrence."
         }
       }
     },

@@ -84,11 +84,6 @@ def local_zone(name):
         dt_util.set_default_time_zone(previous)
 
 
-# --------------------------------------------------------------------------
-# Generation
-# --------------------------------------------------------------------------
-
-
 @st.composite
 def rules(draw, day, kind, moment, zone):
     """Return an RRULE whose DTSTART is one of its own occurrences.
@@ -210,11 +205,6 @@ def document(start, end, rule, exdates=(), rdates=(), overrides=()):
         exception.add("dtend", moment + span + (end - start))
         calendar.add_component(exception)
     return calendar.to_ical().decode("utf-8")
-
-
-# --------------------------------------------------------------------------
-# Independent expansion
-# --------------------------------------------------------------------------
 
 
 def master_of(ical):
@@ -341,42 +331,6 @@ def recurrence_id(occurrence):
     return occurrence.isoformat()
 
 
-def _in_a_gap(wall, zone):
-    """Return whether a zone skips over a wall clock on a spring-forward."""
-    return (
-        wall.replace(tzinfo=zone).astimezone(UTC).astimezone(zone).replace(tzinfo=None)
-        != wall
-    )
-
-
-def nameable(occurrence):
-    """Return whether an id for this occurrence survives the trip through UTC.
-
-    A floating series is dated in the local zone, and recurrence._align reads
-    the id there. An occurrence whose wall clock that zone skips comes back an
-    hour later and names a slot the series does not have; every operation then
-    reports success and writes something nobody asked for. Left out here and
-    reported instead, so the committed suite stays green.
-    """
-    if not isinstance(occurrence, datetime) or occurrence.tzinfo is not None:
-        return True
-    return not _in_a_gap(occurrence, dt_util.get_default_time_zone())
-
-
-def anchorable(occurrence):
-    """Return whether the occurrence's own zone has the wall clock it names.
-
-    A split writes the tail's start by converting the instant back into the
-    series zone (recurrence._anchor_at). A spring-forward gap moves it on by an
-    hour, and the tail keeps that hour for good. Reported rather than pinned.
-    """
-    if not isinstance(occurrence, datetime):
-        return True
-    if occurrence.tzinfo is None:
-        return nameable(occurrence)
-    return not _in_a_gap(occurrence.replace(tzinfo=None), occurrence.tzinfo)
-
-
 def stable(source, *, versioned=True):
     """Return the stored document with the properties every write rewrites gone.
 
@@ -398,11 +352,6 @@ def stored_of(calendar):
     return calendar.event.data
 
 
-# --------------------------------------------------------------------------
-# Round trip
-# --------------------------------------------------------------------------
-
-
 @settings(PROPERTY, max_examples=160)
 @given(ics=series(), index=st.integers(0, LIMIT - 1), zone=st.sampled_from(LOCAL_ZONES))
 def test_deleting_one_occurrence_removes_exactly_that_one(ics, index, zone) -> None:
@@ -411,7 +360,6 @@ def test_deleting_one_occurrence_removes_exactly_that_one(ics, index, zone) -> N
         before = occurrences(ics)
         assume(index < len(before))
         target = before[index]
-        assume(nameable(target))
         horizon = horizon_of(before)
         calendar = FakeCalendar(ics)
         delete_event(calendar, UID, recurrence_id=recurrence_id(target))
@@ -433,7 +381,6 @@ def test_deleting_from_an_occurrence_keeps_exactly_the_earlier_ones(
         before = occurrences(ics)
         assume(index < len(before))
         target = before[index]
-        assume(nameable(target))
         calendar = FakeCalendar(ics)
         delete_event(
             calendar, UID, recurrence_id=recurrence_id(target), this_and_future=True
@@ -447,11 +394,6 @@ def test_deleting_from_an_occurrence_keeps_exactly_the_earlier_ones(
         assert after is None or not orphans(after)
 
 
-# --------------------------------------------------------------------------
-# Split conservation
-# --------------------------------------------------------------------------
-
-
 @settings(PROPERTY, max_examples=160)
 @given(ics=series(), index=st.integers(1, LIMIT - 1), zone=st.sampled_from(LOCAL_ZONES))
 def test_a_split_conserves_the_occurrence_set(ics, index, zone) -> None:
@@ -463,7 +405,6 @@ def test_a_split_conserves_the_occurrence_set(ics, index, zone) -> None:
         # An RDATE inside the rule's span re-anchors the tail, and the module
         # refuses that split outright; test_recurrence covers the refusal.
         assume(key(target) in {key(value) for value in rule_slots(ics)})
-        assume(anchorable(target))
         horizon = horizon_of(before)
         calendar = FakeCalendar(ics)
         try:
@@ -499,7 +440,6 @@ def test_a_split_hands_the_tail_the_summary_and_the_head_the_old_one(
         before = occurrences(ics)
         assume(index < len(before))
         assume(key(before[index]) in {key(value) for value in rule_slots(ics)})
-        assume(anchorable(before[index]))
         calendar = FakeCalendar(ics)
         update_event(
             calendar,
@@ -514,11 +454,6 @@ def test_a_split_hands_the_tail_the_summary_and_the_head_the_old_one(
         assert str(head["SUMMARY"]) == "Series"
         assert str(tail["SUMMARY"]) == "Split"
         assert str(tail["UID"]) != str(head["UID"])
-
-
-# --------------------------------------------------------------------------
-# Zone independence
-# --------------------------------------------------------------------------
 
 
 def _under_each_zone(edit, ics):
@@ -563,10 +498,7 @@ def test_deleting_an_occurrence_does_not_depend_on_the_local_zone(ics, index) ->
 
 @settings(PROPERTY, max_examples=80)
 @given(
-    # Not the all-day kind: recurrence._tail_uid derives the tail's uid from
-    # to_utc(occurrence), and a bare date reads there as local midnight, so the
-    # same split lands under a different uid in every zone. Reported, not pinned.
-    ics=series(kinds=("utc", "zoned")),
+    ics=series(kinds=("utc", "zoned", "allday")),
     index=st.integers(1, LIMIT - 1),
 )
 def test_splitting_does_not_depend_on_the_local_zone(ics, index) -> None:
@@ -575,7 +507,6 @@ def test_splitting_does_not_depend_on_the_local_zone(ics, index) -> None:
         before = occurrences(ics)
     assume(index < len(before))
     assume(key(before[index]) in {key(value) for value in rule_slots(ics)})
-    assume(anchorable(before[index]))
     marker = recurrence_id(before[index])
 
     def edit(calendar):
@@ -601,11 +532,6 @@ def test_renaming_a_series_does_not_depend_on_the_local_zone(ics) -> None:
     _same_everywhere(_under_each_zone(edit, ics))
 
 
-# --------------------------------------------------------------------------
-# Idempotence
-# --------------------------------------------------------------------------
-
-
 @settings(PROPERTY, max_examples=100)
 @given(ics=series(), index=st.integers(1, LIMIT - 1), zone=st.sampled_from(LOCAL_ZONES))
 def test_repeating_a_split_neither_clones_the_tail_nor_moves_the_head(
@@ -616,7 +542,6 @@ def test_repeating_a_split_neither_clones_the_tail_nor_moves_the_head(
         before = occurrences(ics)
         assume(index < len(before))
         assume(key(before[index]) in {key(value) for value in rule_slots(ics)})
-        assume(anchorable(before[index]))
         marker = recurrence_id(before[index])
         first = FakeCalendar(ics)
         update_event(
@@ -645,7 +570,6 @@ def test_repeating_an_occurrence_delete_leaves_the_same_series(
     with local_zone(zone):
         before = occurrences(ics)
         assume(index < len(before))
-        assume(nameable(before[index]))
         marker = recurrence_id(before[index])
         first = FakeCalendar(ics)
         delete_event(first, UID, recurrence_id=marker)
@@ -679,10 +603,6 @@ def test_repeating_a_rename_stores_the_same_object(ics, zone) -> None:
         )
 
 
-# --------------------------------------------------------------------------
-# Wall-clock stability
-# --------------------------------------------------------------------------
-
 DST_ZONES = ("Europe/Berlin", "America/New_York")
 
 
@@ -711,7 +631,6 @@ def test_moving_a_series_keeps_every_wall_clock(zone, day, moment, days, local) 
     anchor = ZoneInfo(zone)
     start = datetime.combine(day, moment, tzinfo=anchor)
     moved = wall_shifted(start, days, anchor)
-    assume(anchorable(moved))
     ics = document(
         start,
         start + timedelta(hours=1),
@@ -746,7 +665,6 @@ def test_moving_a_series_carries_its_exceptions_on_the_same_clock(
     start = datetime.combine(day, moment, tzinfo=anchor)
     slot = start + timedelta(days=5)
     moved = wall_shifted(start, days, anchor)
-    assume(anchorable(moved))
     ics = document(
         start,
         start + timedelta(hours=1),
@@ -769,11 +687,6 @@ def test_moving_a_series_carries_its_exceptions_on_the_same_clock(
         assert not orphans(ical)
 
 
-# --------------------------------------------------------------------------
-# No silent no-op
-# --------------------------------------------------------------------------
-
-
 @settings(PROPERTY, max_examples=160)
 @given(ics=series(), index=st.integers(0, LIMIT - 1), zone=st.sampled_from(LOCAL_ZONES))
 def test_editing_one_occurrence_writes_it_and_leaves_the_rest(ics, index, zone) -> None:
@@ -782,7 +695,6 @@ def test_editing_one_occurrence_writes_it_and_leaves_the_rest(ics, index, zone) 
         before = occurrences(ics)
         assume(index < len(before))
         target = before[index]
-        assume(nameable(target))
         calendar = FakeCalendar(ics)
         update_event(
             calendar, UID, {"summary": "One"}, recurrence_id=recurrence_id(target)
@@ -828,11 +740,6 @@ def test_editing_an_occurrence_the_series_does_not_have_is_refused(
         assert not calendar.event.saved
 
 
-# --------------------------------------------------------------------------
-# The loop between what is read and what is written
-# --------------------------------------------------------------------------
-
-
 def served(ics, occurrence):
     """Return the VEVENT the read path sees for one expanded occurrence.
 
@@ -858,9 +765,8 @@ def served(ics, occurrence):
 
 @settings(PROPERTY, max_examples=130)
 @given(
-    # Not the TZID kinds: vobject keeps only the first value of the multi-value
-    # RDATE that api._timezone generates, so a zone read back through it loses
-    # every transition after 1981. Reported rather than pinned.
+    # Not the TZID kinds: the VTIMEZONE icalendar generates stops at 2037, so
+    # vobject reads a later occurrence an hour off.
     ics=series(kinds=("utc", "floating", "allday")),
     index=st.integers(0, LIMIT - 1),
     zone=st.sampled_from(LOCAL_ZONES),

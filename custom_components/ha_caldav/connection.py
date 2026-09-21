@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from http import HTTPStatus
 import logging
 from typing import Any
 from urllib.parse import unquote, urlparse, urlunparse
@@ -30,6 +31,20 @@ def calendar_key(url: object) -> str:
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def origin(url: str) -> tuple[str, str, int | None] | None:
+    """Return the scheme, host and port of a url, however its host is spelled."""
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        return (
+            scheme,
+            (parsed.hostname or "").lower(),
+            parsed.port or _DEFAULT_PORTS.get(scheme),
+        )
+    except ValueError:
+        return None
 
 
 def account_key(url: str, username: str) -> str:
@@ -92,10 +107,11 @@ def without_userinfo(url: str) -> str:
     except ValueError:
         # Too malformed for urlparse; an @ after the first slash is path.
         scheme, sep, rest = url.rpartition("://")
-        head, at, tail = rest.partition("@")
-        if not at or "/" in head:
+        authority, slash, path = rest.partition("/")
+        _, at, host = authority.rpartition("@")
+        if not at:
             return url
-        return f"{scheme}{sep}{tail}"
+        return f"{scheme}{sep}{host}{slash}{path}"
     # hostname drops the brackets of an IPv6 literal.
     if ":" in host:
         host = f"[{host}]"
@@ -156,6 +172,28 @@ class HostLockedSession(requests.Session):
     requests drops the Authorization header itself, but the digest response
     hook outlives the redirect and re-signs for the new host.
     """
+
+    # Where the first request that followed a 301 or 302 ended up.
+    moved_to: str | None = None
+
+    def request(self, method: str, url: Any, *args: Any, **kwargs: Any) -> Any:
+        """Send a request, repeated where a redirect on the same host dropped its body.
+
+        A PROPFIND that lost its body reads as allprop. caldav tells a bad
+        password from a refusal by the reason phrase, which HTTP/2 leaves out.
+        """
+        response = super().request(method, url, *args, **kwargs)
+        if (
+            kwargs.get("data")
+            and method.upper() not in ("GET", "HEAD", "POST")
+            and any(hop.status_code in (301, 302) for hop in response.history)
+            and not self.should_strip_auth(str(url), str(response.url))
+        ):
+            self.moved_to = self.moved_to or str(response.url)
+            response = super().request(method, str(response.url), *args, **kwargs)
+        if response.status_code in (401, 403):
+            response.reason = HTTPStatus(response.status_code).phrase
+        return response
 
     def rebuild_auth(self, prepared_request: Any, response: Any) -> None:
         """Strip what authenticates a request that has changed host."""

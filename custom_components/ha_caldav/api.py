@@ -8,11 +8,15 @@ import logging
 from math import isfinite
 import re
 from typing import Any
+from uuid import uuid4
 
 import caldav
+from caldav.davclient import requests
 from caldav.elements import dav, ical
 from caldav.lib import vcal
 from caldav.lib.error import NotFoundError
+from dateutil.rrule import rruleset
+from homeassistant.util import dt as dt_util
 from icalendar import (
     Calendar as ICalCalendar,
     Timezone as ICalTimezone,
@@ -21,15 +25,19 @@ from icalendar import (
 )
 
 from .const import EVENT_ATTRIBUTES, SORT_ORDER_PROPERTY
-from .errors import Refused
+from .errors import Refused, rejected
 from .event import (
     apply_extras,
     as_datetime,
     check_rule,
     comparable_address,
+    date_values,
+    framed_rule,
     hold_sequence,
     replace,
     rule_from,
+    shifted,
+    start_of,
     to_utc,
 )
 
@@ -69,19 +77,26 @@ def object_by_uid(
 def _uid_search_refused(err: Exception) -> bool:
     """Return whether a failed uid lookup is one to answer with a scan.
 
-    A refusal reaches us as anything from ReportError to TypeError.
+    A refusal reaches us as anything from ReportError to TypeError; a request
+    that got no answer, or a 401, is not one.
     """
-    if isinstance(err, NotFoundError):
+    if isinstance(err, NotFoundError | requests.RequestException) or rejected(err):
         return False
     _LOGGER.debug("Server refused the uid search, scanning instead: %s", err)
     return True
 
 
 def _filtered(calendar: caldav.Calendar, uid: str, todo: bool | None) -> Any:
-    """Ask the server for one uid. Raises when it will not filter on them."""
-    if todo is None:
-        return calendar.object_by_uid(uid)
-    return calendar.todo_by_uid(uid) if todo else calendar.event_by_uid(uid)
+    """Ask the server for one uid. Raises when it will not filter on them.
+
+    One kind at a time, as _scan explains.
+    """
+    if todo is not None:
+        return calendar.todo_by_uid(uid) if todo else calendar.event_by_uid(uid)
+    try:
+        return calendar.event_by_uid(uid)
+    except NotFoundError:
+        return calendar.todo_by_uid(uid)
 
 
 def _scan(calendar: caldav.Calendar, todo: bool | None) -> Iterator[tuple[Any, str]]:
@@ -138,7 +153,7 @@ def create_event(
 ) -> None:
     """Create a new event from Home Assistant event fields.
 
-    One PUT: the library mints a fresh uid per call.
+    One PUT, under a random uid: the library's own carries the MAC address.
     """
     core = {
         key: value
@@ -146,10 +161,14 @@ def create_event(
         if key not in EXTRA_KEYS and value is not None
     }
     extras = {key: value for key, value in data.items() if key in EXTRA_KEYS}
-    instance = ICalCalendar.from_ical(vcal.create_ical(objtype="VEVENT", **core))
+    instance = ICalCalendar.from_ical(
+        vcal.create_ical(objtype="VEVENT", uid=str(uuid4()), **core)
+    )
     vevent = next(iter(instance.walk("VEVENT")))
     if (recur := vevent.get("RRULE")) is not None:
-        check_rule(recur, vevent["DTSTART"].dt)
+        start = vevent["DTSTART"].dt
+        replace(vevent, "rrule", framed_rule(recur, start))
+        check_rule(vevent["RRULE"], start)
     if extras:
         apply_extras(vevent, extras, own_address)
     calendar.save_event(_zoned(instance, vevent))
@@ -158,7 +177,7 @@ def create_event(
 def create_todo(calendar: caldav.Calendar, data: dict[str, Any]) -> None:
     """Create a new to-do item."""
     status = data.pop("status", None)
-    ics = vcal.create_ical(objtype="VTODO", **data)
+    ics = vcal.create_ical(objtype="VTODO", uid=str(uuid4()), **data)
     instance = ICalCalendar.from_ical(ics)
     vtodo = next(iter(instance.walk("VTODO")))
     if status:
@@ -185,7 +204,14 @@ def update_todo(
     todo = object_by_uid(calendar, uid, todo=True)
     check_etag(todo, expected_etag)
     vtodo = collapse_repeated(vtodo_of(todo))
-    if data.get("status") == "COMPLETED" and "RRULE" in vtodo and _roll_todo(vtodo):
+    # Only on the move to done: core sends the status along with every edit.
+    settled = str(vtodo.get("STATUS", "")).upper() in _SETTLED
+    if (
+        data.get("status") == "COMPLETED"
+        and not settled
+        and "RRULE" in vtodo
+        and _roll_todo(vtodo)
+    ):
         # The roll owns DUE and DTSTART.
         _set_text(vtodo, data)
         stamp(vtodo)
@@ -199,12 +225,28 @@ def update_todo(
     if (due := data.get("due")) is not None:
         # RFC 5545 forbids DURATION alongside DUE.
         replace(vtodo, "duration", None)
-        replace(vtodo, "due", due)
+        _set_due(vtodo, due)
     else:
         vtodo.pop("DUE", None)
     _check_todo_span(vtodo)
     stamp(vtodo)
     _save_todo(todo)
+
+
+def _set_due(vtodo: Any, due: Any) -> None:
+    """Write a due time in the zone, or the floating form, already stored.
+
+    Core hands every time back in its own zone.
+    """
+    old = vtodo["DUE"].dt if "DUE" in vtodo else None
+    if isinstance(old, datetime) and isinstance(due, datetime):
+        if to_utc(old) == to_utc(due):
+            return
+        if old.tzinfo is None:
+            due = dt_util.as_local(due).replace(tzinfo=None)
+        elif str(due.tzinfo) != str(old.tzinfo):
+            due = due.astimezone(old.tzinfo)
+    replace(vtodo, "due", due)
 
 
 def _check_todo_span(vtodo: Any) -> None:
@@ -487,20 +529,28 @@ def check_etag(resource: Any, expected_etag: str | None) -> None:
         raise Refused("etag_conflict")
 
 
-def stamp(component: Any) -> None:
+def stamp(component: Any, addresses: list[str] | None = None) -> None:
     """Mark a component as revised now.
 
     RFC 5545 3.8.7.2: without a METHOD, DTSTAMP is the time of the last
-    revision.
+    revision. 3.8.7.4 lets only the organizer move SEQUENCE.
     """
-    for key, value in (
-        ("DTSTAMP", datetime.now(tz=UTC)),
-        ("LAST-MODIFIED", datetime.now(tz=UTC)),
-        ("SEQUENCE", int(component.get("SEQUENCE", 0)) + 1),
-    ):
+    now = datetime.now(tz=UTC)
+    changes: list[tuple[str, Any]] = [("DTSTAMP", now), ("LAST-MODIFIED", now)]
+    if not _organized_elsewhere(component, addresses):
+        changes.append(("SEQUENCE", int(component.get("SEQUENCE", 0)) + 1))
+    for key, value in changes:
         if key in component:
             del component[key]
         component.add(key, value)
+
+
+def _organized_elsewhere(component: Any, addresses: list[str] | None) -> bool:
+    """Return whether the component names an organizer who is not this account."""
+    if not addresses or (organizer := component.get("ORGANIZER")) is None:
+        return False
+    own = {comparable_address(address) for address in addresses}
+    return comparable_address(str(_first(organizer))) not in own
 
 
 def move_event(
@@ -645,6 +695,11 @@ def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
         groups.setdefault(uid, []).append(component)
     if not groups:
         raise Refused("document_empty")
+    for uid, components in groups.items():
+        # RFC 5545 3.8.4.4: one uid, one component of a kind without RECURRENCE-ID.
+        masters = [item.name for item in components if "RECURRENCE-ID" not in item]
+        if len(masters) != len(set(masters)):
+            raise Refused("duplicate_uid", uid=uid)
     # A group holding any VTODO is stored as one.
     as_todo = {
         uid: any(item.name == "VTODO" for item in components)
@@ -684,11 +739,13 @@ def _already_there(calendar: caldav.Calendar, wanted: set[str]) -> set[str]:
     found: set[str] = set()
     for uid in wanted:
         try:
-            calendar.object_by_uid(uid)
-        except Exception as err:  # noqa: BLE001
-            if not _uid_search_refused(err):
+            _filtered(calendar, uid, None)
+        except Exception as err:
+            if isinstance(err, NotFoundError):
                 pending.discard(uid)
                 continue
+            if not _uid_search_refused(err):
+                raise
             return found | _scanned(calendar, pending)
         pending.discard(uid)
         found.add(uid)
@@ -770,10 +827,12 @@ def set_calendar_name(calendar: caldav.Calendar, name: str) -> None:
 
 def create_calendar(
     client: caldav.DAVClient, name: str, components: list[str] | None
-) -> None:
+) -> caldav.Calendar:
     """Create a calendar collection on the account."""
-    client.principal().make_calendar(
-        name=name, supported_calendar_component_set=components or None
+    return client.principal().make_calendar(
+        name=name,
+        cal_id=str(uuid4()),
+        supported_calendar_component_set=components or None,
     )
 
 
@@ -791,28 +850,49 @@ def _roll_todo(vtodo: Any) -> bool:
     start = as_datetime(anchor)
     rrule = vtodo["RRULE"]
     try:
-        following = rule_from(rrule, anchor).after(start)
-    except ValueError:
-        # A rule malformed beyond what rule_from reconciles.
+        rule = rule_from(rrule, anchor)
+        following = _occurrences(vtodo, rule, start).after(start)
+    except TypeError, ValueError:
+        # A rule malformed beyond what rule_from reconciles, or a date that
+        # does not compare with the start.
         return False
     if following is None:
         return False
     count = rrule.get("COUNT")
-    if count and count[0] <= 1:
-        # COUNT=0 is invalid; the item closes instead.
+    # COUNT counts the rule's own slots, the excluded ones included.
+    passed = sum(1 for slot in rule.between(start, following, inc=True) if slot > start)
+    if count and count[0] - passed < 1:
         return False
     delta = following - start
+    zone = anchor.tzinfo if isinstance(anchor, datetime) else None
     for key in ("DTSTART", "DUE"):
         if key in vtodo:
-            moved = vtodo[key].dt + delta
+            moved = shifted(vtodo[key].dt, delta, zone)
             del vtodo[key]
             vtodo.add(key, moved)
     if count:
         reduced = vRecur(dict(rrule))
-        reduced["COUNT"] = [count[0] - 1]
+        reduced["COUNT"] = [count[0] - passed]
         del vtodo["RRULE"]
         vtodo.add("RRULE", reduced)
     vtodo["STATUS"] = "NEEDS-ACTION"
     for done in ("COMPLETED", "PERCENT-COMPLETE"):
         vtodo.pop(done, None)
     return True
+
+
+def _occurrences(vtodo: Any, rule: Any, start: datetime) -> rruleset:
+    """Return the rule with the item's own RDATE and EXDATE values applied."""
+    occurrences = rruleset()
+    occurrences.rrule(rule)
+    for key, add in (("RDATE", occurrences.rdate), ("EXDATE", occurrences.exdate)):
+        for value in date_values(vtodo, key):
+            add(_like(as_datetime(start_of(value)), start))
+    return occurrences
+
+
+def _like(value: datetime, start: datetime) -> datetime:
+    """Return a value aware or floating as the start is, so the two compare."""
+    if start.tzinfo is None:
+        return dt_util.as_local(value).replace(tzinfo=None) if value.tzinfo else value
+    return value if value.tzinfo else value.replace(tzinfo=start.tzinfo)

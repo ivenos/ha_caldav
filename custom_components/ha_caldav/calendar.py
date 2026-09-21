@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from functools import partial
 from typing import Any
 
@@ -13,11 +13,9 @@ from homeassistant.components.calendar import (
     CalendarEvent,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.entity_platform import (
-    AddConfigEntryEntitiesCallback,
-    async_get_current_platform,
-)
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .api import create_event
 from .connection import calendar_key
@@ -31,7 +29,6 @@ from .coordinator import (
 from .entity import HaCaldavEntity
 from .errors import as_reported
 from .recurrence import delete_event, update_event
-from .services import async_register_entity_services
 
 # Home Assistant owns the visible color under its own domain; this records the
 # one taken from the server.
@@ -49,7 +46,6 @@ async def async_setup_entry(
 ) -> None:
     """Set up one calendar entity per calendar that holds events."""
     data = entry.runtime_data
-    async_register_entity_services(async_get_current_platform())
     async_add_entities(
         HaCaldavCalendarEntity(data, managed, entry)
         for managed in data.calendars
@@ -185,12 +181,12 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
     @property
     def event(self) -> CalendarEvent | None:
         """Return the next upcoming event."""
-        return self.coordinator.data.next_event if self.coordinator.data else None
+        return self.coordinator.upcoming()[0]
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the properties of the upcoming event HA has no field for."""
-        return dict(self.coordinator.data.extras) if self.coordinator.data else {}
+        return dict(self.coordinator.upcoming()[1])
 
     async def async_get_events(
         self, hass: HomeAssistant, start_date: datetime, end_date: datetime
@@ -234,10 +230,14 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         recurrence_id: str | None = None,
         recurrence_range: str | None = None,
     ) -> None:
-        """Update a series, a single occurrence, or an occurrence onwards."""
-        await self.async_update_full_event(
-            uid, _item_data(event), recurrence_id, recurrence_range
-        )
+        """Update a series, a single occurrence, or an occurrence onwards.
+
+        Leaving out a rule the editor showed is choosing "Does not repeat".
+        """
+        data = _item_data(event)
+        if "rrule" not in data and _accepted(self.coordinator.rrules.get(uid)):
+            data["rrule"] = ""
+        await self.async_update_full_event(uid, data, recurrence_id, recurrence_range)
 
     async def async_update_full_event(
         self,
@@ -257,6 +257,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
                 recurrence_range == RANGE_THIS_AND_FUTURE,
                 expected_etag=self.coordinator.etags.get(uid),
                 own_address=self._own_address,
+                addresses=self.runtime_data.address_set,
             ),
             "update",
             forget=("etags", (uid,)),
@@ -277,17 +278,34 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
                 recurrence_id,
                 recurrence_range == RANGE_THIS_AND_FUTURE,
                 expected_etag=self.coordinator.etags.get(uid),
+                addresses=self.runtime_data.address_set,
             ),
             "delete",
             forget=("etags", (uid,)),
         )
 
 
+def _accepted(rule: str | None) -> bool:
+    """Return whether core takes a rule, which is whether its editor showed it."""
+    if rule is None:
+        return False
+    try:
+        CalendarEvent(
+            summary="",
+            start=date(2000, 1, 1),
+            end=date(2000, 1, 2),
+            rrule=rule,
+        )
+    except HomeAssistantError:
+        return False
+    return True
+
+
 def _item_data(fields: dict[str, Any]) -> dict[str, Any]:
     """Map the platform's event fields, naming every one of them.
 
-    Core sends the whole event, so an absent field was cleared. An absent
-    rrule was stripped by the expansion and stays.
+    Core sends the whole event, so an absent field was cleared. What an
+    absent rrule means is up to the caller.
     """
     data: dict[str, Any] = {
         "summary": fields["summary"],

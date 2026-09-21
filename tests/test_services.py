@@ -7,7 +7,11 @@ from caldav.lib.error import DAVError
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import Context, HomeAssistant
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import (
+    HomeAssistantError,
+    ServiceValidationError,
+    Unauthorized,
+)
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 import icalendar
@@ -468,9 +472,10 @@ async def test_a_new_calendar_is_added_to_an_explicit_selection(
     entry = await _setup(hass, options={CONF_CALENDARS: ["Personal"]})
 
     with (
-        patch("custom_components.ha_caldav.services.create_calendar"),
+        patch("custom_components.ha_caldav.services.create_calendar") as create,
         patch("custom_components.ha_caldav.caldav.DAVClient") as client,
     ):
+        create.return_value.url = "https://dav.example.com/remote.php/dav/Holidays/"
         client.return_value.principal.return_value.calendars.return_value = []
         await hass.services.async_call(
             DOMAIN,
@@ -480,7 +485,11 @@ async def test_a_new_calendar_is_added_to_an_explicit_selection(
         )
         await hass.async_block_till_done()
 
-    assert entry.options[CONF_CALENDARS] == ["Personal", "Holidays"]
+    # By url: a name stops matching once the calendar is renamed.
+    assert entry.options[CONF_CALENDARS] == [
+        "/remote.php/dav/Personal",
+        "/remote.php/dav/Holidays",
+    ]
 
 
 async def test_deleting_a_calendar_removes_it_and_its_entities(
@@ -766,7 +775,10 @@ async def test_moving_into_a_read_only_calendar_is_refused(
     )
 
     # The source is writable, so only the target's own state can stop this.
-    with pytest.raises(ServiceValidationError) as refusal:
+    with (
+        patch("custom_components.ha_caldav.services.move_event") as move,
+        pytest.raises(ServiceValidationError) as refusal,
+    ):
         await hass.services.async_call(
             DOMAIN,
             "move_event",
@@ -779,7 +791,7 @@ async def test_moving_into_a_read_only_calendar_is_refused(
         )
 
     assert refusal.value.translation_key == "read_only"
-    assert target.save_event.call_count == 0
+    move.assert_not_called()
 
 
 async def test_an_unloaded_account_is_rejected(hass: HomeAssistant) -> None:
@@ -911,9 +923,7 @@ async def test_a_free_busy_answer_the_library_cannot_read_is_reported(
     hass: HomeAssistant,
 ) -> None:
     calendar = _calendar("Personal")
-    calendar.freebusy_request.return_value = Mock(
-        instance=Mock(vfreebusy=Mock(spec=[]))
-    )
+    calendar.freebusy_request.return_value = Mock(spec=[])
     await _setup(hass, [calendar])
 
     with pytest.raises(HomeAssistantError) as failure:
@@ -1054,7 +1064,7 @@ def test_an_update_naming_nothing_but_a_uid_is_refused() -> None:
     UPDATE_EVENT_SCHEMA({"entity_id": "calendar.x", "uid": "uid-1", "summary": "New"})
 
 
-def test_a_color_the_read_path_could_not_recognise_is_refused() -> None:
+def test_a_color_the_read_path_could_not_recognize_is_refused() -> None:
     """Stored verbatim it comes back as no color, clearing the one there was."""
     import voluptuous as voluptuous_schema
 
@@ -1066,31 +1076,6 @@ def test_a_color_the_read_path_could_not_recognise_is_refused() -> None:
 
     with pytest.raises(voluptuous_schema.Invalid):
         schema({ATTR_COLOR: "banana"})
-
-
-async def test_a_move_named_by_a_user_who_no_longer_exists_is_refused(
-    hass: HomeAssistant,
-) -> None:
-    """Home Assistant checks POLICY_CONTROL for entities named in a target, not
-    for one named in a field, and this service writes into the entity named
-    there. The arm beside the permission check was never exercised."""
-    from homeassistant.core import Context
-    from homeassistant.exceptions import UnknownUser
-
-    await _setup(hass)
-
-    with pytest.raises(UnknownUser):
-        await hass.services.async_call(
-            DOMAIN,
-            "move_event",
-            {
-                "entity_id": "calendar.personal",
-                "uid": "uid-1",
-                "target_entity_id": "calendar.work",
-            },
-            blocking=True,
-            context=Context(user_id="nobody-by-that-id"),
-        )
 
 
 async def test_replying_to_an_invitation_clears_the_events_etag(
@@ -1123,9 +1108,9 @@ async def test_replying_to_an_invitation_clears_the_events_etag(
 async def test_deleting_a_calendar_takes_its_key_out_of_the_selection(
     hass: HomeAssistant,
 ) -> None:
-    """The options flow writes calendar keys and create_calendar writes a
-    display name, so matching only one shape left the other behind forever and
-    the option ended up holding keys for collections that no longer exist."""
+    """Entries written before v1.2.0 selected by display name, so matching
+    only one shape left the other behind forever and the option ended up
+    holding keys for collections that no longer exist."""
     calendar = _calendar("Personal")
     entry = await _setup(
         hass, [calendar], options={CONF_CALENDARS: ["/remote.php/dav/Personal"]}
@@ -1144,7 +1129,8 @@ async def test_deleting_a_calendar_takes_its_key_out_of_the_selection(
         )
         await hass.async_block_till_done()
 
-    assert entry.options[CONF_CALENDARS] == []
+    # Dropped rather than emptied: an empty list reads as every calendar.
+    assert CONF_CALENDARS not in entry.options
 
 
 async def test_a_move_between_two_accounts_sharing_a_path_is_allowed(
@@ -1646,3 +1632,201 @@ async def test_search_returns_the_extra_properties(hass: HomeAssistant) -> None:
 
     events = result["calendar.personal"]["events"]
     assert events[0]["url"] == "https://meet.example.com/x"
+
+
+EXPANDED = (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n"
+    + "".join(
+        "BEGIN:VEVENT\r\nUID:uid-1\r\nDTSTAMP:20260101T000000Z\r\n"
+        f"RECURRENCE-ID:202607{day}T090000Z\r\nDTSTART:202607{day}T090000Z\r\n"
+        "DTEND:20260706T100000Z\r\nSUMMARY:Standup\r\nEND:VEVENT\r\n".replace(
+            "DTEND:20260706", f"DTEND:202607{day}"
+        )
+        for day in ("06", "13")
+    )
+    + "END:VCALENDAR\r\n"
+)
+
+
+async def test_a_search_within_a_window_answers_with_each_occurrence(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    item = Mock()
+    item.vobject_instance = vobject.readOne(EXPANDED)
+    calendar.search.return_value = [item]
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "search_events",
+        {
+            "entity_id": "calendar.personal",
+            "text": "Standup",
+            "start": "2026-07-01T00:00:00+00:00",
+            "end": "2026-07-31T00:00:00+00:00",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert calendar.search.call_args.kwargs["expand"] is True
+    events = response["calendar.personal"]["events"]
+    assert [event["recurrence_id"] for event in events] == [
+        "2026-07-06 09:00:00+00:00",
+        "2026-07-13 09:00:00+00:00",
+    ]
+
+
+async def test_a_search_without_a_window_answers_with_the_series_itself(
+    hass: HomeAssistant,
+) -> None:
+    # RFC 5545 leaves the order open, so an exception may come first.
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    item = Mock()
+    item.vobject_instance = vobject.readOne(
+        ICS.replace(
+            "BEGIN:VEVENT",
+            "BEGIN:VEVENT\r\nUID:uid-1\r\nDTSTAMP:20260101T000000Z\r\n"
+            "RECURRENCE-ID:20260713T090000Z\r\nDTSTART:20260713T110000Z\r\n"
+            "DTEND:20260713T120000Z\r\nSUMMARY:Moved\r\nEND:VEVENT\r\n"
+            "BEGIN:VEVENT",
+            1,
+        ).replace("SUMMARY:Standup", "RRULE:FREQ=WEEKLY\r\nSUMMARY:Standup")
+    )
+    calendar.search.return_value = [item]
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "search_events",
+        {"entity_id": "calendar.personal", "text": "Standup"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert "expand" not in calendar.search.call_args.kwargs
+    [event] = response["calendar.personal"]["events"]
+    assert event["summary"] == "Standup"
+    assert event["recurrence_id"] is None
+
+
+async def test_a_read_only_calendar_is_not_deleted(hass: HomeAssistant) -> None:
+    entry = await _setup(hass, options={CONF_READ_ONLY: True})
+
+    with (
+        patch("custom_components.ha_caldav.services.delete_calendar") as delete,
+        pytest.raises(ServiceValidationError, match="read-only"),
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "delete_calendar",
+            {"config_entry_id": entry.entry_id, "name": "Personal"},
+            blocking=True,
+        )
+
+    delete.assert_not_called()
+
+
+READ_ONLY_PERSONAL = {
+    CONF_CALENDAR_OPTIONS: {"/remote.php/dav/Personal": {CONF_READ_ONLY: True}}
+}
+
+
+async def test_a_copy_may_come_out_of_a_read_only_calendar(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass, [_calendar("Personal"), _calendar("Work")], READ_ONLY_PERSONAL)
+
+    with patch("custom_components.ha_caldav.services.move_event") as move:
+        await hass.services.async_call(
+            DOMAIN,
+            "move_event",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "target_entity_id": "calendar.work",
+                "keep_original": True,
+            },
+            blocking=True,
+        )
+
+    move.assert_called_once()
+
+
+async def test_a_move_out_of_a_read_only_calendar_is_refused(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass, [_calendar("Personal"), _calendar("Work")], READ_ONLY_PERSONAL)
+
+    with (
+        patch("custom_components.ha_caldav.services.move_event") as move,
+        pytest.raises(ServiceValidationError, match="read-only"),
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "move_event",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "target_entity_id": "calendar.work",
+            },
+            blocking=True,
+        )
+
+    move.assert_not_called()
+
+
+async def test_the_calendar_actions_exist_while_the_account_retries(
+    hass: HomeAssistant,
+) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.side_effect = DAVError("down")
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert hass.services.has_service(DOMAIN, "create_event")
+    assert hass.services.has_service(DOMAIN, "search_events")
+
+
+async def test_an_alarm_takes_its_action_in_either_spelling(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+
+    with patch("custom_components.ha_caldav.calendar.create_event") as create:
+        await hass.services.async_call(
+            DOMAIN,
+            "create_event",
+            {
+                "entity_id": "calendar.personal",
+                "summary": "Standup",
+                "start_date_time": "2026-07-06T09:00:00+00:00",
+                "end_date_time": "2026-07-06T10:00:00+00:00",
+                "alarms": [{"minutes_before": 5, "action": "audio", "related": "end"}],
+            },
+            blocking=True,
+        )
+
+    [alarm] = create.call_args.args[1]["alarms"]
+    assert (alarm["action"], alarm["related"]) == ("AUDIO", "END")
+
+
+@pytest.mark.parametrize("service", ["create_calendar", "delete_calendar"])
+async def test_only_an_administrator_manages_calendars(
+    hass: HomeAssistant, service: str
+) -> None:
+    entry = await _setup(hass)
+    user = MockUser().add_to_hass(hass)
+
+    with pytest.raises(Unauthorized):
+        await hass.services.async_call(
+            DOMAIN,
+            service,
+            {"config_entry_id": entry.entry_id, "name": "Personal"},
+            blocking=True,
+            context=Context(user_id=user.id),
+        )

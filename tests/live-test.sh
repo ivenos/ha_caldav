@@ -19,7 +19,7 @@ username="admin"
 password='TestPass!2026'
 
 cleanup() {
-  docker rm -f "$name" "$database" >/dev/null 2>&1 || true
+  docker rm -fv "$name" "$database" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -44,7 +44,7 @@ wait_for() {
 
 case "$server" in
   nextcloud)
-    docker run -d --name "$name" -p 8080:80 \
+    docker run -d --name "$name" -p 127.0.0.1:8080:80 \
       -e SQLITE_DATABASE=nextcloud \
       -e NEXTCLOUD_ADMIN_USER="$username" \
       -e NEXTCLOUD_ADMIN_PASSWORD="$password" \
@@ -71,14 +71,14 @@ case "$server" in
 
   radicale)
     # The default image runs with "auth type = none", which accepts any login
-    docker run -d --name "$name" -p 5232:5232 \
+    docker run -d --name "$name" -p 127.0.0.1:5232:5232 \
       "tomsquest/docker-radicale:$tag" >/dev/null
     wait_for http://localhost:5232/ 40 2
     url="http://localhost:5232/"
     ;;
 
   xandikos)
-    docker run -d --name "$name" -p 8000:8000 \
+    docker run -d --name "$name" -p 127.0.0.1:8000:8000 \
       "ghcr.io/jelmer/xandikos:$tag" \
       --autocreate --defaults -d /data -l 0.0.0.0 -p 8000 --route-prefix=/ >/dev/null
     wait_for http://localhost:8000/ 40 2
@@ -86,7 +86,7 @@ case "$server" in
     ;;
 
   baikal)
-    docker run -d --name "$name" -p 8082:80 "ckulka/baikal:$tag" >/dev/null
+    docker run -d --name "$name" -p 127.0.0.1:8082:80 "ckulka/baikal:$tag" >/dev/null
     wait_for http://localhost:8082/ 40 2
     # Baikal has only an install wizard, so this seeds it through php; only the nginx image has sqlite3.
     # No email on the account, or sabre/dav answers 500 when deleting an event with it as attendee but no organizer.
@@ -160,6 +160,12 @@ PHP
       echo -n "."
       sleep 2
     done
+    docker exec -e MYSQL_PWD="$password" "$database" \
+      mariadb -h 127.0.0.1 -usogo sogo -e "SELECT 1" >/dev/null 2>&1 || {
+      echo "::error::the sogo database did not come up"
+      docker logs --tail 50 "$database"
+      exit 1
+    }
     # SOGo's sql user source expects this table and these column names but never creates them.
     docker exec -e MYSQL_PWD="$password" "$database" mariadb -h 127.0.0.1 -usogo sogo -e "
       CREATE TABLE sogo_users (
@@ -171,7 +177,7 @@ PHP
       INSERT INTO sogo_users VALUES ('$username', '$username',
         MD5('$password'), '$username', '$username@example.com');"
 
-    docker run -d --name "$name" --network "$network" -p 8084:80 \
+    docker run -d --name "$name" --network "$network" -p 127.0.0.1:8084:80 \
       "pmietlicki/sogo:$tag" >/dev/null
     wait_for http://localhost:8084/SOGo/ 60 3
     # The shipped config has every setting commented out.
@@ -232,9 +238,11 @@ EOF
 esac
 
 cd "$root"
+pytest="$root/.venv/bin/pytest"
+[[ -x $pytest ]] || pytest=pytest
 set +e
 CALDAV_URL="$url" CALDAV_USERNAME="$username" CALDAV_PASSWORD="$password" \
-  pytest -m live "$@"
+  "$pytest" -m live "$@"
 status=$?
 set -e
 if [[ $status -ne 0 ]]; then

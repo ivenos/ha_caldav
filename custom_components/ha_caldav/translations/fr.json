@@ -12,14 +12,14 @@
         },
         "data_description": {
           "url": "L'adresse de votre serveur CalDAV. Sur la plupart des serveurs, le nom d'hôte suffit.",
-          "verify_ssl": "Laissez cette option activée sauf raison contraire. Désactivée, quiconque se trouve entre Home Assistant et le serveur peut lire le mot de passe."
+          "verify_ssl": "Laissez cette option activée sauf raison contraire. Désactivée, quiconque intercepte la connexion peut se faire passer pour le serveur et lire le mot de passe."
         },
         "sections": {
           "certificates": {
             "name": "Certificats",
             "description": "Seulement pour un serveur qui demande un certificat client ou utilise une AC privée.",
             "data": {
-              "ca_bundle": "Chemin du bundle CA",
+              "ca_bundle": "Chemin du bundle d'AC",
               "client_cert": "Chemin du certificat client",
               "client_key": "Chemin de la clé client"
             },
@@ -40,14 +40,14 @@
         },
         "data_description": {
           "url": "L'adresse de votre serveur CalDAV. Sur la plupart des serveurs, le nom d'hôte suffit.",
-          "verify_ssl": "Laissez cette option activée sauf raison contraire. Désactivée, quiconque se trouve entre Home Assistant et le serveur peut lire le mot de passe."
+          "verify_ssl": "Laissez cette option activée sauf raison contraire. Désactivée, quiconque intercepte la connexion peut se faire passer pour le serveur et lire le mot de passe."
         },
         "sections": {
           "certificates": {
             "name": "Certificats",
             "description": "Seulement pour un serveur qui demande un certificat client ou utilise une AC privée.",
             "data": {
-              "ca_bundle": "Chemin du bundle CA",
+              "ca_bundle": "Chemin du bundle d'AC",
               "client_cert": "Chemin du certificat client",
               "client_key": "Chemin de la clé client"
             },
@@ -70,11 +70,14 @@
     "error": {
       "invalid_auth": "Authentification non valide",
       "cannot_connect": "Échec de connexion",
-      "unknown": "Erreur inattendue"
+      "unknown": "Erreur inattendue",
+      "invalid_url": "L'URL n'est pas une adresse http ou https",
+      "certificate_not_found": "Un chemin sous Certificats ne mène à aucun fichier",
+      "certificate_failed": "La connexion TLS a échoué : le certificat du serveur n'a pas pu être vérifié, ou le serveur a refusé le certificat client"
     },
     "abort": {
       "already_configured": "Ce compte est déjà configuré",
-      "reauth_successful": "La ré-authentification a réussi",
+      "reauth_successful": "La réauthentification a réussi",
       "reconfigure_successful": "La connexion a été mise à jour",
       "already_in_progress": "La configuration est déjà en cours"
     }
@@ -130,7 +133,7 @@
       }
     },
     "error": {
-      "no_calendars": "Sélectionnez au moins un agenda ; un compte sans aucun n'a aucune entité."
+      "no_calendars": "Sélectionnez au moins un calendrier ; un compte sans calendrier n'a aucune entité."
     }
   },
   "issues": {
@@ -158,6 +161,9 @@
     },
     "document_no_uid": {
       "message": "Le document contient un composant sans UID."
+    },
+    "duplicate_uid": {
+      "message": "Le document contient plus d'un élément avec l'UID {uid}."
     },
     "end_before_start": {
       "message": "La fin précède le début."
@@ -416,7 +422,7 @@
         },
         "recurrence_range": {
           "name": "Portée de la récurrence",
-          "description": "THISANDFUTURE pour modifier cette occurrence et toutes les suivantes."
+          "description": "Pour modifier aussi toutes les occurrences suivantes."
         },
         "summary": {
           "name": "Titre",
@@ -508,7 +514,7 @@
         },
         "recurrence_range": {
           "name": "Portée de la récurrence",
-          "description": "THISANDFUTURE pour supprimer cette occurrence et toutes les suivantes."
+          "description": "Pour supprimer aussi toutes les occurrences suivantes."
         }
       }
     },

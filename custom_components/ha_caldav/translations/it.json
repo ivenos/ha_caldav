@@ -12,7 +12,7 @@
         },
         "data_description": {
           "url": "L'indirizzo del tuo server CalDAV. Sulla maggior parte dei server basta il nome host.",
-          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque si trovi tra Home Assistant e il server può leggere la password."
+          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque intercetti la connessione può fingersi il server e leggere la password."
         },
         "sections": {
           "certificates": {
@@ -40,7 +40,7 @@
         },
         "data_description": {
           "url": "L'indirizzo del tuo server CalDAV. Sulla maggior parte dei server basta il nome host.",
-          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque si trovi tra Home Assistant e il server può leggere la password."
+          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque intercetti la connessione può fingersi il server e leggere la password."
         },
         "sections": {
           "certificates": {
@@ -70,7 +70,10 @@
     "error": {
       "invalid_auth": "Autenticazione non valida",
       "cannot_connect": "Impossibile connettersi",
-      "unknown": "Errore imprevisto"
+      "unknown": "Errore imprevisto",
+      "invalid_url": "L'URL non è un indirizzo http o https",
+      "certificate_not_found": "Un percorso in Certificati non porta a nessun file",
+      "certificate_failed": "La connessione TLS non è riuscita: non è stato possibile verificare il certificato del server, oppure il server ha rifiutato il certificato client"
     },
     "abort": {
       "already_configured": "L'account è già configurato",
@@ -130,7 +133,7 @@
       }
     },
     "error": {
-      "no_calendars": "Seleziona almeno un calendario; un account senza nessuno non ha alcuna entità."
+      "no_calendars": "Seleziona almeno un calendario; un account senza calendari non ha alcuna entità."
     }
   },
   "issues": {
@@ -158,6 +161,9 @@
     },
     "document_no_uid": {
       "message": "Il documento contiene un componente senza UID."
+    },
+    "duplicate_uid": {
+      "message": "Il documento contiene più di un elemento con l'UID {uid}."
     },
     "end_before_start": {
       "message": "La fine precede l'inizio."
@@ -416,7 +422,7 @@
         },
         "recurrence_range": {
           "name": "Ambito della ricorrenza",
-          "description": "THISANDFUTURE per modificare questa occorrenza e tutte le successive."
+          "description": "Per modificare anche tutte le occorrenze successive."
         },
         "summary": {
           "name": "Titolo",
@@ -508,7 +514,7 @@
         },
         "recurrence_range": {
           "name": "Ambito della ricorrenza",
-          "description": "THISANDFUTURE per eliminare questa occorrenza e tutte le successive."
+          "description": "Per eliminare anche tutte le occorrenze successive."
         }
       }
     },

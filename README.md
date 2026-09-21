@@ -17,18 +17,17 @@ CalDAV Complete is a Home Assistant integration that connects calendars and to-d
 
 ## Features
 
-- ✏️ Edit and delete events, not only create them
 - 🔁 Change a single occurrence, all following ones or the whole series
 - ⏰ Reminders, attendees, meeting links, categories, priority and free/busy
 - ✅ Recurring to-dos move to their next due date when completed, and to-dos can be reordered
 - 🎨 Calendar colors from the server, unless set in Home Assistant
 - 🔎 Actions to search, import, export and move events and to manage calendars
-- 🛡️ Writes never overwrite changes made on the server since the last poll, and read-only calendars stay read-only
-- ⚡ Calendars are only fetched in full when something changed on the server
+- 🛡️ Writes check for changes made on the server in the meantime, and read-only calendars stay read-only
+- ⚡ On servers that report changes, calendars are only fetched in full when something changed
 
 ## Installation
 
-Requires Home Assistant 2026.3 or newer and an account on a CalDAV server.
+Requires Home Assistant 2026.3 or newer, HACS and an account on a CalDAV server.
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ivenos&repository=ha_caldav&category=integration)
 
@@ -46,7 +45,7 @@ Each calendar gets a `calendar.<calendar>` entity for its events and a `todo.<ca
 
 | Option | Default | Description |
 |---|---|---|
-| Calendars to include | `all` | The calendars that get entities. With `all`, a calendar added on the server gets them at the next poll |
+| Calendars to include | `all` | The calendars that get entities. With every calendar ticked, one added on the server gets them at the next poll too |
 | Minutes between polls | `15` | How often to look for changes made outside Home Assistant, 1-1440 |
 | Seconds a request may take | `30` | How long to wait for the server to answer, 5-120 |
 | Days ahead | `7` | How far ahead to look for the upcoming event, 1-365 |
@@ -61,7 +60,7 @@ All actions except `create_calendar` and `delete_calendar` target a calendar ent
 |---|---|
 | `ha_caldav.create_event` / `update_event` | Create or change an event with alarms, attendees, organizer, URL, categories, status, transparency, classification and priority |
 | `ha_caldav.delete_event` | Delete an event, a single occurrence of a series or an occurrence and everything after it |
-| `ha_caldav.search_events` | Search by summary, description, location, category, status or uid, returns `events` |
+| `ha_caldav.search_events` | Search by summary, description, location, category, status or uid, returns `events`, one per occurrence within a start and end |
 | `ha_caldav.get_free_busy` | Busy periods in a time window, returns `periods` |
 | `ha_caldav.move_event` | Move or copy an event to another calendar |
 | `ha_caldav.import_ics` / `export_ics` | Import or export iCalendar data, the export returns `ics` |
@@ -79,6 +78,6 @@ Tested with Nextcloud, Radicale, Xandikos, Baikal and SOGo. Not supported: email
 
 Copyright © Iven Schlösser. CalDAV Complete is free software, licensed under the [GNU General Public License v3.0 only](LICENSE). You may use, modify and redistribute it. Anyone distributing a modified version must release it under the same license and make its source code available.
 
-CalDAV Complete builds on caldav, licensed under the GNU General Public License v3.0 or later or the Apache License 2.0, icalendar, licensed under the BSD 2-Clause License, and vobject, licensed under the Apache License 2.0.
+CalDAV Complete builds on caldav, licensed under the GNU General Public License v3.0 or later or the Apache License 2.0, icalendar, licensed under the BSD 2-Clause License, vobject, licensed under the Apache License 2.0, and python-dateutil, licensed under the Apache License 2.0 and the BSD 3-Clause License.
 
 CalDAV Complete is not affiliated with or endorsed by the Open Home Foundation. "Home Assistant" and the "Home Assistant" logo are trademarks of the Open Home Foundation.

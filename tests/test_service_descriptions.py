@@ -25,22 +25,22 @@ def _registered() -> dict[str, dict]:
 
     A hand-written table would keep passing for a service nobody described.
     """
-    platform = Mock()
-    service_module.async_register_entity_services(platform)
-    schemas = {
-        call.args[0]: call.args[1]
-        for call in platform.async_register_entity_service.call_args_list
-    }
-    hass = Mock()
+    registered: list[tuple] = []
     with pytest.MonkeyPatch.context() as patch:
-        admin: list[tuple] = []
+        patch.setattr(
+            service_module,
+            "async_register_platform_entity_service",
+            lambda _hass, _domain, name, schema, **_: registered.append((name, schema)),
+        )
         patch.setattr(
             service_module,
             "async_register_admin_service",
-            lambda _hass, _domain, name, _func, schema: admin.append((name, schema)),
+            lambda _hass, _domain, name, _func, schema: registered.append(
+                (name, schema)
+            ),
         )
-        service_module.async_register_services(hass)
-    return {name: _markers(schema) for name, schema in (schemas | dict(admin)).items()}
+        service_module.async_register_services(Mock())
+    return {name: _markers(schema) for name, schema in registered}
 
 
 def _markers(schema: object) -> dict:

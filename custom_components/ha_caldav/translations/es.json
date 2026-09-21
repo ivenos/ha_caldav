@@ -12,7 +12,7 @@
         },
         "data_description": {
           "url": "La dirección de tu servidor CalDAV. En la mayoría de los servidores basta con el nombre del host.",
-          "verify_ssl": "Déjalo activado a menos que sepas por qué desactivarlo. Desactivado, cualquiera entre Home Assistant y el servidor puede leer la contraseña."
+          "verify_ssl": "Déjalo activado a menos que sepas por qué desactivarlo. Desactivado, cualquiera que intercepte la conexión puede hacerse pasar por el servidor y leer la contraseña."
         },
         "sections": {
           "certificates": {
@@ -40,7 +40,7 @@
         },
         "data_description": {
           "url": "La dirección de tu servidor CalDAV. En la mayoría de los servidores basta con el nombre del host.",
-          "verify_ssl": "Déjalo activado a menos que sepas por qué desactivarlo. Desactivado, cualquiera entre Home Assistant y el servidor puede leer la contraseña."
+          "verify_ssl": "Déjalo activado a menos que sepas por qué desactivarlo. Desactivado, cualquiera que intercepte la conexión puede hacerse pasar por el servidor y leer la contraseña."
         },
         "sections": {
           "certificates": {
@@ -70,7 +70,10 @@
     "error": {
       "invalid_auth": "Autenticación no válida",
       "cannot_connect": "No se pudo conectar",
-      "unknown": "Error inesperado"
+      "unknown": "Error inesperado",
+      "invalid_url": "La URL no es una dirección http o https",
+      "certificate_not_found": "Una ruta en Certificados no lleva a ningún archivo",
+      "certificate_failed": "La conexión TLS falló: no se pudo verificar el certificado del servidor o el servidor rechazó el certificado de cliente"
     },
     "abort": {
       "already_configured": "Esta cuenta ya está configurada",
@@ -130,7 +133,7 @@
       }
     },
     "error": {
-      "no_calendars": "Selecciona al menos un calendario; una cuenta sin ninguno no tiene ninguna entidad."
+      "no_calendars": "Selecciona al menos un calendario; una cuenta sin calendarios no tiene ninguna entidad."
     }
   },
   "issues": {
@@ -159,6 +162,9 @@
     "document_no_uid": {
       "message": "El documento contiene un componente sin UID."
     },
+    "duplicate_uid": {
+      "message": "El documento contiene más de un elemento con el UID {uid}."
+    },
     "end_before_start": {
       "message": "El fin es anterior al inicio."
     },
@@ -166,7 +172,7 @@
       "message": "Este elemento ha cambiado en el servidor desde la última vez que Home Assistant lo leyó. Recarga el calendario y vuelve a hacer el cambio."
     },
     "invalid_rrule": {
-      "message": "La regla de repetición no es válida: {reason}"
+      "message": "La regla de recurrencia no es válida: {reason}"
     },
     "mixed_time_types": {
       "message": "El inicio y el fin deben ser del mismo tipo: dos fechas para un evento de todo el día, o dos fechas con hora."
@@ -416,7 +422,7 @@
         },
         "recurrence_range": {
           "name": "Alcance de la recurrencia",
-          "description": "THISANDFUTURE para cambiar esta ocurrencia y todas las siguientes."
+          "description": "Para cambiar también todas las ocurrencias siguientes."
         },
         "summary": {
           "name": "Título",
@@ -508,7 +514,7 @@
         },
         "recurrence_range": {
           "name": "Alcance de la recurrencia",
-          "description": "THISANDFUTURE para eliminar esta ocurrencia y todas las siguientes."
+          "description": "Para eliminar también todas las ocurrencias siguientes."
         }
       }
     },

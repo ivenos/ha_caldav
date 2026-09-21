@@ -34,7 +34,7 @@ from custom_components.ha_caldav.const import (
     CONF_READ_ONLY,
     DOMAIN,
 )
-from custom_components.ha_caldav.coordinator import _MAX_KEPT_POLLS
+from custom_components.ha_caldav.coordinator import _MAX_KEPT_POLLS, _TodoRead
 
 ENTRY_DATA = {
     CONF_URL: "https://cloud.example.com/remote.php/dav",
@@ -1094,11 +1094,9 @@ async def test_a_server_that_never_moves_its_sync_token_is_read_again(
     assert calendar.search.call_count > 0
 
 
-async def test_an_edit_without_a_rule_leaves_the_recurrence_alone(
+async def test_an_edit_without_a_rule_core_never_showed_leaves_it_alone(
     hass: HomeAssistant,
 ) -> None:
-    """expand strips RRULE from what the frontend echoes back, so an absent
-    rule is never a request to drop the series."""
     await _setup(hass, [_calendar("Personal")])
     entity = _entity(hass, "calendar.personal")
 
@@ -1558,7 +1556,7 @@ async def test_an_edit_from_the_panel_carries_the_rule_it_was_given(
     assert write.call_args.args[2]["rrule"] == "FREQ=WEEKLY"
 
 
-async def test_a_colour_hook_that_arrives_before_registration_is_ignored(
+async def test_a_color_hook_that_arrives_before_registration_is_ignored(
     hass: HomeAssistant,
 ) -> None:
     """Both hooks read the registry entry, and an entity has none until it is
@@ -1730,6 +1728,114 @@ async def test_a_401_reauths_beside_a_half_that_has_been_broken_for_good(
     await hass.async_block_till_done()
 
     assert [
+        flow
+        for flow in hass.config_entries.flow.async_progress()
+        if flow["context"].get("source") == "reauth"
+    ]
+
+
+async def test_leaving_out_a_rule_the_editor_showed_ends_the_recurrence(
+    hass: HomeAssistant,
+) -> None:
+    # The editor sends no rrule at all for "Does not repeat".
+    await _setup(hass, [_calendar("Personal")])
+    entity = _entity(hass, "calendar.personal")
+    entity.coordinator.rrules = {"uid-1": "FREQ=WEEKLY"}
+
+    with patch("custom_components.ha_caldav.calendar.update_event") as update:
+        await entity.async_update_event(
+            "uid-1",
+            _event_fields(),
+            recurrence_id="2026-07-13 09:00:00+00:00",
+            recurrence_range="THISANDFUTURE",
+        )
+
+    assert update.call_args.args[2]["rrule"] == ""
+
+
+async def test_leaving_out_a_rule_core_refused_to_show_keeps_it(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass, [_calendar("Personal")])
+    entity = _entity(hass, "calendar.personal")
+    entity.coordinator.rrules = {"uid-1": "FREQ=HOURLY"}
+
+    with patch("custom_components.ha_caldav.calendar.update_event") as update:
+        await entity.async_update_event("uid-1", _event_fields())
+
+    assert "rrule" not in update.call_args.args[2]
+
+
+async def test_the_state_moves_on_once_the_current_event_ends(
+    hass: HomeAssistant,
+) -> None:
+    # The state is written again at the end of an event, not only at a poll.
+    calendar = _calendar("Personal")
+    calendar.search.return_value = [
+        _search_item("First", timedelta(hours=1)),
+        _search_item("Second", timedelta(hours=2)),
+    ]
+    await _setup(hass, [calendar])
+    entity = _entity(hass, "calendar.personal")
+    assert entity.event.summary == "First"
+
+    later = dt_util.now() + timedelta(hours=2, minutes=30)
+    with patch("homeassistant.util.dt.now", return_value=later):
+        assert entity.event.summary == "Second"
+        assert entity.state == "on"
+
+
+async def test_a_todo_read_already_on_the_wire_cannot_restore_a_dropped_etag(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    coordinator = _entity(hass, "calendar.personal").coordinator
+    coordinator.todo_etags = {"todo-1": '"v1"'}
+
+    read_at = coordinator._etag_epoch
+    coordinator.forget_etags("todo_etags", ("todo-1",))
+    coordinator._commit_todos(
+        _TodoRead(items=[], etags={"todo-1": '"v1"'}, epoch=read_at)
+    )
+
+    assert coordinator.todo_etags == {}
+
+
+async def test_a_panel_read_already_on_the_wire_cannot_restore_a_dropped_etag(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    coordinator = _entity(hass, "calendar.personal").coordinator
+
+    def read_while_a_write_lands(start, end):
+        coordinator.forget_etags("etags", ("uid-1",))
+        return {"uid-1": '"v1"'}, {}
+
+    now = dt_util.now()
+    with patch.object(coordinator, "_window_index", read_while_a_write_lands):
+        await coordinator.async_get_events(hass, now, now + timedelta(days=30))
+
+    assert "uid-1" not in coordinator.etags
+
+
+async def test_a_403_that_persists_fails_the_poll_without_a_reauth(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    coordinator = _entity(hass, "calendar.personal").coordinator
+    calendar.search.side_effect = AuthorizationError(
+        url="https://cloud.example.com/dav/", reason="Forbidden"
+    )
+
+    for _ in range(_MAX_KEPT_POLLS + 1):
+        coordinator._fetched_at = dt_util.utcnow() - timedelta(days=1)
+        await coordinator.async_refresh()
+
+    assert not coordinator.last_update_success
+    assert not [
         flow
         for flow in hass.config_entries.flow.async_progress()
         if flow["context"].get("source") == "reauth"

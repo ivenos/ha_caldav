@@ -12,10 +12,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  RUFF_VERSION: "0.16.8"
   PYTHON_VERSION: "3.14"
-  # Home Assistant 2026.3.4, the floor hacs.json sets.
-  OLDEST_HARNESS: "0.13.320"
+  # Home Assistant 2026.3.1; no harness pins the 2026.3.0 hacs.json sets.
+  OLDEST_HARNESS: "0.13.317"
 
 permissions:
   contents: read
@@ -44,7 +43,7 @@ jobs:
       # No moving major tag upstream.
       - uses: astral-sh/ruff-action@v4.1.0
         with:
-          version: ${{ env.RUFF_VERSION }}
+          version-file: requirements_test.txt
           args: check
 
       - name: Check formatting
@@ -53,6 +52,7 @@ jobs:
   test:
     name: test (${{ matrix.homeassistant }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -66,12 +66,12 @@ jobs:
           cache: pip
           cache-dependency-path: requirements_test.txt
 
+      - name: Pin the oldest supported Home Assistant
+        if: matrix.homeassistant == 'oldest'
+        run: sed -i "s/^pytest-homeassistant-custom-component==.*/pytest-homeassistant-custom-component==$OLDEST_HARNESS/" requirements_test.txt
+
       - name: Install test dependencies
         run: pip install -r requirements_test.txt
-
-      - name: Install the oldest supported Home Assistant
-        if: matrix.homeassistant == 'oldest'
-        run: pip install "pytest-homeassistant-custom-component==${{ env.OLDEST_HARNESS }}"
 
       - name: Run tests
         run: pytest

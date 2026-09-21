@@ -1,7 +1,9 @@
 """Tests for completing recurring to-do items."""
 
 from datetime import UTC, date, datetime
+from zoneinfo import ZoneInfo
 
+from homeassistant.util import dt as dt_util
 from icalendar import Calendar as ICalendar
 
 from custom_components.ha_caldav.api import update_todo
@@ -314,3 +316,123 @@ def test_a_todo_written_with_two_starts_can_still_be_dated() -> None:
     vtodo = calendar.todo.stored()
     assert vtodo["DTSTART"].dt == datetime(2026, 7, 6, 9, 0, tzinfo=UTC)
     assert vtodo["DUE"].dt == datetime(2026, 7, 11, 9, 0, tzinfo=UTC)
+
+
+def test_renaming_a_recurring_todo_that_is_already_done_does_not_roll_it() -> None:
+    # Core sends the status along with every edit.
+    calendar = FakeTodoCalendar(
+        _vtodo("DUE;VALUE=DATE:20260706\r\nRRULE:FREQ=WEEKLY\r\nSTATUS:COMPLETED")
+    )
+
+    update_todo(
+        calendar,
+        "t1",
+        {"summary": "Renamed", "status": "COMPLETED", "due": date(2026, 7, 6)},
+    )
+
+    stored = calendar.todo.stored()
+    assert stored["DUE"].dt == date(2026, 7, 6)
+    assert str(stored["STATUS"]) == "COMPLETED"
+
+
+def test_completing_a_recurring_todo_skips_an_excluded_date() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo("DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY\r\nEXDATE:20260713T090000Z")
+    )
+
+    update_todo(calendar, "t1", COMPLETE)
+
+    assert calendar.todo.stored()["DUE"].dt == datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
+
+
+def test_completing_a_counted_todo_past_an_excluded_date_uses_up_both() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY;COUNT=5\r\n"
+            "EXDATE:20260713T090000Z"
+        )
+    )
+
+    update_todo(calendar, "t1", COMPLETE)
+
+    assert calendar.todo.stored()["RRULE"]["COUNT"] == [3]
+
+
+def test_completing_a_recurring_todo_takes_an_added_date_first() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo("DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY\r\nRDATE:20260708T090000Z")
+    )
+
+    update_todo(calendar, "t1", COMPLETE)
+
+    assert calendar.todo.stored()["DUE"].dt == datetime(2026, 7, 8, 9, 0, tzinfo=UTC)
+
+
+def test_a_roll_clears_the_completion_and_marks_the_item_revised() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY\r\nSEQUENCE:2\r\n"
+            "PERCENT-COMPLETE:50"
+        )
+    )
+
+    update_todo(calendar, "t1", COMPLETE)
+
+    stored = calendar.todo.stored()
+    assert "PERCENT-COMPLETE" not in stored
+    assert "COMPLETED" not in stored
+    assert stored["DTSTAMP"].dt > datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def test_a_utc_due_rolls_with_the_wall_clock_of_its_start() -> None:
+    zone = ZoneInfo("Europe/Berlin")
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DTSTART;TZID=Europe/Berlin:20261019T090000\r\n"
+            "DUE:20261019T080000Z\r\nRRULE:FREQ=WEEKLY"
+        )
+    )
+
+    update_todo(calendar, "t1", {"summary": "Water plants", "status": "COMPLETED"})
+
+    stored = calendar.todo.stored()
+    # Berlin leaves summer time on 2026-10-25; the hour between the two stays.
+    assert stored["DTSTART"].dt == datetime(2026, 10, 26, 9, 0, tzinfo=zone)
+    assert stored["DUE"].dt == datetime(2026, 10, 26, 9, 0, tzinfo=UTC)
+
+
+def test_an_edit_keeps_a_due_time_in_the_zone_it_was_written_in() -> None:
+    new_york = ZoneInfo("America/New_York")
+    calendar = FakeTodoCalendar(_vtodo("DUE;TZID=America/New_York:20260706T100000"))
+
+    update_todo(
+        calendar,
+        "t1",
+        {
+            "summary": "Renamed",
+            "status": "NEEDS-ACTION",
+            "due": datetime(2026, 7, 6, 16, 0, tzinfo=ZoneInfo("Europe/Berlin")),
+        },
+    )
+
+    due = calendar.todo.stored()["DUE"].dt
+    assert (due.replace(tzinfo=None), due.tzinfo) == (
+        datetime(2026, 7, 6, 10),
+        new_york,
+    )
+
+
+def test_an_edit_keeps_a_floating_due_time_floating() -> None:
+    calendar = FakeTodoCalendar(_vtodo("DUE:20260706T090000"))
+
+    update_todo(
+        calendar,
+        "t1",
+        {
+            "summary": "Renamed",
+            "status": "NEEDS-ACTION",
+            "due": dt_util.as_local(datetime(2026, 7, 6, 9, 0)),
+        },
+    )
+
+    assert calendar.todo.stored()["DUE"].dt == datetime(2026, 7, 6, 9, 0)

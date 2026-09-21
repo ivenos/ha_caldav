@@ -12,7 +12,7 @@ from caldav.elements import cdav, dav
 from caldav.elements.base import BaseElement
 from caldav.lib.namespace import ns
 
-from .connection import calendar_key
+from .connection import calendar_key, origin
 from .const import COMPONENT_EVENT, COMPONENT_TODO, WRITE_PRIVILEGES
 
 _LOGGER = logging.getLogger(__name__)
@@ -96,13 +96,9 @@ def _objects_and_props(response: Any, base: Any = None) -> dict[str, dict[str, A
 
 def _same_server(href: str, base: Any) -> bool:
     """Return whether an href is relative or names the server asked."""
-    parsed = urlparse(href)
-    if not parsed.netloc:
+    if not urlparse(href).netloc:
         return True
-    if base is None:
-        return False
-    here = urlparse(str(base))
-    return (parsed.scheme, parsed.netloc) == (here.scheme, here.netloc)
+    return base is not None and origin(href) == origin(str(base)) is not None
 
 
 def capability_for(
@@ -146,7 +142,6 @@ def fetch_address_set(client: caldav.DAVClient) -> list[str]:
         addresses = client.principal().calendar_user_address_set()
         return [_absolute(client, str(address)) for address in addresses if address]
     except Exception as err:  # noqa: BLE001
-        # NotFoundError, or a parse failure on a shape caldav does not expect.
         _LOGGER.debug("No calendar user address set: %s", err)
         return []
 

@@ -1713,21 +1713,18 @@ def test_a_new_override_starts_its_own_sequence() -> None:
     assert int(override["SEQUENCE"]) == 1
 
 
-def test_an_override_of_an_orphan_object_carries_one_recurrence_id() -> None:
-    # _master falls back to the first component on an object holding only
-    # overrides, and RFC 5545 allows a component exactly one RECURRENCE-ID.
-    # A second turns the property into a list that every later edit trips on.
+def test_an_orphan_object_refuses_an_occurrence_it_does_not_hold() -> None:
     calendar = FakeCalendar(ORPHAN_ONLY_OBJECT)
 
-    update_event(
-        calendar,
-        "orphan-1",
-        {"summary": "Again"},
-        recurrence_id="2026-07-13 11:00:00+00:00",
-    )
+    with pytest.raises(Refused, match="occurrence_not_found"):
+        update_event(
+            calendar,
+            "orphan-1",
+            {"summary": "Again"},
+            recurrence_id="2026-07-13 11:00:00+00:00",
+        )
 
-    for vevent in calendar.event.stored().walk("VEVENT"):
-        assert not isinstance(vevent["RECURRENCE-ID"], list)
+    assert not calendar.event.saved
 
 
 def test_this_and_future_on_an_orphan_object_is_refused() -> None:
@@ -2480,7 +2477,7 @@ def test_an_exception_covering_later_occurrences_is_refused() -> None:
     assert not calendar.event.saved
 
 
-def test_moving_a_whole_series_carries_its_extra_and_cancelled_dates() -> None:
+def test_moving_a_whole_series_carries_its_extra_and_canceled_dates() -> None:
     """Clearing them would lose the RDATE occurrence and resurrect the EXDATEd
     one, which the split path already gets right."""
     series = TIMED_SERIES.replace(
@@ -3404,3 +3401,275 @@ def test_a_split_that_cannot_take_its_tail_back_still_reports_the_real_failure(
         )
 
     assert "duplicate events" in caplog.text
+
+
+def test_a_series_moved_with_its_rule_respelled_keeps_its_exceptions() -> None:
+    # The frontend re-emits the rule of a moved series in its own spelling.
+    calendar = FakeCalendar(SERIES_WITH_OVERRIDE_AND_EXDATE)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {**_renamed(10), "summary": "Standup", "rrule": "FREQ=WEEKLY;BYDAY=MO"},
+        recurrence_id=FIRST_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    stored = calendar.event.stored()
+    assert _exdates(_master(stored)) == [datetime(2026, 7, 20, 10, 0, tzinfo=UTC)]
+    [override] = _overrides(stored)
+    assert override["RECURRENCE-ID"].dt == datetime(2026, 7, 13, 10, 0, tzinfo=UTC)
+    assert override["SUMMARY"] == "Standup moved"
+
+
+def test_a_tail_with_the_rule_respelled_keeps_the_exceptions_past_the_cut() -> None:
+    calendar = FakeCalendar(SERIES_WITH_OVERRIDE_AND_EXDATE)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {
+            "summary": "Standup",
+            "dtstart": datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 13, 13, 0, tzinfo=UTC),
+            "rrule": "FREQ=WEEKLY;BYDAY=MO",
+        },
+        recurrence_id=SECOND_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    # The exception at the cut showed 11:00, so everything moves by an hour.
+    tail = calendar.created[0].stored()
+    assert _master(tail)["RRULE"].to_ical() == b"FREQ=WEEKLY"
+    assert _exdates(_master(tail)) == [datetime(2026, 7, 20, 10, 0, tzinfo=UTC)]
+    assert len(_overrides(tail)) == 1
+
+
+def test_a_tail_echoing_the_count_of_the_whole_series_takes_what_is_left() -> None:
+    calendar = FakeCalendar(COUNTED_SERIES)
+
+    update_event(
+        calendar,
+        "counted-1",
+        {
+            "summary": "Standup",
+            "dtstart": datetime(2026, 7, 20, 10, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 20, 11, 0, tzinfo=UTC),
+            "rrule": "FREQ=WEEKLY;COUNT=10;BYDAY=MO",
+        },
+        recurrence_id=THIRD_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    assert _master(calendar.created[0].stored())["RRULE"]["COUNT"] == [8]
+
+
+def test_an_empty_rule_from_an_occurrence_on_ends_the_series_there() -> None:
+    calendar = FakeCalendar(TIMED_SERIES)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"summary": "Last one", "rrule": ""},
+        recurrence_id=THIRD_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    assert "UNTIL" in _master(calendar.event.stored())["RRULE"]
+    tail = _master(calendar.created[0].stored())
+    assert "RRULE" not in tail
+    assert tail["DTSTART"].dt == datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
+
+
+FIRST_MOVED_SERIES = TIMED_SERIES.replace(
+    "END:VEVENT\n",
+    "END:VEVENT\nBEGIN:VEVENT\nUID:timed-1\nDTSTAMP:20260101T000000Z\n"
+    "RECURRENCE-ID:20260706T090000Z\nDTSTART:20260706T110000Z\n"
+    "DTEND:20260706T120000Z\nSUMMARY:Standup moved\nEND:VEVENT\n",
+)
+
+
+def test_an_edit_from_a_moved_first_occurrence_leaves_the_series_on_its_slots() -> None:
+    calendar = FakeCalendar(FIRST_MOVED_SERIES)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {
+            "summary": "Renamed",
+            "dtstart": datetime(2026, 7, 6, 11, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 12, 0, tzinfo=UTC),
+        },
+        recurrence_id=FIRST_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    stored = calendar.event.stored()
+    assert _master(stored)["DTSTART"].dt == datetime(2026, 7, 6, 9, 0, tzinfo=UTC)
+    assert _master(stored)["SUMMARY"] == "Renamed"
+    [moved] = _overrides(stored)
+    assert moved["DTSTART"].dt == datetime(2026, 7, 6, 11, 0, tzinfo=UTC)
+    assert moved["SUMMARY"] == "Renamed"
+
+
+def test_a_split_at_a_moved_occurrence_carries_the_edit_to_it() -> None:
+    calendar = FakeCalendar(SERIES_WITH_OVERRIDE)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {
+            "summary": "Renamed",
+            "location": "Room 9",
+            "dtstart": datetime(2026, 7, 13, 11, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+        },
+        recurrence_id=SECOND_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    [moved] = _overrides(calendar.created[0].stored())
+    assert moved["SUMMARY"] == "Renamed"
+    assert moved["LOCATION"] == "Room 9"
+    assert moved["DTSTART"].dt == datetime(2026, 7, 13, 11, 0, tzinfo=UTC)
+
+
+EXCLUDED_START_SERIES = TIMED_SERIES.replace(
+    "RRULE:FREQ=WEEKLY\n", "RRULE:FREQ=WEEKLY\nEXDATE:20260706T090000Z\n"
+)
+
+
+def test_a_split_leaving_no_occurrence_before_it_removes_the_head() -> None:
+    # Nextcloud refuses to store an object without a single instance.
+    calendar = FakeCalendar(EXCLUDED_START_SERIES)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"summary": "Renamed"},
+        recurrence_id=SECOND_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    assert calendar.event.deleted
+    assert not calendar.event.saved
+    assert len(calendar.created) == 1
+
+
+def test_deleting_from_the_first_occurrence_left_removes_the_whole_object() -> None:
+    calendar = FakeCalendar(EXCLUDED_START_SERIES)
+
+    delete_event(calendar, "timed-1", SECOND_OCCURRENCE, this_and_future=True)
+
+    assert calendar.event.deleted
+    assert not calendar.event.saved
+
+
+def test_an_occurrence_of_an_event_that_does_not_recur_is_refused() -> None:
+    calendar = FakeCalendar(SINGLE_EVENT)
+
+    with pytest.raises(Refused, match="not_recurring"):
+        update_event(
+            calendar, "single-1", {"summary": "x"}, recurrence_id=FIRST_OCCURRENCE
+        )
+
+    assert not calendar.event.saved
+
+
+def test_a_new_organizer_for_the_series_reaches_its_exceptions() -> None:
+    calendar = FakeCalendar(SERIES_WITH_OVERRIDE)
+
+    update_event(calendar, "timed-1", {"organizer": "new@example.com"})
+
+    for vevent in calendar.event.stored().walk("VEVENT"):
+        assert str(vevent["ORGANIZER"]) == "mailto:new@example.com"
+
+
+INVITED_SERIES = TIMED_SERIES.replace(
+    "SUMMARY:Standup\n",
+    "SUMMARY:Standup\nSEQUENCE:4\nORGANIZER:mailto:boss@example.com\n"
+    "ATTENDEE:mailto:me@example.com\n",
+)
+
+
+def test_an_edit_to_someone_elses_event_leaves_its_sequence_alone() -> None:
+    calendar = FakeCalendar(INVITED_SERIES)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"alarms": [15]},
+        addresses=["mailto:me@example.com", "/principals/me/"],
+    )
+
+    assert int(_master(calendar.event.stored())["SEQUENCE"]) == 4
+
+
+def test_an_edit_to_ones_own_event_moves_its_sequence() -> None:
+    calendar = FakeCalendar(INVITED_SERIES.replace("boss@", "me@"))
+
+    update_event(
+        calendar, "timed-1", {"alarms": [15]}, addresses=["mailto:me@example.com"]
+    )
+
+    assert int(_master(calendar.event.stored())["SEQUENCE"]) == 5
+
+
+def test_a_moved_series_keeps_the_occurrence_its_end_named() -> None:
+    calendar = FakeCalendar(
+        TIMED_SERIES.replace("FREQ=WEEKLY", "FREQ=WEEKLY;UNTIL=20260720T090000Z")
+    )
+
+    update_event(calendar, "timed-1", _renamed(10))
+
+    rule = _master(calendar.event.stored())["RRULE"]
+    assert rule["UNTIL"] == [datetime(2026, 7, 20, 10, 0, tzinfo=UTC)]
+
+
+def test_a_rule_given_with_a_floating_end_is_stored_with_it_in_utc() -> None:
+    # The frontend writes UTC digits without the Z.
+    calendar = FakeCalendar(TZID_SERIES)
+    master = _master(calendar.event.stored())
+
+    update_event(
+        calendar,
+        master["UID"],
+        {"rrule": "FREQ=WEEKLY;UNTIL=20261229T090000"},
+    )
+
+    rule = _master(calendar.event.stored())["RRULE"]
+    assert rule["UNTIL"] == [datetime(2026, 12, 29, 9, 0, tzinfo=UTC)]
+
+
+@pytest.mark.parametrize("this_and_future", [False, True])
+def test_a_delete_is_refused_over_a_ranged_exception(this_and_future: bool) -> None:
+    ranged = SERIES_WITH_OVERRIDE_FIRST.replace(
+        "RECURRENCE-ID:20260713T090000Z",
+        "RECURRENCE-ID;RANGE=THISANDFUTURE:20260713T090000Z",
+    )
+    calendar = FakeCalendar(ranged)
+
+    with pytest.raises(Refused, match="ranged_override"):
+        delete_event(
+            calendar, "timed-1", THIRD_OCCURRENCE, this_and_future=this_and_future
+        )
+
+    assert not calendar.event.saved
+    assert not calendar.event.deleted
+
+
+def test_moving_a_series_shifts_every_line_of_its_excluded_dates() -> None:
+    # Apple and Thunderbird write one EXDATE per line.
+    calendar = FakeCalendar(
+        TIMED_SERIES.replace(
+            "RRULE:FREQ=WEEKLY\n",
+            "RRULE:FREQ=WEEKLY\nEXDATE:20260713T090000Z\nEXDATE:20260720T090000Z\n",
+        )
+    )
+
+    update_event(calendar, "timed-1", _renamed(10))
+
+    assert _exdates(_master(calendar.event.stored())) == [
+        datetime(2026, 7, 13, 10, 0, tzinfo=UTC),
+        datetime(2026, 7, 20, 10, 0, tzinfo=UTC),
+    ]

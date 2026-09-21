@@ -8,6 +8,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.auth.permissions.const import POLICY_CONTROL
+from homeassistant.components.calendar import DOMAIN as CALENDAR_DOMAIN
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import (
     HomeAssistant,
@@ -17,8 +18,10 @@ from homeassistant.core import (
 )
 from homeassistant.exceptions import ServiceValidationError, Unauthorized, UnknownUser
 from homeassistant.helpers import config_validation as cv, entity_registry as er
-from homeassistant.helpers.entity_platform import EntityPlatform
-from homeassistant.helpers.service import async_register_admin_service
+from homeassistant.helpers.service import (
+    async_register_admin_service,
+    async_register_platform_entity_service,
+)
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
@@ -80,7 +83,8 @@ from .coordinator import (
     HaCaldavConfigEntry,
     ManagedCalendar,
     calendar_unique_id,
-    component_of,
+    components_of,
+    master_of,
     to_event,
     todo_unique_id,
 )
@@ -149,8 +153,8 @@ EXTRA_FIELDS = {
                 vol.Schema(
                     {
                         vol.Required("minutes_before"): vol.Coerce(int),
-                        vol.Optional("action"): vol.In(("DISPLAY", "AUDIO")),
-                        vol.Optional("related"): vol.In(("START", "END")),
+                        vol.Optional("action"): _named(("DISPLAY", "AUDIO")),
+                        vol.Optional("related"): _named(("START", "END")),
                         vol.Optional("description"): cv.string,
                     }
                 ),
@@ -295,7 +299,30 @@ DELETE_CALENDAR_SCHEMA = vol.Schema(
 
 
 def async_register_services(hass: HomeAssistant) -> None:
-    """Register the services that act on an account rather than a calendar."""
+    """Register the services, up front so they exist while an entry retries."""
+    ONLY, NONE = SupportsResponse.ONLY, SupportsResponse.NONE
+    # Not feature-gated: _require_writable names the option the user set.
+    for name, schema, func, response in (
+        (SERVICE_SEARCH_EVENTS, SEARCH_SCHEMA, _async_search_events, ONLY),
+        (SERVICE_GET_FREE_BUSY, FREE_BUSY_SCHEMA, _async_get_free_busy, ONLY),
+        (SERVICE_CREATE_EVENT, CREATE_EVENT_SCHEMA, _async_create_event, NONE),
+        (SERVICE_UPDATE_EVENT, UPDATE_EVENT_SCHEMA, _async_update_event, NONE),
+        (SERVICE_DELETE_EVENT, DELETE_EVENT_SCHEMA, _async_delete_event, NONE),
+        (SERVICE_MOVE_EVENT, MOVE_EVENT_SCHEMA, _async_move_event, NONE),
+        (SERVICE_IMPORT_ICS, IMPORT_SCHEMA, _async_import_ics, NONE),
+        (SERVICE_EXPORT_ICS, EXPORT_SCHEMA, _async_export_ics, ONLY),
+        (SERVICE_SET_CALENDAR_COLOR, COLOR_SCHEMA, _async_set_color, NONE),
+        (SERVICE_RESPOND_TO_INVITATION, INVITATION_SCHEMA, _async_respond, NONE),
+    ):
+        async_register_platform_entity_service(
+            hass,
+            DOMAIN,
+            name,
+            entity_domain=CALENDAR_DOMAIN,
+            func=func,
+            schema=schema,
+            supports_response=response,
+        )
     # Admin only: a plain service gets no permission check at all.
     async_register_admin_service(
         hass,
@@ -310,50 +337,6 @@ def async_register_services(hass: HomeAssistant) -> None:
         SERVICE_DELETE_CALENDAR,
         partial(_async_delete_calendar, hass),
         schema=DELETE_CALENDAR_SCHEMA,
-    )
-
-
-def async_register_entity_services(platform: EntityPlatform) -> None:
-    """Register the services that target one calendar entity."""
-    platform.async_register_entity_service(
-        SERVICE_SEARCH_EVENTS,
-        SEARCH_SCHEMA,
-        _async_search_events,
-        supports_response=SupportsResponse.ONLY,
-    )
-    platform.async_register_entity_service(
-        SERVICE_GET_FREE_BUSY,
-        FREE_BUSY_SCHEMA,
-        _async_get_free_busy,
-        supports_response=SupportsResponse.ONLY,
-    )
-    # Not feature-gated: _require_writable names the option the user set.
-    platform.async_register_entity_service(
-        SERVICE_CREATE_EVENT, CREATE_EVENT_SCHEMA, _async_create_event
-    )
-    platform.async_register_entity_service(
-        SERVICE_UPDATE_EVENT, UPDATE_EVENT_SCHEMA, _async_update_event
-    )
-    platform.async_register_entity_service(
-        SERVICE_DELETE_EVENT, DELETE_EVENT_SCHEMA, _async_delete_event
-    )
-    platform.async_register_entity_service(
-        SERVICE_MOVE_EVENT, MOVE_EVENT_SCHEMA, _async_move_event
-    )
-    platform.async_register_entity_service(
-        SERVICE_IMPORT_ICS, IMPORT_SCHEMA, _async_import_ics
-    )
-    platform.async_register_entity_service(
-        SERVICE_EXPORT_ICS,
-        EXPORT_SCHEMA,
-        _async_export_ics,
-        supports_response=SupportsResponse.ONLY,
-    )
-    platform.async_register_entity_service(
-        SERVICE_SET_CALENDAR_COLOR, COLOR_SCHEMA, _async_set_color
-    )
-    platform.async_register_entity_service(
-        SERVICE_RESPOND_TO_INVITATION, INVITATION_SCHEMA, _async_respond
     )
 
 
@@ -387,23 +370,31 @@ async def _async_search_events(
 
 
 def _found_events(calendar: Any, criteria: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the matches of a server-side search, mapped. Blocking."""
+    """Return the matches of a server-side search, mapped. Blocking.
+
+    Within a window a series answers with its occurrences there, otherwise
+    with its master.
+    """
+    window = "start" in criteria and "end" in criteria
+    extra = {"expand": True, "split_expanded": False} if window else {}
     events = []
-    for item in calendar.search(event=True, **criteria):
-        vevent = component_of(item, "vevent")
-        if vevent is None or (event := to_event(vevent)) is None:
-            continue
-        events.append(
-            {
-                "uid": event.uid,
-                "summary": event.summary,
-                "start": event.start.isoformat(),
-                "end": event.end.isoformat(),
-                "description": event.description,
-                "location": event.location,
-                **read_extras(vevent),
-            }
-        )
+    for item in calendar.search(event=True, **criteria, **extra):
+        vevents = components_of(item, "vevent") if window else [master_of(item)]
+        for vevent in vevents:
+            if vevent is None or (event := to_event(vevent)) is None:
+                continue
+            events.append(
+                {
+                    "uid": event.uid,
+                    "recurrence_id": event.recurrence_id,
+                    "summary": event.summary,
+                    "start": event.start.isoformat(),
+                    "end": event.end.isoformat(),
+                    "description": event.description,
+                    "location": event.location,
+                    **read_extras(vevent),
+                }
+            )
     return events
 
 
@@ -542,7 +533,8 @@ def _event_fields(data: dict[str, Any]) -> dict[str, Any]:
 
 async def _async_move_event(entity: HaCaldavCalendarEntity, call: ServiceCall) -> None:
     """Move an event to another calendar, on this account or another one."""
-    _require_writable(entity)
+    if not call.data[ATTR_KEEP_ORIGINAL]:
+        _require_writable(entity)
     await _async_check_control(entity, call, call.data[ATTR_TARGET_ENTITY_ID])
     target = _managed_target(entity, call.data[ATTR_TARGET_ENTITY_ID])
     # By identity: two accounts on different servers may share a path, and on
@@ -678,23 +670,24 @@ async def _async_respond(entity: HaCaldavCalendarEntity, call: ServiceCall) -> N
 
 async def _async_create_calendar(hass: HomeAssistant, call: ServiceCall) -> None:
     entry = _loaded_entry(hass, call.data[ATTR_CONFIG_ENTRY_ID])
-    name = call.data[ATTR_NAME]
-    await _async_account_job(
+    created = await _async_account_job(
         hass,
         partial(
             create_calendar,
             entry.runtime_data.client,
-            name,
+            call.data[ATTR_NAME],
             call.data.get(ATTR_COMPONENTS),
         ),
         SERVICE_CREATE_CALENDAR,
     )
-    # By name: the url of the new collection is not known until the account
-    # is listed again, and _is_selected accepts either shape.
-    selected = entry.options.get(CONF_CALENDARS)
-    if selected is not None and name not in selected:
+    # An empty selection is every calendar, the new one included.
+    if selected := entry.options.get(CONF_CALENDARS):
         hass.config_entries.async_update_entry(
-            entry, options={**entry.options, CONF_CALENDARS: [*selected, name]}
+            entry,
+            options={
+                **entry.options,
+                CONF_CALENDARS: [*selected, calendar_key(created.url)],
+            },
         )
     await hass.config_entries.async_reload(entry.entry_id)
 
@@ -716,21 +709,27 @@ async def _async_delete_calendar(hass: HomeAssistant, call: ServiceCall) -> None
             translation_placeholders={"name": name},
         )
     managed = matches[0]
+    if not managed.writable:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="read_only",
+            translation_placeholders={"name": managed.name},
+        )
     await _async_account_job(
         hass, partial(delete_calendar, managed.calendar), SERVICE_DELETE_CALENDAR
     )
     _async_forget_entities(hass, entry, managed.calendar.url)
-    # Both shapes: the flow writes keys and create_calendar writes a name.
+    # Both shapes: entries written before v1.2.0 selected by name.
     gone = {name, calendar_key(managed.calendar.url)}
     selected = entry.options.get(CONF_CALENDARS)
-    if selected is not None and gone & set(selected):
-        hass.config_entries.async_update_entry(
-            entry,
-            options={
-                **entry.options,
-                CONF_CALENDARS: [item for item in selected if item not in gone],
-            },
-        )
+    if selected and gone & set(selected):
+        options = {**entry.options}
+        # An empty list would read as every calendar anyway.
+        if remaining := [item for item in selected if item not in gone]:
+            options[CONF_CALENDARS] = remaining
+        else:
+            del options[CONF_CALENDARS]
+        hass.config_entries.async_update_entry(entry, options=options)
     await hass.config_entries.async_reload(entry.entry_id)
 
 

@@ -2,6 +2,7 @@
 
 from unittest.mock import Mock, patch
 
+from caldav.davclient import requests
 from homeassistant.const import CONF_URL, CONF_VERIFY_SSL
 import pytest
 
@@ -394,3 +395,70 @@ def test_stored_connection_details_carry_no_userinfo() -> None:
 
 def test_the_configured_timeout_is_what_the_client_gets() -> None:
     assert connection_kwargs({CONF_VERIFY_SSL: True}, 90)["timeout"] == 90
+
+
+def test_a_password_holding_an_at_sign_comes_off_a_malformed_url() -> None:
+    stripped = without_userinfo("https://alice:p@ss@cloud.example.com:80o/dav")
+
+    assert stripped == "https://cloud.example.com:80o/dav"
+
+
+def _answer(status: int, url: str, *, moved: int | None = None) -> Mock:
+    return Mock(
+        status_code=status,
+        url=url,
+        reason="",
+        history=[] if moved is None else [Mock(status_code=moved)],
+    )
+
+
+def test_a_body_a_redirect_on_the_same_host_dropped_is_sent_again() -> None:
+    # requests drops the body on a 301, and a PROPFIND without one is allprop.
+    session = HostLockedSession()
+    moved = _answer(207, "https://cloud.example.com/dav/", moved=301)
+    again = _answer(207, "https://cloud.example.com/dav/")
+
+    with patch.object(requests.Session, "request", side_effect=[moved, again]) as sent:
+        response = session.request(
+            "PROPFIND", "https://cloud.example.com/dav", data="<propfind/>"
+        )
+
+    assert response is again
+    assert sent.call_args.args == ("PROPFIND", "https://cloud.example.com/dav/")
+    assert sent.call_args.kwargs["data"] == "<propfind/>"
+    assert session.moved_to == "https://cloud.example.com/dav/"
+
+
+@pytest.mark.parametrize(
+    ("target", "moved"),
+    [
+        ("https://elsewhere.example/dav/", 301),
+        ("https://cloud.example.com/dav/", 303),
+    ],
+    ids=["another_host", "see_other"],
+)
+def test_a_redirect_the_body_does_not_follow_is_left_alone(
+    target: str, moved: int
+) -> None:
+    session = HostLockedSession()
+    answer = _answer(207, target, moved=moved)
+
+    with patch.object(requests.Session, "request", return_value=answer) as sent:
+        session.request("PROPFIND", "https://cloud.example.com/dav", data="<x/>")
+
+    assert sent.call_count == 1
+    assert session.moved_to is None
+
+
+@pytest.mark.parametrize(
+    ("status", "phrase"), [(401, "Unauthorized"), (403, "Forbidden")]
+)
+def test_a_refusal_carries_its_standard_phrase(status: int, phrase: str) -> None:
+    # caldav tells a bad password from a refusal by the phrase alone.
+    answer = _answer(status, "https://cloud.example.com/dav/")
+    answer.reason = "Authorization Required"
+
+    with patch.object(requests.Session, "request", return_value=answer):
+        response = HostLockedSession().request("PROPFIND", "https://x/", data="<x/>")
+
+    assert response.reason == phrase

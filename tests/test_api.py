@@ -3,11 +3,13 @@
 from datetime import UTC, date, datetime
 from typing import Any
 from unittest.mock import Mock, patch
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from caldav.calendarobjectresource import Event as CaldavEvent
+from caldav.davclient import requests
 from caldav.elements import ical
-from caldav.lib.error import NotFoundError, PutError, ReportError
+from caldav.lib.error import AuthorizationError, NotFoundError, PutError, ReportError
 from conftest import dav_calendar
 from icalendar import Calendar as ICalCalendar
 import pytest
@@ -30,6 +32,7 @@ from custom_components.ha_caldav.api import (
 )
 from custom_components.ha_caldav.const import EVENT_ATTRIBUTES, SORT_ORDER_PROPERTY
 from custom_components.ha_caldav.errors import Refused
+from custom_components.ha_caldav.event import apply_extras
 from custom_components.ha_caldav.recurrence import delete_event
 
 EVENT = (
@@ -44,7 +47,6 @@ EVENT = (
 def _missing_calendar() -> Mock:
     """Return a calendar whose uid lookups all come back empty."""
     calendar = dav_calendar()
-    calendar.object_by_uid.side_effect = NotFoundError("nope")
     calendar.event_by_uid.side_effect = NotFoundError("nope")
     calendar.todo_by_uid.side_effect = NotFoundError("nope")
     calendar.search.return_value = []
@@ -96,7 +98,6 @@ def test_create_todo_marked_done_carries_the_completion_properties() -> None:
 
 def test_import_refuses_a_document_that_would_overwrite() -> None:
     calendar = Mock()
-    calendar.object_by_uid.return_value = Mock()
 
     with pytest.raises(Refused, match="uid_clash"):
         import_ics(calendar, EVENT)
@@ -186,7 +187,8 @@ def test_move_carries_an_object_whose_first_component_is_an_exception() -> None:
     event = Mock(data=ORPHAN_OVERRIDE)
     source, target = Mock(), dav_calendar()
     source.event_by_uid.return_value = event
-    target.object_by_uid.side_effect = NotFoundError("uid-1 not found on server")
+    target.event_by_uid.side_effect = NotFoundError("uid-1 not found on server")
+    target.todo_by_uid.side_effect = NotFoundError("uid-1 not found on server")
 
     move_event(source, target, "uid-1", keep_original=False)
 
@@ -219,7 +221,7 @@ def test_export_of_one_object_returns_it_verbatim() -> None:
     CRLF, so the export of a single object went out as something a strict
     importer refuses while the whole-calendar export beside it was correct."""
     calendar = dav_calendar()
-    calendar.object_by_uid.return_value = CaldavEvent(calendar.client, data=EVENT)
+    calendar.event_by_uid.return_value = CaldavEvent(calendar.client, data=EVENT)
 
     exported = export_ics(calendar, "uid-1")
 
@@ -237,7 +239,7 @@ def test_export_of_one_object_finds_a_todo_too() -> None:
     )
     calendar = Mock()
     calendar.event_by_uid.side_effect = NotFoundError("not an event")
-    calendar.object_by_uid.return_value = Mock(data=body)
+    calendar.todo_by_uid.return_value = Mock(data=body)
 
     assert export_ics(calendar, "t-1") == body
 
@@ -290,7 +292,8 @@ def _move_pair() -> tuple[Mock, Mock, Mock]:
     event = Mock(data=EVENT)
     source, target = Mock(), dav_calendar()
     source.event_by_uid.return_value = event
-    target.object_by_uid.side_effect = NotFoundError("uid-1 not found on server")
+    target.event_by_uid.side_effect = NotFoundError("uid-1 not found on server")
+    target.todo_by_uid.side_effect = NotFoundError("uid-1 not found on server")
     return event, source, target
 
 
@@ -320,7 +323,6 @@ def test_moving_onto_the_calendar_the_event_is_already_on_is_refused() -> None:
     event = Mock(data=EVENT)
     calendar = Mock()
     calendar.event_by_uid.return_value = event
-    calendar.object_by_uid.return_value = event
 
     with pytest.raises(Refused, match="uid_clash"):
         move_event(calendar, calendar, "uid-1", keep_original=False)
@@ -333,7 +335,7 @@ def test_moving_onto_a_calendar_that_holds_the_uid_is_refused() -> None:
     event = Mock(data=EVENT)
     source, target = Mock(), dav_calendar()
     source.event_by_uid.return_value = event
-    target.object_by_uid.return_value = Mock()
+    target.event_by_uid.return_value = Mock()
 
     with pytest.raises(Refused, match="uid_clash"):
         move_event(source, target, "uid-1", keep_original=False)
@@ -565,7 +567,7 @@ def test_reorder_numbers_a_list_that_was_never_ordered() -> None:
     assert min(abs(a - b) for a in positions for b in positions if a != b) >= _SORT_GAP
 
 
-def test_reorder_renumbers_when_the_neighbours_leave_no_room() -> None:
+def test_reorder_renumbers_when_the_neighbors_leave_no_room() -> None:
     calendar = Mock()
     todos = {
         letter: _ordered_todo(letter, f"SUMMARY:{letter}\r\nX-APPLE-SORT-ORDER:{n}")
@@ -697,12 +699,12 @@ def test_a_todo_update_writes_the_due_date_and_the_description() -> None:
     update_todo(
         calendar,
         "uid-1",
-        {"summary": "Task", "due": date(2026, 7, 10), "description": "Two litres"},
+        {"summary": "Task", "due": date(2026, 7, 10), "description": "Two liters"},
     )
 
     vtodo = next(iter(todo.icalendar_instance.walk("VTODO")))
     assert vtodo["DUE"].dt == date(2026, 7, 10)
-    assert str(vtodo["DESCRIPTION"]) == "Two litres"
+    assert str(vtodo["DESCRIPTION"]) == "Two liters"
 
 
 def test_the_invitation_reply_clears_rsvp() -> None:
@@ -838,8 +840,8 @@ def test_a_created_todo_defines_the_timezone_it_references() -> None:
 def test_import_refuses_a_uid_the_server_holds_as_the_other_kind() -> None:
     """One uid is one resource, so an event would overwrite a to-do."""
     calendar = _missing_calendar()
-    calendar.object_by_uid.side_effect = None
-    calendar.object_by_uid.return_value = Mock()
+    calendar.todo_by_uid.side_effect = None
+    calendar.todo_by_uid.return_value = Mock()
 
     with pytest.raises(Refused, match="uid_clash"):
         import_ics(calendar, EVENT)
@@ -849,7 +851,7 @@ def test_import_refuses_a_uid_the_server_holds_as_the_other_kind() -> None:
 
 def test_a_large_import_sees_a_clash_of_either_kind() -> None:
     calendar = _missing_calendar()
-    calendar.object_by_uid.side_effect = ReportError("no uid filter")
+    calendar.event_by_uid.side_effect = ReportError("no uid filter")
     stored = Mock()
     stored.icalendar_component = {"UID": "u3"}
     calendar.search.return_value = [stored]
@@ -931,13 +933,6 @@ def test_renaming_a_recurring_todo_does_not_roll_it_forward() -> None:
 def test_a_due_date_of_another_value_type_than_the_start_is_refused() -> None:
     calendar = Mock()
     todo = _todo("SUMMARY:x\r\nDTSTART;VALUE=DATE:20260706\r\nDUE;VALUE=DATE:20260707")
-    component = todo.icalendar_component
-
-    def set_due(due, **kwargs):
-        component.pop("DUE", None)
-        component.add("DUE", due)
-
-    todo.set_due.side_effect = set_due
 
     with (
         patch("custom_components.ha_caldav.api.object_by_uid", return_value=todo),
@@ -952,7 +947,7 @@ def test_a_due_date_of_another_value_type_than_the_start_is_refused() -> None:
     assert refusal.value.key == "mixed_time_types"
 
 
-def test_a_floating_start_is_compared_with_a_zoned_due_in_local_time(monkeypatch):
+def test_a_floating_start_is_compared_with_a_zoned_due_in_local_time() -> None:
     """Both name the same instant under Europe/Berlin, so nothing is refused."""
     from homeassistant.util import dt as dt_util
 
@@ -962,12 +957,6 @@ def test_a_floating_start_is_compared_with_a_zoned_due_in_local_time(monkeypatch
         calendar = Mock()
         todo = _todo("SUMMARY:x\r\nDTSTART:20260706T100000")
         component = todo.icalendar_component
-
-        def set_due(due, **kwargs):
-            component.pop("DUE", None)
-            component.add("DUE", due)
-
-        todo.set_due.side_effect = set_due
 
         with patch("custom_components.ha_caldav.api.object_by_uid", return_value=todo):
             update_todo(
@@ -1047,7 +1036,7 @@ def test_renaming_an_in_process_todo_leaves_its_progress_alone() -> None:
     assert int(component["PERCENT-COMPLETE"]) == 60
 
 
-def test_ticking_a_cancelled_todo_does_not_call_it_done() -> None:
+def test_ticking_a_canceled_todo_does_not_call_it_done() -> None:
     todo = _todo("SUMMARY:Dropped\r\nSTATUS:CANCELLED")
     calendar = Mock()
     calendar.todo_by_uid.return_value = todo
@@ -1471,7 +1460,7 @@ def test_a_uid_written_twice_is_still_found_by_the_clash_check() -> None:
         ),
     )
     calendar = dav_calendar()
-    calendar.object_by_uid.side_effect = ReportError("no uid filter here")
+    calendar.event_by_uid.side_effect = ReportError("no uid filter here")
     calendar.search.return_value = [stored]
 
     with pytest.raises(Refused) as refusal:
@@ -1566,9 +1555,7 @@ def test_a_drag_over_a_position_no_float_can_hold_still_lands() -> None:
     assert all(todo.save.called for todo in todos.values())
 
 
-def test_an_object_no_read_can_reach_still_answers_the_clash_check() -> None:
-    """Dropped instead, the uid it holds reports no clash anywhere and an
-    import overwrites the object standing there."""
+def test_an_object_no_read_can_reach_is_skipped_by_a_scan_without_failing() -> None:
     unreadable = Mock(url="https://dav.test/cal/broken.ics")
     type(unreadable).icalendar_component = property(
         lambda self: (_ for _ in ()).throw(ValueError("not iCalendar"))
@@ -1577,7 +1564,7 @@ def test_an_object_no_read_can_reach_still_answers_the_clash_check() -> None:
         lambda self: (_ for _ in ()).throw(OSError("gone from under us"))
     )
     calendar = Mock()
-    calendar.object_by_uid.side_effect = ReportError("no uid filter")
+    calendar.event_by_uid.side_effect = ReportError("no uid filter")
     calendar.search.return_value = [unreadable]
 
     with pytest.raises(NotFoundError):
@@ -1706,3 +1693,108 @@ def test_a_recurring_todo_with_no_date_at_all_is_simply_closed() -> None:
     update_todo(calendar, "t1", {"summary": "Water plants", "status": "COMPLETED"})
 
     assert str(calendar.todo.stored()["STATUS"]) == "COMPLETED"
+
+
+def _created_uid(save: Mock, kind: str = "VEVENT") -> UUID:
+    return UUID(str(_component(save.call_args.args[0].to_ical().decode(), kind)["UID"]))
+
+
+def test_a_new_event_and_todo_carry_a_random_uid() -> None:
+    calendar = Mock()
+
+    create_event(
+        calendar,
+        {
+            "summary": "Standup",
+            "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+        },
+    )
+    create_todo(calendar, {"summary": "Task"})
+
+    assert _created_uid(calendar.save_event).version == 4
+    assert _created_uid(calendar.save_todo, "VTODO").version == 4
+
+
+def test_a_new_calendar_gets_a_random_collection_name() -> None:
+    client = Mock()
+
+    create_calendar(client, "Holidays", None)
+
+    cal_id = client.principal.return_value.make_calendar.call_args.kwargs["cal_id"]
+    assert UUID(cal_id).version == 4
+
+
+def test_a_new_series_gets_its_end_in_utc() -> None:
+    # The frontend writes UTC digits without the Z.
+    calendar = Mock()
+    berlin = ZoneInfo("Europe/Berlin")
+
+    create_event(
+        calendar,
+        {
+            "summary": "Standup",
+            "dtstart": datetime(2026, 12, 1, 10, 0, tzinfo=berlin),
+            "dtend": datetime(2026, 12, 1, 11, 0, tzinfo=berlin),
+            "rrule": "FREQ=WEEKLY;UNTIL=20261229T090000",
+        },
+    )
+
+    body = calendar.save_event.call_args.args[0].to_ical().decode()
+    assert "UNTIL=20261229T090000Z" in body
+
+
+def test_the_clash_check_asks_for_each_kind_rather_than_for_any() -> None:
+    calendar = _missing_calendar()
+
+    import_ics(calendar, EVENT)
+
+    calendar.object_by_uid.assert_not_called()
+    calendar.event_by_uid.assert_called_once_with("uid-1")
+    calendar.todo_by_uid.assert_called_once_with("uid-1")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [requests.Timeout("slow"), AuthorizationError(reason="Unauthorized")],
+    ids=["timeout", "unauthorized"],
+)
+def test_a_lookup_that_got_no_answer_is_not_answered_with_a_scan(error) -> None:
+    calendar = _missing_calendar()
+    calendar.event_by_uid.side_effect = error
+
+    with pytest.raises(type(error)):
+        import_ics(calendar, EVENT)
+
+    calendar.search.assert_not_called()
+    assert _written(calendar) == []
+
+
+def test_an_import_with_two_series_under_one_uid_is_refused() -> None:
+    series = (
+        "BEGIN:VEVENT\r\nUID:uid-1\r\nDTSTAMP:20260101T000000Z\r\n"
+        "DTSTART:20260706T090000Z\r\nEND:VEVENT\r\n"
+    )
+    doubled = (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
+        f"{series}{series}END:VCALENDAR\r\n"
+    )
+
+    with pytest.raises(Refused, match="duplicate_uid"):
+        import_ics(_missing_calendar(), doubled)
+
+
+def test_setting_alarms_keeps_the_email_ones_it_cannot_write() -> None:
+    component = _component(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VEVENT\r\n"
+        "UID:e-1\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:20260706T090000Z\r\n"
+        "BEGIN:VALARM\r\nACTION:EMAIL\r\nTRIGGER:-P1D\r\nSUMMARY:x\r\n"
+        "DESCRIPTION:Mail me\r\nATTENDEE:mailto:me@example.com\r\nEND:VALARM\r\n"
+        "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nDESCRIPTION:x\r\n"
+        "END:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+
+    apply_extras(component, {"alarms": [10]})
+
+    actions = sorted(str(alarm["ACTION"]) for alarm in component.walk("VALARM"))
+    assert actions == ["DISPLAY", "EMAIL"]

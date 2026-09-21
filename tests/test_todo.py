@@ -456,7 +456,7 @@ async def test_a_new_item_carries_its_due_date_and_description(
                 "entity_id": "todo.personal",
                 "item": "Buy milk",
                 "due_date": "2026-07-10",
-                "description": "Two litres",
+                "description": "Two liters",
             },
             blocking=True,
         )
@@ -464,7 +464,7 @@ async def test_a_new_item_carries_its_due_date_and_description(
     data = create.call_args.args[1]
     assert data["summary"] == "Buy milk"
     assert data["due"] == date(2026, 7, 10)
-    assert data["description"] == "Two litres"
+    assert data["description"] == "Two liters"
 
 
 async def test_deleting_an_item_clears_its_etag_after_the_write(

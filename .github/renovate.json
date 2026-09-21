@@ -41,10 +41,9 @@
   "customManagers": [
     {
       "customType": "regex",
-      "managerFilePatterns": ["/^\\.github/workflows/validate\\.yml$/"],
-      "matchStrings": ["RUFF_VERSION:\\s*\"?(?<currentValue>[^\"\\s]+)\"?"],
-      "datasourceTemplate": "pypi",
-      "depNameTemplate": "ruff"
+      "managerFilePatterns": ["/^\\.github/scripts/screenshots\\.sh$/"],
+      "matchStrings": ["_IMAGE=\"\\$\\{\\w+:-(?<depName>mcr\\.microsoft\\.com/playwright):(?<currentValue>[^}]+)\\}\""],
+      "datasourceTemplate": "docker"
     }
   ]
 }

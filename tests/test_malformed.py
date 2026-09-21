@@ -94,12 +94,6 @@ ENTRY_DATA = {
 _BUDGET = 5.0
 
 
-# --------------------------------------------------------------------------
-# Builders. Real documents throughout: the point is the shape vobject and
-# icalendar actually hand back, which a mock that accepts anything would hide.
-# --------------------------------------------------------------------------
-
-
 def document(*parts: str) -> str:
     """Wrap components in a VCALENDAR, the way one resource arrives."""
     return (
@@ -275,17 +269,11 @@ def dav_calendar() -> Mock:
     """
     calendar = shared_dav_calendar()
     calendar.name = "Personal"
-    calendar.object_by_uid.side_effect = NotFoundError("nope")
     calendar.event_by_uid.side_effect = NotFoundError("nope")
     calendar.todo_by_uid.side_effect = NotFoundError("nope")
     calendar.search.return_value = []
     return calendar
 
-
-# --------------------------------------------------------------------------
-# The event corpus. {soon} and {soon_end} put the object in the polled window,
-# so it is the one _next_event picks and read_extras is asked about.
-# --------------------------------------------------------------------------
 
 SOON = dt_util.utcnow() + timedelta(days=2)
 _SUBSTITUTIONS = {
@@ -654,10 +642,6 @@ EVENTS = (
 )
 
 
-# --------------------------------------------------------------------------
-# The to-do corpus.
-# --------------------------------------------------------------------------
-
 TODOS = (
     Case(
         "a_todo_without_a_uid",
@@ -766,11 +750,6 @@ TODOS = (
         "The same text hazards, on the list rather than the calendar.",
     ),
 )
-
-
-# --------------------------------------------------------------------------
-# Read paths.
-# --------------------------------------------------------------------------
 
 
 def poll_calendar(items: list[StoredObject]) -> Mock:
@@ -963,12 +942,6 @@ async def test_the_rule_is_read_off_the_master_however_the_server_ordered_it(
 
     assert rules == {"uid-1": "FREQ=WEEKLY"}
 
-
-# --------------------------------------------------------------------------
-# The series corpus, driven through every write mode. These are the objects a
-# user meets by opening the recurrence editor on something another client left
-# behind, which is the only warning they get that it is there.
-# --------------------------------------------------------------------------
 
 SERIES_START = (
     "DTSTART:20260101T090000Z\r\nDTEND:20260101T100000Z\r\nSUMMARY:Standup\r\n"
@@ -1233,7 +1206,7 @@ def test_a_write_onto_a_malformed_series_refuses_rather_than_breaks(
     except Refused as err:
         assert err.key
         return
-    except NotFoundError, ValueError:
+    except NotFoundError:
         return
     if stored.saves:
         document = ICalCalendar.from_ical(stored.data)
@@ -1241,12 +1214,6 @@ def test_a_write_onto_a_malformed_series_refuses_rather_than_breaks(
         if not mode.startswith("delete_"):
             assert document.walk("VEVENT")
 
-
-# --------------------------------------------------------------------------
-# The document corpus, driven through import. An import is the one call that
-# takes a whole document from outside and is expected to refuse rather than
-# overwrite, so its guards are what the malformed shapes have to survive.
-# --------------------------------------------------------------------------
 
 DOCUMENTS = (
     Case(
@@ -1443,8 +1410,8 @@ def test_an_import_never_writes_over_a_uid_the_collection_already_holds(
     import reads before it writes, and it has to hold for every shape the uid
     can be written in."""
     calendar = dav_calendar()
-    calendar.object_by_uid.side_effect = None
-    calendar.object_by_uid.return_value = Mock()
+    calendar.event_by_uid.side_effect = None
+    calendar.event_by_uid.return_value = Mock()
     calendar.search.return_value = as_stored(case.ics)
 
     def imported() -> list[str]:
@@ -1473,7 +1440,7 @@ def test_the_uid_of_an_object_icalendar_will_not_parse_is_still_found(uid: str) 
     calendar = dav_calendar()
     # Refused rather than answered: the uid filter is what iCloud declines, and
     # declining it is what sends the check through the scan this is about.
-    calendar.object_by_uid.side_effect = Exception("uid filters unsupported")
+    calendar.event_by_uid.side_effect = Exception("uid filters unsupported")
     calendar.search.return_value = [
         StoredObject(
             document(
@@ -1509,10 +1476,7 @@ def test_exporting_a_calendar_never_stops_at_one_bad_object(case: Case) -> None:
         else []
     )
 
-    try:
-        exported = within(_BUDGET, lambda: export_ics(calendar, None))
-    except ValueError:
-        return
+    exported = within(_BUDGET, lambda: export_ics(calendar, None))
     assert "Keeper" in exported
 
 
@@ -1551,11 +1515,6 @@ def test_moving_a_malformed_object_refuses_or_keeps_the_original(case: Case) -> 
         within(_BUDGET, lambda: move_event(source, refusing, "uid-1", False))
 
     assert keeper.deletes == 0
-
-
-# --------------------------------------------------------------------------
-# The remaining write entry points.
-# --------------------------------------------------------------------------
 
 
 @cases(*TODOS)
@@ -1783,9 +1742,7 @@ def test_creating_from_hostile_text_writes_exactly_one_component(text: str) -> N
     assert len(todo_body.walk("VTODO")) == 1
 
 
-# Everything but the first, which carries a raw line ending. That one is what
-# create_event escapes and apply_extras does not; see the report.
-@pytest.mark.parametrize("text", HOSTILE_TEXT[1:], ids=range(1, len(HOSTILE_TEXT)))
+@pytest.mark.parametrize("text", HOSTILE_TEXT, ids=range(len(HOSTILE_TEXT)))
 def test_writing_extras_from_hostile_text_keeps_one_component(text: str) -> None:
     component = ICalEvent()
     component.add("UID", "u")
@@ -1834,12 +1791,6 @@ def test_building_a_rule_from_what_a_server_stored(rule: str) -> None:
         return
     assert within(_BUDGET, lambda: next(iter(built), None)) in (None, start)
 
-
-# --------------------------------------------------------------------------
-# The protocol corpus. A multistatus is parsed here rather than by caldav,
-# because caldav raises on the whole response when one propstat is refused,
-# which would cost every calendar on the account its capabilities.
-# --------------------------------------------------------------------------
 
 HOME = "/remote.php/dav/calendars/iven"
 _PROPS = (
@@ -1993,11 +1944,6 @@ def test_the_parts_of_the_parser_tolerate_what_is_not_there(case: Case) -> None:
         assert all(name == name.upper() for name in components)
         assert all("}" not in name for name in privileges)
 
-
-# --------------------------------------------------------------------------
-# The text and value dimensions, where the interesting part is that nothing is
-# special about any one string. Derandomized so a green run stays green.
-# --------------------------------------------------------------------------
 
 FUZZ = settings(
     max_examples=200,

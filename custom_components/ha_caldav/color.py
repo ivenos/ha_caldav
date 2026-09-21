@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import re
 from typing import NamedTuple
+from urllib.parse import urlparse
 
 import caldav
 from caldav.elements import dav, ical
+from homeassistant.util.color import color_name_to_rgb
 
 _HEX = re.compile(r"[0-9a-fA-F]+")
 _EXPANDABLE = (3, 4)
@@ -16,10 +18,16 @@ _FULL = (6, 8)
 def normalize_color(value: object) -> str | None:
     """Return value as #rrggbb, or None if unusable.
 
-    Clients write CSS shorthand and trailing alpha pairs; core accepts neither.
+    Clients write CSS shorthand, color names and trailing alpha pairs; core
+    accepts none of them.
     """
     if not isinstance(value, str):
         return None
+    if not value.strip().startswith("#"):
+        try:
+            return "#{:02x}{:02x}{:02x}".format(*color_name_to_rgb(value.strip()))
+        except ValueError:
+            pass
     digits = value.strip().removeprefix("#")
     if len(digits) in _EXPANDABLE:
         digits = "".join(digit * 2 for digit in digits)
@@ -51,7 +59,8 @@ def fetch_collections(client: caldav.DAVClient) -> dict[str, Collection]:
     for href, props in response.find_objects_and_props().items():
         color = props.get(ical.CalendarColor.tag)
         name = props.get(dav.DisplayName.tag)
-        collections[href.rstrip("/")] = Collection(
+        path = urlparse(href).path if "://" in href else href
+        collections[path.rstrip("/")] = Collection(
             None if color is None else normalize_color(color.text),
             None if name is None else name.text or None,
         )

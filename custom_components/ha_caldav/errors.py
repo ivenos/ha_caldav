@@ -9,15 +9,19 @@ from __future__ import annotations
 import logging
 
 from caldav.davclient import requests
-from caldav.lib.error import DAVError, NotFoundError
+from caldav.lib.error import AuthorizationError, DAVError, NotFoundError
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-CONNECTION_ERRORS = (requests.ConnectionError, requests.Timeout, DAVError)
 NETWORK_ERRORS = (requests.RequestException, DAVError)
+
+
+def rejected(err: BaseException | None) -> bool:
+    """Return whether an error is a 401; caldav raises the same type for 403."""
+    return isinstance(err, AuthorizationError) and err.reason == "Unauthorized"
 
 
 class Refused(ValueError):

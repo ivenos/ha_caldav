@@ -1,5 +1,6 @@
 """Tests for the CalDAV config, reauth and options flow."""
 
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from caldav.davclient import requests
@@ -18,7 +19,8 @@ from homeassistant.data_entry_flow import FlowResultType, section
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ha_caldav.config_flow import _labelled
+from custom_components.ha_caldav.config_flow import _labeled
+from custom_components.ha_caldav.connection import HostLockedSession
 from custom_components.ha_caldav.const import (
     CONF_CA_BUNDLE,
     CONF_CALENDAR_OPTIONS,
@@ -75,6 +77,8 @@ async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
         (AuthorizationError(reason="Unauthorized"), "invalid_auth"),
         (AuthorizationError(reason="Forbidden"), "cannot_connect"),
         (requests.ConnectionError(), "cannot_connect"),
+        (requests.exceptions.SSLError(), "certificate_failed"),
+        (requests.exceptions.InvalidURL(), "cannot_connect"),
         (Exception(), "unknown"),
     ],
 )
@@ -205,13 +209,20 @@ async def test_options_flow_keeps_selection_while_unreachable(
 ) -> None:
     # With the server down the calendars field is left out of the form; saving
     # the other options must not wipe the stored selection.
-    entry = await _setup_entry(hass, options={CONF_CALENDARS: ["Personal"]})
-    entry.runtime_data.client.principal.side_effect = requests.ConnectionError()
+    entry = await _setup_entry(
+        hass, options={CONF_CALENDARS: ["/remote.php/dav/Personal"]}
+    )
+    principal = entry.runtime_data.client.principal
+    principal.reset_mock()
+    principal.side_effect = requests.ConnectionError()
 
-    # Without calendar names there is nothing to override per calendar, so the
-    # flow skips the menu and shows the account form straight away.
     result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.MENU
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "account"}
+    )
     assert result["type"] is FlowResultType.FORM
+    assert CONF_CALENDARS not in result["data_schema"].schema
 
     with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
         client.return_value.principal.return_value.calendars.return_value = []
@@ -227,7 +238,9 @@ async def test_options_flow_keeps_selection_while_unreachable(
         await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options[CONF_CALENDARS] == ["Personal"]
+    assert entry.options[CONF_CALENDARS] == ["/remote.php/dav/Personal"]
+    # Asked once for the whole flow, not again for every form it draws.
+    assert principal.call_count == 1
     assert entry.options[CONF_SCAN_INTERVAL] == 5
 
 
@@ -292,7 +305,12 @@ async def test_blank_tls_fields_are_not_stored(hass: HomeAssistant) -> None:
     assert CONF_CA_BUNDLE not in result["data"]
 
 
-async def test_tls_paths_are_stored_when_given(hass: HomeAssistant) -> None:
+async def test_tls_paths_are_stored_when_given(
+    hass: HomeAssistant, tmp_path: Path
+) -> None:
+    certificate, key = tmp_path / "client.pem", tmp_path / "client.key"
+    certificate.write_text("cert")
+    key.write_text("key")
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_USER}
     )
@@ -306,14 +324,14 @@ async def test_tls_paths_are_stored_when_given(hass: HomeAssistant) -> None:
             {
                 **USER_INPUT,
                 "certificates": {
-                    CONF_CLIENT_CERT: "/etc/client.pem",
-                    CONF_CLIENT_KEY: "/etc/client.key",
+                    CONF_CLIENT_CERT: str(certificate),
+                    CONF_CLIENT_KEY: str(key),
                 },
             },
         )
 
-    assert result["data"][CONF_CLIENT_CERT] == "/etc/client.pem"
-    assert client.call_args.kwargs["ssl_cert"] == ("/etc/client.pem", "/etc/client.key")
+    assert result["data"][CONF_CLIENT_CERT] == str(certificate)
+    assert client.call_args.kwargs["ssl_cert"] == (str(certificate), str(key))
 
 
 async def test_reconfigure_updates_the_connection(hass: HomeAssistant) -> None:
@@ -948,7 +966,7 @@ def test_two_calendars_whose_paths_nest_still_get_a_label_each() -> None:
     outer.name = "Personal"
     outer.calendar.url = "https://cloud.example.com/remote.php/dav/iven/personal"
 
-    labels = _labelled([nested, outer])
+    labels = _labeled([nested, outer])
 
     assert labels == {
         "/personal": "Personal (/personal)",
@@ -1129,3 +1147,88 @@ async def test_reconfigure_keeps_a_title_the_user_chose(hass: HomeAssistant) -> 
         )
 
     assert entry.title == "Work"
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://[fd00::1/dav", "webcal://cloud.example.com/", "https://host:99999/"],
+)
+async def test_a_url_nothing_can_connect_to_is_named_as_such(
+    hass: HomeAssistant, url: str
+) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+
+    with patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client:
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**USER_INPUT, CONF_URL: url}
+        )
+
+    assert result["errors"] == {"base": "invalid_url"}
+    client.assert_not_called()
+
+
+async def test_a_certificate_path_that_leads_nowhere_is_named_as_such(
+    hass: HomeAssistant, tmp_path: Path
+) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+
+    with patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client:
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {**USER_INPUT, "certificates": {CONF_CA_BUNDLE: str(tmp_path / "ca.pem")}},
+        )
+
+    assert result["errors"] == {"base": "certificate_not_found"}
+    client.assert_not_called()
+
+
+async def test_the_url_a_server_moved_the_account_to_is_the_one_stored(
+    hass: HomeAssistant,
+) -> None:
+    moved = "https://cloud.example.com/remote.php/dav/"
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+
+    with (
+        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient"),
+        patch.object(HostLockedSession, "moved_to", moved),
+        patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], USER_INPUT
+        )
+
+    assert result["data"][CONF_URL] == moved
+
+
+async def test_ticking_every_calendar_again_follows_the_server_again(
+    hass: HomeAssistant,
+) -> None:
+    entry = await _setup_entry(
+        hass, options={CONF_CALENDARS: ["/remote.php/dav/Personal"]}
+    )
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "account"}
+    )
+
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.return_value.calendars.return_value = []
+        await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_CALENDARS: ["/remote.php/dav/Personal", "/remote.php/dav/Work"],
+                CONF_SCAN_INTERVAL: 15,
+                CONF_DAYS: 7,
+                CONF_INCLUDE_ALL_DAY: True,
+                CONF_READ_ONLY: False,
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert CONF_CALENDARS not in entry.options

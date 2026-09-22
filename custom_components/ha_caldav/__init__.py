@@ -7,7 +7,6 @@ from datetime import timedelta
 import logging
 
 import caldav
-from caldav.lib.error import AuthorizationError
 from homeassistant.const import (
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
@@ -37,6 +36,7 @@ from .connection import (
     calendar_key,
     connection_kwargs,
     display_name,
+    size_pool,
     url_candidates,
 )
 from .const import (
@@ -59,7 +59,9 @@ from .coordinator import (
     calendar_unique_id,
     todo_unique_id,
 )
+from .errors import rejected
 from .options import calendar_settings, request_timeout
+from .patches import apply as apply_patches
 from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -71,6 +73,7 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the account-level services, which outlive any single entry."""
+    apply_patches()
     async_register_services(hass)
     return True
 
@@ -79,10 +82,13 @@ async def async_migrate_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -
     """Normalize the account key of an entry, and the keys of its entities.
 
     Home Assistant runs this whenever the stored MINOR_VERSION differs from
-    the handler's, so the number has to move with every change of key shape.
+    the handler's, a higher one left by a downgrade included, so the number
+    has to move with every change of key shape.
     """
     if entry.version > 1:
         return False
+    if entry.minor_version >= 2:
+        return True
     _LOGGER.debug("Migrating %s to the normalized keys", entry.title)
     _async_migrate_entity_keys(hass, entry)
     unique_id = account_key(entry.data[CONF_URL], entry.data[CONF_USERNAME])
@@ -195,7 +201,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
         for item in managed:
             if isinstance(item.coordinator.last_exception, ConfigEntryAuthFailed):
                 raise item.coordinator.last_exception
-        raise ConfigEntryNotReady("No calendar on this account could be read")
+        raise ConfigEntryNotReady(
+            translation_domain=DOMAIN, translation_key="no_calendar_read"
+        )
 
     entry.runtime_data = HaCaldavRuntimeData(
         client=client,
@@ -221,6 +229,7 @@ async def _async_connect(
     """Connect and list the calendars, trying the RFC 6764 bootstrap url too."""
     kwargs = connection_kwargs(entry.data, request_timeout(entry))
     last_error: Exception | None = None
+    refused: Exception | None = None
     # Driven from the executor: reaching the bootstrap url asks the server.
     candidates = url_candidates(entry.data[CONF_URL], kwargs)
     while url := await hass.async_add_executor_job(next, candidates, None):
@@ -234,24 +243,25 @@ async def _async_connect(
         )
         try:
             calendars = await hass.async_add_executor_job(_list_calendars, client)
-        except AuthorizationError as err:
-            await hass.async_add_executor_job(client.close)
-            # caldav raises this for a 403 as well; only a 401 is a bad password.
-            if err.reason == "Unauthorized":
-                _LOGGER.debug("Authorization failed: %s", err)
-                raise ConfigEntryAuthFailed("Authorization failed") from err
-            last_error = err
-            continue
         except Exception as err:  # noqa: BLE001
             # A captive portal answers 207 with html, which is a TypeError in caldav.
             await hass.async_add_executor_job(client.close)
             last_error = err
+            # The bootstrap may sit behind another auth realm, as the flow allows.
+            if rejected(err):
+                refused = err
             continue
+        size_pool(client, len(calendars))
         return client, calendars
+    if refused is not None:
+        _LOGGER.debug("Authorization failed: %s", refused)
+        raise ConfigEntryAuthFailed("Authorization failed") from refused
     # caldav puts the whole response body into its error text.
     _LOGGER.debug("Cannot connect to CalDAV server: %s", last_error)
     raise ConfigEntryNotReady(
-        f"Cannot connect to CalDAV server: {type(last_error).__name__}"
+        translation_domain=DOMAIN,
+        translation_key="cannot_connect",
+        translation_placeholders={"error": type(last_error).__name__},
     )
 
 
@@ -416,16 +426,16 @@ def _async_prune_deselected(
     if not selected:
         return
     deselected = {
-        unique_id
+        pair
         for calendar in listed
         if not _is_selected(calendar, selected)
-        for unique_id in (
-            calendar_unique_id(entry.entry_id, calendar.url),
-            todo_unique_id(entry.entry_id, calendar.url),
+        for pair in (
+            (Platform.CALENDAR, calendar_unique_id(entry.entry_id, calendar.url)),
+            (Platform.TODO, todo_unique_id(entry.entry_id, calendar.url)),
         )
     }
     for record in er.async_entries_for_config_entry(registry, entry.entry_id):
-        if record.unique_id in deselected:
+        if (record.domain, record.unique_id) in deselected:
             _LOGGER.debug(
                 "Removing %s; its calendar is no longer selected", record.entity_id
             )

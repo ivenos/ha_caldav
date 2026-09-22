@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
-from functools import partial
 import logging
 
 from homeassistant.core import callback
@@ -97,15 +97,15 @@ class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
 
     async def async_write(
         self,
-        job: partial[None],
+        job: Callable[[], object],
         action: str,
         forget: tuple[str, tuple[str, ...]] | None = None,
     ) -> None:
         """Run a write in the executor, one per collection at a time, then refresh.
 
-        The panels call the entity over the websocket, past PARALLEL_UPDATES.
-        Etags the write invalidated are dropped before the refresh reads the
-        new ones back.
+        The job and the refresh behind it both run under the lock, so what a
+        job reads off the coordinator is past every earlier write. Core merges
+        an update into the item it holds, which a debounced refresh leaves stale.
         """
         async with self.managed.write_lock:
             try:
@@ -116,4 +116,4 @@ class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
                 raise as_reported(err, action) from err
             if forget is not None:
                 self.coordinator.forget_etags(*forget)
-        await self.coordinator.async_request_refresh()
+            await self.coordinator.async_refresh()

@@ -1,9 +1,4 @@
-"""Tests against a real CalDAV server.
-
-Skipped unless CALDAV_URL points at one. These are the only tests that prove
-the server accepts what we write: everything else stops at "we produced valid
-iCalendar", which is not the same claim.
-"""
+"""Tests against a real CalDAV server, skipped unless CALDAV_URL points at one."""
 
 from datetime import UTC, date, datetime
 import os
@@ -16,7 +11,7 @@ import pytest_socket
 from custom_components.ha_caldav.api import (
     create_event,
     create_todo,
-    delete_todo,
+    delete_todos,
     object_by_uid,
     update_todo,
 )
@@ -35,14 +30,8 @@ CALENDAR_NAME = "ha_caldav_live"
 
 
 def enable_sockets() -> None:
-    """Let this test reach the server.
-
-    The Home Assistant harness blocks sockets before every single test and only
-    ever allows 127.0.0.1, which would also rule out running these against a
-    remote server. This has to be re-applied per test: doing it once per module
-    appears to work only because requests keeps reusing the pooled connection,
-    and fails as soon as a fresh socket is needed.
-    """
+    """The Home Assistant harness blocks sockets before every test and allows only
+    127.0.0.1; requests reusing a pooled connection hides that."""
     pytest_socket.enable_socket()
     host = urlparse(URL).hostname if URL else None
     pytest_socket.socket_allow_hosts(
@@ -66,11 +55,7 @@ def test_sockets(module_sockets):
 
 @pytest.fixture(scope="module")
 def calendar(module_sockets):
-    """Provide one calendar for the whole run.
-
-    Nextcloud rate-limits calendar creation ("Too many calendars created"), so
-    a calendar per test would fail partway through.
-    """
+    """Nextcloud rate-limits calendar creation ("Too many calendars created")."""
     if not URL:
         pytest.skip("CALDAV_URL is not set")
     principal = caldav.DAVClient(URL, username=USERNAME, password=PASSWORD).principal()
@@ -86,7 +71,6 @@ def calendar(module_sockets):
 
 @pytest.fixture(autouse=True)
 def empty(test_sockets, calendar):
-    """Start every test from an empty calendar."""
     for event in calendar.events():
         event.delete()
     for todo in calendar.todos(include_completed=True):
@@ -95,7 +79,6 @@ def empty(test_sockets, calendar):
 
 
 def todos(calendar) -> dict:
-    """Return the to-do items the server holds, keyed by summary."""
     from custom_components.ha_caldav.coordinator import to_todo
 
     found = {}
@@ -108,11 +91,7 @@ def todos(calendar) -> dict:
 
 
 def _expanded(calendar):
-    """Yield every occurrence the way the poll reads them.
-
-    Same call and same reader as coordinator._fetch_events, so these tests
-    cover the unsplit path the integration actually uses.
-    """
+    """Yield every occurrence the way coordinator._fetch_events reads them."""
     from custom_components.ha_caldav.coordinator import components_of
 
     for item in calendar.search(
@@ -126,7 +105,6 @@ def _expanded(calendar):
 
 
 def starts(calendar) -> list:
-    """Return the start of every occurrence the server expands for us."""
     found = []
     for vevent in _expanded(calendar):
         value = vevent.dtstart.value
@@ -301,12 +279,11 @@ def test_all_day_series_delete_this_and_future(calendar) -> None:
     delete_event(
         calendar, uid_of(calendar), recurrence_id="2026-07-09", this_and_future=True
     )
-    # UNTIL is inclusive, so the boundary matters: the 8th stays, the 9th goes.
+    # UNTIL is inclusive: the 8th stays, the 9th goes.
     assert starts(calendar) == [date(2026, 7, 6), date(2026, 7, 7), date(2026, 7, 8)]
 
 
 def test_recurrence_id_from_the_server_round_trips(calendar) -> None:
-    """The ids the server reports must be the ids we can delete with."""
     from custom_components.ha_caldav.coordinator import to_event
 
     uid = series(calendar, rrule="FREQ=WEEKLY;COUNT=3")
@@ -357,7 +334,7 @@ def test_create_update_delete_todo(calendar) -> None:
     # Description survives alongside due: set_due mutates the same component.
     assert item.description == "The barista one"
 
-    delete_todo(calendar, uid)
+    delete_todos(calendar, [uid], {})
     assert todos(calendar) == {}
 
 
@@ -386,7 +363,6 @@ def test_todo_with_due_datetime(calendar) -> None:
 
 
 def etag_of(calendar, uid: str) -> str:
-    """Return the etag the server currently reports for a resource."""
     from caldav.elements import dav
 
     for item in calendar.search(
@@ -413,7 +389,6 @@ def test_update_refuses_stale_write(calendar) -> None:
     uid = uid_of(calendar)
     seen = etag_of(calendar, uid)
 
-    # Someone edits the same event directly on the server.
     other = calendar.event_by_uid(uid)
     other.data = other.data.replace("Meeting", "Changed on the server")
     other.save()
@@ -449,7 +424,6 @@ def test_completing_recurring_todo_rolls_forward(calendar) -> None:
 
 
 def test_calendar_color_round_trips(calendar) -> None:
-    """The color the server holds must come back keyed by the calendar's path."""
     from caldav.elements import ical
 
     from custom_components.ha_caldav.color import fetch_collections
@@ -458,23 +432,18 @@ def test_calendar_color_round_trips(calendar) -> None:
     client = calendar.client
     try:
         calendar.set_properties([ical.CalendarColor("#00679EFF")])
-        # Alpha is what a client may well have written, and the server hands it
-        # straight back; turning it into #rrggbb is on us.
+        # The server hands back the alpha a client wrote.
         assert calendar.get_property(ical.CalendarColor()) == "#00679EFF"
 
         collections = fetch_collections(client)
     finally:
-        # The calendar is shared with every test in this module. Cleared by
-        # writing a color rather than an empty value: SOGo validates the
-        # property and answers 400 for anything that is not #RRGGBBAA, and no
-        # path in the integration writes an empty one - the service field is
-        # required and normalized.
+        # SOGo answers 400 to a calendar color that is not #RRGGBBAA, an empty one
+        # included.
         calendar.set_properties([ical.CalendarColor("#FFFFFFFF")])
 
     assert collections[calendar_key(calendar.url)].color == "#00679e"
-    # Two calendars reducing to one key would hand one of them the other's
-    # color. Spare keys are fine: a depth-1 PROPFIND also reaches subscriptions
-    # and trashed calendars, which are not calendars() results.
+    # A depth-1 PROPFIND also reaches subscriptions and trashed calendars, which
+    # calendars() leaves out.
     keys = [calendar_key(found.url) for found in client.principal().calendars()]
     assert len(keys) == len(set(keys))
 
@@ -487,7 +456,6 @@ def test_supported_components_come_back_from_the_server(calendar) -> None:
 
     capability = capabilities[calendar_key(calendar.url)]
     assert capability.supports_events
-    # Our own calendar has to come back writable, whatever the server calls it.
     assert capability.writable
 
 
@@ -501,7 +469,6 @@ def test_completing_a_todo_stamps_it_on_the_server(calendar) -> None:
     assert str(component["STATUS"]) == "COMPLETED"
     assert "COMPLETED" in component
     assert int(component["PERCENT-COMPLETE"]) == 100
-    # And the read path has to surface it again.
     assert todos(calendar)["Live done"].completed is not None
 
 
@@ -574,9 +541,8 @@ def test_export_and_import_round_trip(calendar) -> None:
         },
     )
     document = export_ics(calendar, None)
-    # Re-imported under a new uid rather than after deleting the original:
-    # Nextcloud parks a deleted object in its trash and refuses the uid again
-    # while it sits there, which is its own rule and not the round trip.
+    # Nextcloud parks a deleted object in its trash and refuses its uid while it
+    # sits there.
     restored = document.replace("UID:", "UID:restored-", 1)
 
     import_ics(calendar, restored)
@@ -634,7 +600,6 @@ def test_writing_a_calendar_color_back(calendar) -> None:
 
         assert fetch_collections(calendar.client)[key].color == "#00679e"
     finally:
-        # The calendar is shared with every test in this module.
         enable_sockets()
         if before is not None and before.color is not None:
             set_calendar_color(calendar, before.color)
@@ -719,12 +684,11 @@ def test_a_stale_todo_edit_is_refused_by_the_server_state(calendar) -> None:
     etag = resource.props.get(dav.GetEtag.tag)
     assert etag is not None
 
-    # Somebody else edits it in between.
     update_todo(calendar, uid, {"summary": "Changed elsewhere"})
 
     with pytest.raises(Refused, match="etag_conflict"):
         update_todo(calendar, uid, {"summary": "Mine"}, expected_etag=etag)
-    assert todos(calendar)["Changed elsewhere"] is not None
+    assert "Changed elsewhere" in todos(calendar)
 
 
 def test_creating_an_event_with_extras_is_a_single_write(calendar) -> None:
@@ -739,17 +703,11 @@ def test_creating_an_event_with_extras_is_a_single_write(calendar) -> None:
     )
 
     found = calendar.search(start=RANGE_START, end=RANGE_END, event=True)
-    # A two-pass write would leave a second object behind on a retry.
     assert len(found) == 1
     assert found[0].icalendar_component.get("SEQUENCE") in (None, 0)
 
 
 def test_an_unfiltered_search_returns_both_kinds(calendar) -> None:
-    """The uid-clash check reads the collection once for events and to-dos.
-
-    A server that answered only one kind without a component filter would make
-    that check quietly find nothing.
-    """
     from custom_components.ha_caldav.api import _scan
 
     create_event(
@@ -771,7 +729,6 @@ def test_an_unfiltered_search_returns_both_kinds(calendar) -> None:
 
 
 def test_moving_one_item_leaves_the_others_untouched(calendar) -> None:
-    """Renumbering the whole list is a PUT per item on every drag."""
     from custom_components.ha_caldav.api import reorder_todos
 
     for summary in ("Live one", "Live two", "Live three"):

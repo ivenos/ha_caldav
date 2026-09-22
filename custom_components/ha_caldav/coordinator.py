@@ -22,7 +22,7 @@ import homeassistant.util.dt as dt_util
 
 from .capability import Capability
 from .color import Collection, fetch_collections
-from .connection import calendar_key
+from .connection import calendar_key, display_name
 from .errors import NETWORK_ERRORS, rejected
 from .event import read_extras
 
@@ -82,7 +82,7 @@ class ManagedCalendar:
     @property
     def name(self) -> str:
         """Return the display name, falling back for a nameless collection."""
-        return self.calendar.name or "CalDAV"
+        return display_name(self.calendar)
 
     @property
     def writable(self) -> bool:
@@ -175,7 +175,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         super().__init__(
             hass,
             _LOGGER,
-            name=calendar.name or "CalDAV",
+            name=display_name(calendar),
             update_interval=scan_interval,
             config_entry=entry,
         )
@@ -246,12 +246,12 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         return held[1], held[2]
 
     async def async_get_events(
-        self, hass: HomeAssistant, start_date: datetime, end_date: datetime
+        self, start_date: datetime, end_date: datetime
     ) -> list[CalendarEvent]:
         """Return all events between two dates."""
         if not self.capability.supports_events:
             return []
-        return await hass.async_add_executor_job(
+        return await self.hass.async_add_executor_job(
             self._searched_events, start_date, end_date
         )
 
@@ -591,6 +591,8 @@ class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, Collection]]):
                 fetch_collections, self.client
             )
         except Exception as err:
+            if rejected(err):
+                raise ConfigEntryAuthFailed("Authorization failed") from err
             # A caldav error carries the url it was reading.
             _LOGGER.debug("Could not read calendar colors: %s", err)
             raise UpdateFailed(

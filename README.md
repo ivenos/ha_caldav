@@ -23,7 +23,7 @@ CalDAV Complete is a Home Assistant integration that connects calendars and to-d
 - 🎨 Calendar colors from the server, unless set in Home Assistant
 - 🔎 Actions to search, import, export and move events and to manage calendars
 - 🛡️ Writes check for changes made on the server in the meantime, and read-only calendars stay read-only
-- ⚡ On servers that report changes, calendars are only fetched in full when something changed
+- ⚡ On servers that report changes, a calendar is fetched in full when something changed and otherwise once an hour
 
 ## Installation
 
@@ -50,7 +50,7 @@ Each calendar gets a `calendar.<calendar>` entity for its events and a `todo.<ca
 | Seconds a request may take | `30` | How long to wait for the server to answer, 5-120 |
 | Days ahead | `7` | How far ahead to look for the upcoming event, 1-365 |
 | Include all-day events | `on` | Whether an all-day event can be the upcoming event |
-| Read-only | `off` | Hides the create, edit and delete controls |
+| Read-only | `off` | Hides the create, edit and delete controls, and the actions refuse to write |
 
 ## Actions
 

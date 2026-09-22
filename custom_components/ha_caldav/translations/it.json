@@ -12,7 +12,7 @@
         },
         "data_description": {
           "url": "L'indirizzo del tuo server CalDAV. Sulla maggior parte dei server basta il nome host.",
-          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque intercetti la connessione può fingersi il server e leggere la password."
+          "verify_ssl": "Disattivato, chiunque intercetti la connessione può fingersi il server e leggere la password."
         },
         "sections": {
           "certificates": {
@@ -40,7 +40,7 @@
         },
         "data_description": {
           "url": "L'indirizzo del tuo server CalDAV. Sulla maggior parte dei server basta il nome host.",
-          "verify_ssl": "Lascialo attivo, a meno che tu non sappia perché disattivarlo. Disattivato, chiunque intercetti la connessione può fingersi il server e leggere la password."
+          "verify_ssl": "Disattivato, chiunque intercetti la connessione può fingersi il server e leggere la password."
         },
         "sections": {
           "certificates": {
@@ -156,6 +156,9 @@
     "bad_recurrence_id": {
       "message": "{value} non è una data né una data con ora."
     },
+    "cannot_connect": {
+      "message": "Impossibile connettersi al server CalDAV ({error})."
+    },
     "document_empty": {
       "message": "Il documento non contiene né eventi né attività."
     },
@@ -166,7 +169,7 @@
       "message": "Il documento contiene più di un elemento con l'UID {uid}."
     },
     "end_before_start": {
-      "message": "La fine precede l'inizio."
+      "message": "La fine deve essere successiva all'inizio."
     },
     "etag_conflict": {
       "message": "Questo elemento è cambiato sul server dall'ultima lettura di Home Assistant. Ricarica il calendario e ripeti la modifica."
@@ -176,6 +179,9 @@
     },
     "mixed_time_types": {
       "message": "Inizio e fine devono essere dello stesso tipo: due date per un evento di tutto il giorno, oppure due date con ora."
+    },
+    "no_calendar_read": {
+      "message": "Non è stato possibile leggere alcun calendario di questo account."
     },
     "no_event_in_object": {
       "message": "L'oggetto di calendario non contiene alcun evento."
@@ -239,6 +245,9 @@
     },
     "unknown_todo_item": {
       "message": "In questo elenco non c'è alcuna attività {uid}."
+    },
+    "unreadable_lines": {
+      "message": "Il documento contiene righe che non si possono leggere: {lines}"
     }
   },
   "selector": {

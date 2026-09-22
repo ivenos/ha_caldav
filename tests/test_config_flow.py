@@ -1,5 +1,3 @@
-"""Tests for the CalDAV config, reauth and options flow."""
-
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -207,8 +205,6 @@ async def test_options_flow_saves_the_selection(hass: HomeAssistant) -> None:
 async def test_options_flow_keeps_selection_while_unreachable(
     hass: HomeAssistant,
 ) -> None:
-    # With the server down the calendars field is left out of the form; saving
-    # the other options must not wipe the stored selection.
     entry = await _setup_entry(
         hass, options={CONF_CALENDARS: ["/remote.php/dav/Personal"]}
     )
@@ -239,7 +235,6 @@ async def test_options_flow_keeps_selection_while_unreachable(
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_CALENDARS] == ["/remote.php/dav/Personal"]
-    # Asked once for the whole flow, not again for every form it draws.
     assert principal.call_count == 1
     assert entry.options[CONF_SCAN_INTERVAL] == 5
 
@@ -273,7 +268,6 @@ async def test_bare_host_is_resolved_through_the_bootstrap_url(
         patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client,
         patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
     ):
-        # The entered url answers with nothing; the RFC 6764 fallback does.
         client.return_value.principal.side_effect = [
             requests.ConnectionError(),
             Mock(),
@@ -340,8 +334,6 @@ async def test_reconfigure_updates_the_connection(hass: HomeAssistant) -> None:
 
     result = await entry.start_reconfigure_flow(hass)
     assert result["type"] is FlowResultType.FORM
-    # The account is fixed and the password belongs to reauth, so neither is
-    # offered here and neither is sent to the browser.
     assert CONF_USERNAME not in result["data_schema"].schema
     assert CONF_PASSWORD not in result["data_schema"].schema
 
@@ -363,8 +355,6 @@ async def test_reconfigure_updates_the_connection(hass: HomeAssistant) -> None:
 async def test_reconfigure_moves_the_account_to_a_new_url(
     hass: HomeAssistant,
 ) -> None:
-    """The url is what this step exists to change, and the entry is keyed on
-    it, so the key moves with it rather than refusing the change."""
     entry = _entry()
     entry.add_to_hass(hass)
 
@@ -410,8 +400,6 @@ async def test_reconfigure_refuses_a_url_another_entry_already_holds(
 async def test_one_account_spelled_two_ways_is_not_set_up_twice(
     hass: HomeAssistant,
 ) -> None:
-    """A trailing slash or another case in the host is the same account, and
-    setting it up again would double every calendar and to-do list."""
     entry = _entry()
     entry.add_to_hass(hass)
 
@@ -421,8 +409,7 @@ async def test_one_account_spelled_two_ways_is_not_set_up_twice(
     with patch("custom_components.ha_caldav.config_flow.caldav.DAVClient"):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            # Scheme and host are case-insensitive and the trailing slash means
-            # nothing; the path is left alone, because RFC 3986 keeps that one
+            # RFC 3986 makes scheme and host case-insensitive and keeps the path
             # case-sensitive.
             {**USER_INPUT, CONF_URL: "HTTPS://Cloud.Example.COM/remote.php/dav/"},
         )
@@ -452,15 +439,12 @@ async def test_reconfigure_can_clear_a_client_certificate(
         )
 
     assert result["type"] is FlowResultType.ABORT
-    # An expired certificate has to be removable, not merged back in.
     assert CONF_CLIENT_CERT not in entry.data
 
 
 async def test_a_bootstrapped_account_can_be_reconfigured(
     hass: HomeAssistant,
 ) -> None:
-    # Set up through the bare host name, so the stored url is the resolved one
-    # while the entered one was shorter.
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_USER}
     )
@@ -536,8 +520,6 @@ async def test_per_calendar_options_only_store_the_override(
         await hass.async_block_till_done()
 
     assert entry.options[CONF_DAYS] == 7
-    # Keyed on the url, and holding only what differs from the account: the
-    # fields left at the account values must keep following it.
     assert entry.options[CONF_CALENDAR_OPTIONS] == {
         "/remote.php/dav/Work": {
             CONF_DAYS: 30,
@@ -550,7 +532,7 @@ async def test_per_calendar_options_only_store_the_override(
 async def test_two_calendars_of_one_name_stay_apart_in_the_picker(
     hass: HomeAssistant,
 ) -> None:
-    """A shared calendar keeps its owner's name, so a name can arrive twice."""
+    """A shared calendar keeps its owner's name."""
     entry = MockConfigEntry(
         domain=DOMAIN, title="iven", data=USER_INPUT, options={}, unique_id="x"
     )
@@ -592,7 +574,6 @@ async def test_two_calendars_of_one_name_stay_apart_in_the_picker(
         )
         await hass.async_block_till_done()
 
-    # The one that was picked, not the one the server happened to list first.
     assert entry.options[CONF_CALENDAR_OPTIONS] == {
         "/remote.php/dav/shared/Personal": {CONF_READ_ONLY: True}
     }
@@ -677,8 +658,6 @@ async def test_resetting_a_calendar_drops_its_override(hass: HomeAssistant) -> N
 async def test_a_per_calendar_override_reaches_the_coordinator(
     hass: HomeAssistant,
 ) -> None:
-    # An entry written by the previous version keyed its overrides on the
-    # display name; those have to keep working.
     entry = await _setup_entry(
         hass,
         options={
@@ -712,8 +691,7 @@ async def test_credentials_typed_into_the_url_are_not_stored(
         )
         await hass.async_block_till_done()
 
-    # caldav logs the url it was handed before stripping those itself, and the
-    # form has its own fields for both.
+    # caldav logs the url it was handed before stripping those itself.
     assert result["data"][CONF_URL] == "https://cloud.example.com/dav"
     assert "hunter2" not in str(result["data"][CONF_URL])
 
@@ -731,8 +709,7 @@ async def test_an_empty_password_survives_into_the_entry(hass: HomeAssistant) ->
         )
         await hass.async_block_till_done()
 
-    # Only the three optional TLS paths may be dropped when blank: some servers
-    # take the token in the username, and losing the key would KeyError.
+    # Some servers take the token in the username and want no password.
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_PASSWORD] == ""
 
@@ -745,20 +722,19 @@ async def test_the_options_dialog_lists_the_calendars_once(
     principal.reset_mock()
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
-    await hass.config_entries.options.async_configure(
+    result = await hass.config_entries.options.async_configure(
         result["flow_id"], {"next_step_id": "account"}
     )
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_CALENDARS: []}
+    )
 
-    # The menu decision and the form both need the list; asking twice is two
-    # round-trips to the server for opening one dialog.
     assert principal.call_count == 1
 
 
 async def test_the_options_form_refuses_an_empty_calendar_selection(
     hass: HomeAssistant,
 ) -> None:
-    # Every box unticked leaves the account with no entities at all, which
-    # reads as a broken integration rather than as a choice.
     entry = await _setup_entry(hass)
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(
@@ -769,9 +745,7 @@ async def test_the_options_form_refuses_an_empty_calendar_selection(
         result["flow_id"], {CONF_CALENDARS: []}
     )
 
-    # Reported as a translated form error, not as the voluptuous message, which
-    # Home Assistant hands to the frontend verbatim and in English however the
-    # user has their language set.
+    # Home Assistant hands a voluptuous message to the frontend verbatim and in English.
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {CONF_CALENDARS: "no_calendars"}
 
@@ -779,8 +753,6 @@ async def test_the_options_form_refuses_an_empty_calendar_selection(
 async def test_the_options_form_keeps_a_selection_stored_by_name(
     hass: HomeAssistant,
 ) -> None:
-    # A selection written before the switch to url keys named the calendar.
-    # Dropping it here would silently untick every box on opening the dialog.
     entry = await _setup_entry(hass, options={CONF_CALENDARS: ["Personal"]})
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(
@@ -796,9 +768,8 @@ async def test_the_options_form_keeps_a_selection_stored_by_name(
 async def test_a_401_on_the_entered_url_still_tries_the_bootstrap(
     hass: HomeAssistant,
 ) -> None:
-    """A bare host whose root sits behind another auth realm answers 401 while
-    the RFC 6764 candidate behind it works, and giving up on the first one
-    reports bad credentials for credentials that are fine."""
+    """A bare host whose root sits behind another auth realm answers 401 while the
+    RFC 6764 candidate behind it works."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_USER}
     )
@@ -841,15 +812,10 @@ async def test_a_401_everywhere_is_still_reported_as_bad_credentials(
 async def test_a_calendar_one_listing_left_out_stays_selected(
     hass: HomeAssistant,
 ) -> None:
-    """The form can only offer what one listing turned up, and what it does not
-    offer cannot be ticked. Stored as submitted, a calendar the server left out
-    of that listing reads as deselected on the next setup, and its entity goes
-    from the registry with its history and everything pointing at it."""
     entry = await _setup_entry(
         hass,
         options={CONF_CALENDARS: ["/remote.php/dav/Personal", "/remote.php/dav/Work"]},
     )
-    # The one bad minute: Work is missing from this listing only.
     entry.runtime_data.client.principal.return_value.calendars.return_value = [
         _dav_calendar("Personal")
     ]
@@ -881,9 +847,6 @@ async def test_a_calendar_one_listing_left_out_stays_selected(
 async def test_an_account_tracking_everything_is_not_frozen_by_a_visit(
     hass: HomeAssistant,
 ) -> None:
-    """An entry that never had a selection follows the server, and every box
-    being ticked is what that looks like in the form. Written down it freezes,
-    and a calendar made later is silently never loaded."""
     entry = await _setup_entry(hass)
     assert CONF_CALENDARS not in entry.options
 
@@ -915,9 +878,6 @@ async def test_an_account_tracking_everything_is_not_frozen_by_a_visit(
 async def test_every_probed_candidate_hands_its_connection_back(
     hass: HomeAssistant,
 ) -> None:
-    """One flow walks several bootstrap candidates, and each keeps a pooled
-    connection open until it is closed. Left to the garbage collector they pile
-    up for as long as the user keeps retrying the form."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_USER}
     )
@@ -940,9 +900,7 @@ async def test_every_probed_candidate_hands_its_connection_back(
 async def test_the_options_of_an_entry_that_never_loaded_still_open(
     hass: HomeAssistant,
 ) -> None:
-    """An account whose server was down at startup has no runtime data, and the
-    calendar list is read off it. Reaching for it there would leave the one
-    dialog the user needs to fix the settings raising on open."""
+    """An entry that never loaded has no runtime_data."""
     entry = MockConfigEntry(
         domain=DOMAIN, title="iven", data=USER_INPUT, options={}, unique_id="x"
     )
@@ -955,10 +913,6 @@ async def test_the_options_of_an_entry_that_never_loaded_still_open(
 
 
 def test_two_calendars_whose_paths_nest_still_get_a_label_each() -> None:
-    """A label is the shortest tail of the path no other calendar shares, and a
-    path that is wholly the tail of another has none: every depth down to the
-    whole key still matches the longer one. Without the fallback the loop runs
-    out and the calendar comes back labeled with nothing to tell it apart."""
     nested = Mock(name="a")
     nested.name = "Personal"
     nested.calendar.url = "https://cloud.example.com/personal"
@@ -988,7 +942,7 @@ async def test_reauth_asks_with_the_timeout_the_account_was_given(
     result = await entry.start_reauth_flow(hass)
     with (
         patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client,
-        # Or the reload that follows builds the client this assertion reads.
+        # Reauth reloads the entry, which builds another client.
         patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
     ):
         await hass.config_entries.flow.async_configure(

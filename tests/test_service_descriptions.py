@@ -1,8 +1,4 @@
-"""Tests that services.yaml, the schemas and the strings stay in step.
-
-The selector option lists in services.yaml duplicate constants from const.py as
-plain YAML, and nothing at runtime would notice the two drifting apart.
-"""
+"""The selector options in services.yaml duplicate constants from const.py."""
 
 import json
 from pathlib import Path
@@ -21,10 +17,6 @@ STRINGS = json.loads((COMPONENT / "strings.json").read_text())
 
 
 def _registered() -> dict[str, dict]:
-    """Return service name -> schema, from the registration calls themselves.
-
-    A hand-written table would keep passing for a service nobody described.
-    """
     registered: list[tuple] = []
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(
@@ -44,12 +36,8 @@ def _registered() -> dict[str, dict]:
 
 
 def _markers(schema: object) -> dict:
-    """Return the field markers of a schema, however it arrives.
-
-    A service whose fields constrain each other is registered as a vol.All
-    around an entity-service schema, and that adds the target keys the
-    description puts under `target` rather than under `fields`.
-    """
+    """A vol.All around an entity-service schema adds the target keys, which the
+    description puts under `target` rather than under `fields`."""
     if isinstance(schema, dict):
         fields = schema
     elif isinstance(schema, vol.Schema):
@@ -74,7 +62,6 @@ SCHEMAS = _registered()
 
 
 def _fields(service: str) -> dict:
-    """Return the described fields, lifted out of any collapsible section."""
     described = DESCRIPTIONS[service].get("fields") or {}
     flat = {}
     for name, spec in described.items():
@@ -180,10 +167,8 @@ def test_declared_defaults_match_the_schema(service: str) -> None:
     ],
 )
 def test_selector_options_match_the_constants(service, field, options) -> None:
-    """The picker offers the RFC names lowercased: hassfest holds a selector's
-    option keys to [a-z0-9-_]+, so the wire form cannot be the RFC value
-    itself. The schema takes either spelling and hands the write path the RFC
-    one; what must not drift is which values exist."""
+    """hassfest holds a selector's option keys to [a-z0-9-_]+, so the picker offers
+    the RFC names lowercased."""
     selector = _fields(service)[field]["selector"]["select"]
 
     assert selector["options"] == [value.lower() for value in options]
@@ -210,7 +195,6 @@ def test_every_example_validates_against_the_schema(service: str) -> None:
             continue
         text = str(example)
         value = yaml.safe_load(text) if text.startswith(("[", "{")) else example
-        # A wrong example is a copy-and-paste trap in the UI.
         vol.Schema(validators[name])(value)
 
 
@@ -218,7 +202,6 @@ LANGUAGES = ("en", "de", "es", "fr", "it")
 
 
 def _flatten(value: dict, prefix: str = "") -> dict[str, str]:
-    """Return every leaf of a nested strings file, keyed by its dotted path."""
     flat: dict[str, str] = {}
     for key, item in value.items():
         if isinstance(item, dict):
@@ -235,11 +218,6 @@ def _translation(language: str) -> dict[str, str]:
 
 @pytest.mark.parametrize("language", LANGUAGES)
 def test_every_translation_carries_exactly_the_declared_keys(language: str) -> None:
-    """CONTRIBUTING asks for this and nothing else checked it.
-
-    A key missing from one language shows the user a raw translation key, and
-    one left behind after a rename is dead weight nobody notices.
-    """
     reference = _flatten(STRINGS)
     translated = _translation(language)
 
@@ -249,8 +227,7 @@ def test_every_translation_carries_exactly_the_declared_keys(language: str) -> N
 
 @pytest.mark.parametrize("language", LANGUAGES)
 def test_every_translation_keeps_the_same_placeholders(language: str) -> None:
-    # A placeholder dropped in translation renders the message without the
-    # value it exists to name; an invented one raises at format time.
+    # An invented placeholder raises at format time.
     import re
 
     reference = _flatten(STRINGS)
@@ -263,7 +240,6 @@ def test_every_translation_keeps_the_same_placeholders(language: str) -> None:
 
 
 def test_the_english_translation_matches_the_source_strings() -> None:
-    # en.json is a copy of strings.json; a fix made in one has to reach both.
     assert _translation("en") == _flatten(STRINGS)
 
 

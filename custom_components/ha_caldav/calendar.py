@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from functools import partial
+import re
 from typing import Any
 
 from homeassistant.components.calendar import (
@@ -34,9 +35,11 @@ from .recurrence import delete_event, update_event
 # one taken from the server.
 COLOR_STATE = f"{DOMAIN}.private"
 
-# Service calls only; the panel comes in over the websocket, and the lock in
-# HaCaldavEntity.async_write is what serializes writes.
-PARALLEL_UPDATES = 1
+# The lock in HaCaldavEntity.async_write serializes the writes to a collection.
+PARALLEL_UPDATES = 0
+
+# The frontend writes a timed UNTIL as UTC digits without the Z.
+_BARE_UNTIL = re.compile(r"(UNTIL=\d{8}T\d{6})(?=;|$)")
 
 
 async def async_setup_entry(
@@ -197,7 +200,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         has the REST view answer a traceback.
         """
         try:
-            return await self.coordinator.async_get_events(hass, start_date, end_date)
+            return await self.coordinator.async_get_events(start_date, end_date)
         except Exception as err:
             raise as_reported(err, "read") from err
 
@@ -248,8 +251,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
     ) -> None:
         """Update an event from an already-mapped field set."""
         await self.async_write(
-            partial(
-                update_event,
+            lambda: update_event(
                 self.calendar,
                 uid,
                 data,
@@ -271,8 +273,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
     ) -> None:
         """Delete a series, a single occurrence, or an occurrence onwards."""
         await self.async_write(
-            partial(
-                delete_event,
+            lambda: delete_event(
                 self.calendar,
                 uid,
                 recurrence_id,
@@ -315,5 +316,5 @@ def _item_data(fields: dict[str, Any]) -> dict[str, Any]:
         "location": fields.get("location") or None,
     }
     if rrule := fields.get("rrule"):
-        data["rrule"] = rrule
+        data["rrule"] = _BARE_UNTIL.sub(r"\1Z", rrule)
     return data

@@ -32,9 +32,9 @@ env:
   PYTHON_VERSION: "3.14"
 
 jobs:
-  # The two newest Nextcloud majors, resolved from Docker Hub at run time.
   matrix:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       include: ${{ steps.build.outputs.include }}
     steps:

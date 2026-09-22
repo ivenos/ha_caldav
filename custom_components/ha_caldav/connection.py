@@ -6,7 +6,7 @@ from collections.abc import Iterator, Mapping
 from http import HTTPStatus
 import logging
 from typing import Any
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 import caldav
 from caldav.davclient import requests
@@ -131,9 +131,10 @@ def url_candidates(url: str, kwargs: Mapping[str, Any]) -> Iterator[str]:
         parsed = urlparse(entered)
     except ValueError:
         return
-    if parsed.netloc and parsed.path.rstrip("/") != WELL_KNOWN.rstrip("/"):
+    if parsed.netloc and parsed.path.rstrip("/") != WELL_KNOWN:
         probe = urlunparse((parsed.scheme, parsed.netloc, WELL_KNOWN, "", "", ""))
-        if (resolved := _resolve_bootstrap(probe, kwargs)) is not None:
+        resolved = _resolve_bootstrap(probe, kwargs)
+        if resolved is not None and resolved.rstrip("/") != entered.rstrip("/"):
             yield resolved
 
 
@@ -163,7 +164,7 @@ def _resolve_bootstrap(probe: str, kwargs: Mapping[str, Any]) -> str | None:
         _LOGGER.debug("Ignoring a bootstrap that steps out of https")
         return None
     # caldav prefers userinfo in the url over the account handed to it.
-    return without_userinfo(str(response.url) or probe)
+    return without_userinfo(str(response.url))
 
 
 class HostLockedSession(requests.Session):
@@ -173,26 +174,38 @@ class HostLockedSession(requests.Session):
     hook outlives the redirect and re-signs for the new host.
     """
 
-    # Where the first request that followed a 301 or 302 ended up.
+    # Where the first request that was moved for good ended up.
     moved_to: str | None = None
 
     def request(self, method: str, url: Any, *args: Any, **kwargs: Any) -> Any:
-        """Send a request, repeated where a redirect on the same host dropped its body.
+        """Send a request, following a redirect on the same host with its method.
 
-        A PROPFIND that lost its body reads as allprop. caldav tells a bad
+        requests turns a DELETE redirected with 302 into a GET, and sends a
+        PUT, PROPFIND or MKCALENDAR on without its body. caldav tells a bad
         password from a refusal by the reason phrase, which HTTP/2 leaves out.
         """
-        response = super().request(method, url, *args, **kwargs)
-        if (
-            kwargs.get("data")
-            and method.upper() not in ("GET", "HEAD", "POST")
-            and any(hop.status_code in (301, 302) for hop in response.history)
-            and not self.should_strip_auth(str(url), str(response.url))
-        ):
-            self.moved_to = self.moved_to or str(response.url)
-            response = super().request(method, str(response.url), *args, **kwargs)
+        if method.upper() in ("GET", "HEAD"):
+            response = super().request(method, url, *args, **kwargs)
+        else:
+            response = self._follow(method, str(url), *args, **kwargs)
         if response.status_code in (401, 403):
             response.reason = HTTPStatus(response.status_code).phrase
+        return response
+
+    def _follow(self, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
+        kwargs["allow_redirects"] = False
+        response = super().request(method, url, *args, **kwargs)
+        for _ in range(self.max_redirects):
+            location = response.headers.get("Location")
+            if response.status_code not in (301, 302, 307, 308) or not location:
+                break
+            target = urljoin(url, location)
+            if self.should_strip_auth(url, target):
+                break
+            if response.status_code != 307:
+                self.moved_to = self.moved_to or target
+            url = target
+            response = super().request(method, url, *args, **kwargs)
         return response
 
     def rebuild_auth(self, prepared_request: Any, response: Any) -> None:
@@ -207,9 +220,21 @@ def build_client(
 ) -> caldav.DAVClient:
     """Return a client for these details, locked to the host of its url."""
     client = caldav.DAVClient(url, username=username, password=password, **kwargs)
+    client.session.close()
     # caldav never configures its session; multiplexing is optional to it too.
     try:
         client.session = HostLockedSession(multiplexed=True)
     except TypeError:
         client.session = HostLockedSession()
     return client
+
+
+def size_pool(client: caldav.DAVClient, calendars: int) -> None:
+    """Keep a pooled connection for every calendar and the color poll.
+
+    They all poll in the same second, and urllib3 warns about and drops each
+    connection past its default of ten.
+    """
+    adapter = requests.adapters.HTTPAdapter(pool_maxsize=max(calendars + 1, 10))
+    for prefix in ("https://", "http://"):
+        client.session.mount(prefix, adapter)

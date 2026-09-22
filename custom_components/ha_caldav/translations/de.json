@@ -12,7 +12,7 @@
         },
         "data_description": {
           "url": "Die Adresse deines CalDAV-Servers. Bei den meisten Servern reicht der bloße Hostname.",
-          "verify_ssl": "Lass das eingeschaltet, solange kein Grund dagegen spricht. Ist es aus, kann sich jeder, der die Verbindung abfängt, als Server ausgeben und das Passwort mitlesen."
+          "verify_ssl": "Ausgeschaltet kann sich jeder, der die Verbindung abfängt, als Server ausgeben und das Passwort mitlesen."
         },
         "sections": {
           "certificates": {
@@ -40,7 +40,7 @@
         },
         "data_description": {
           "url": "Die Adresse deines CalDAV-Servers. Bei den meisten Servern reicht der bloße Hostname.",
-          "verify_ssl": "Lass das eingeschaltet, solange kein Grund dagegen spricht. Ist es aus, kann sich jeder, der die Verbindung abfängt, als Server ausgeben und das Passwort mitlesen."
+          "verify_ssl": "Ausgeschaltet kann sich jeder, der die Verbindung abfängt, als Server ausgeben und das Passwort mitlesen."
         },
         "sections": {
           "certificates": {
@@ -156,6 +156,9 @@
     "bad_recurrence_id": {
       "message": "{value} ist weder ein Datum noch ein Zeitpunkt."
     },
+    "cannot_connect": {
+      "message": "Keine Verbindung zum CalDAV-Server ({error})."
+    },
     "document_empty": {
       "message": "Das Dokument enthält weder einen Termin noch eine Aufgabe."
     },
@@ -166,7 +169,7 @@
       "message": "Das Dokument enthält mehr als einen Eintrag mit der UID {uid}."
     },
     "end_before_start": {
-      "message": "Das Ende liegt vor dem Start."
+      "message": "Das Ende muss nach dem Start liegen."
     },
     "etag_conflict": {
       "message": "Dieser Eintrag hat sich auf dem Server geändert, seit Home Assistant ihn zuletzt gelesen hat. Lade den Kalender neu und nimm die Änderung erneut vor."
@@ -176,6 +179,9 @@
     },
     "mixed_time_types": {
       "message": "Start und Ende müssen von derselben Art sein: zwei Datumsangaben für einen ganztägigen Termin oder zwei Zeitpunkte."
+    },
+    "no_calendar_read": {
+      "message": "Kein Kalender dieses Kontos ließ sich lesen."
     },
     "no_event_in_object": {
       "message": "Das Kalenderobjekt enthält keinen Termin."
@@ -239,6 +245,9 @@
     },
     "unknown_todo_item": {
       "message": "Auf dieser Liste gibt es keine Aufgabe {uid}."
+    },
+    "unreadable_lines": {
+      "message": "Das Dokument enthält Zeilen, die sich nicht lesen lassen: {lines}"
     }
   },
   "selector": {

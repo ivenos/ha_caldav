@@ -1,9 +1,5 @@
-"""Tests for resolving a uid on servers that refuse to filter on it.
-
-iCloud answers the UID prop-filter REPORT the library builds with 412. Which
-exception that becomes depends on the caldav version, so the fallback is driven
-here from every shape it has been seen to take.
-"""
+"""iCloud answers the UID prop-filter REPORT caldav builds with 412, which
+becomes a different exception in each caldav version."""
 
 from unittest.mock import Mock
 
@@ -11,7 +7,7 @@ from caldav.lib.error import NotFoundError, ReportError
 from conftest import dav_calendar
 import pytest
 
-from custom_components.ha_caldav.api import delete_todo, object_by_uid, update_todo
+from custom_components.ha_caldav.api import delete_todos, object_by_uid, update_todo
 from custom_components.ha_caldav.recurrence import delete_event, update_event
 
 # caldav 2.1.0 turns the 412 into this, through its own broken retry; 2.2 and
@@ -54,8 +50,6 @@ def test_refused_uid_search_falls_back_to_a_scan(refusal, todo) -> None:
 
 @pytest.mark.parametrize("todo", [False, True])
 def test_the_scan_covers_the_whole_calendar(todo) -> None:
-    # No date window: an event far outside the one on screen still has to be
-    # reachable, and the server is the wrong place to narrow it down.
     calendar = _calendar(ReportError("412"), [_resource("evt-1")])
 
     object_by_uid(calendar, "evt-1", todo=todo)
@@ -78,7 +72,6 @@ def test_a_working_server_is_never_scanned(todo) -> None:
 
 @pytest.mark.parametrize("todo", [False, True])
 def test_a_genuinely_missing_object_is_not_scanned_for(todo) -> None:
-    # The server answered no; scanning would cost a lot to learn nothing.
     calendar = _calendar(NotFoundError("gone"))
 
     with pytest.raises(NotFoundError):
@@ -118,7 +111,6 @@ VTODO = (
 
 
 def _real_resource(raw: str) -> Mock:
-    """A search result close enough to the real thing to be written back."""
     from icalendar import Calendar as ICalCalendar
 
     item = Mock()
@@ -172,7 +164,7 @@ def test_todo_delete_survives_a_refused_uid_search() -> None:
     wanted = _real_resource(VTODO)
     calendar = _calendar(ReportError("412"), [wanted])
 
-    delete_todo(calendar, "evt-1")
+    delete_todos(calendar, ["evt-1"], {})
 
     wanted.delete.assert_called_once()
 
@@ -195,18 +187,12 @@ def test_a_server_that_will_not_filter_is_scanned_once_for_a_whole_import() -> N
         "END:VCALENDAR\r\n",
     )
 
-    # Asking per uid would download the whole collection once per component.
-    # Two reads, one per component type, however many uids the document holds.
     assert calendar.search.call_count == 2
 
 
 def test_a_todo_write_does_not_ask_the_server_for_the_uid_again() -> None:
-    """caldav's no_create makes save() look the uid up before writing.
-
-    That is the very request iCloud refuses, and object_by_uid has already
-    resolved the resource. Written against a real caldav.Todo, because the
-    lookup happens inside save() where a stubbed one cannot show it.
-    """
+    """caldav's no_create makes save() look the uid up before writing, which is the
+    request iCloud refuses."""
     import caldav
 
     put: dict = {}
@@ -244,7 +230,6 @@ def test_a_todo_write_does_not_ask_the_server_for_the_uid_again() -> None:
 
 
 def _doc(*entries: tuple[str, str]) -> str:
-    """Build an iCalendar document from (uid, component-name) pairs."""
     body = ""
     for uid, name in entries:
         if name == "VTODO":
@@ -266,30 +251,27 @@ def test_an_imported_todo_does_not_overwrite_a_todo_of_the_same_uid() -> None:
     from custom_components.ha_caldav.api import import_ics
     from custom_components.ha_caldav.errors import Refused
 
-    # event_by_uid is restricted to VEVENT, so asking it about a to-do always
-    # comes back empty and the clash goes unseen until the PUT lands on it.
-    calendar = Mock()
+    # caldav's event_by_uid is restricted to VEVENT.
+    calendar = dav_calendar()
     calendar.event_by_uid.side_effect = NotFoundError("no such event")
     calendar.todo_by_uid.return_value = _resource("task-1")
 
     with pytest.raises(Refused, match="uid_clash"):
         import_ics(calendar, _doc(("task-1", "VTODO")))
 
-    calendar.save_todo.assert_not_called()
+    assert calendar.client.puts == []
 
 
 def test_the_uid_whose_lookup_was_refused_is_still_checked_by_the_scan() -> None:
     from custom_components.ha_caldav.api import import_ics
     from custom_components.ha_caldav.errors import Refused
 
-    # The refusal fires on the first uid; dropping it from the scan would let
-    # the import PUT straight over a live object.
     calendar = _calendar(ReportError("no uid filter"), [_resource("a")])
 
     with pytest.raises(Refused, match="uid_clash"):
         import_ics(calendar, _doc(("a", "VEVENT"), ("b", "VEVENT")))
 
-    calendar.save_event.assert_not_called()
+    assert calendar.client.puts == []
 
 
 def test_a_large_import_reads_the_collection_once_instead_of_asking_per_uid() -> None:
@@ -300,7 +282,6 @@ def test_a_large_import_reads_the_collection_once_instead_of_asking_per_uid() ->
 
     import_ics(calendar, _doc(*((f"u{n}", "VEVENT") for n in range(12))))
 
-    # Two reads, one per component type, rather than one per uid.
     assert calendar.search.call_count == 2
     assert calendar.event_by_uid.call_count == 0
 
@@ -315,7 +296,6 @@ def test_deleting_several_todos_shares_one_scan_when_the_uid_search_is_refused()
 
     delete_todos(calendar, ["t0", "t1", "t2"], {})
 
-    # One whole-collection read for the selection, not one per item.
     assert calendar.search.call_count == 1
     for resource in wanted:
         resource.delete.assert_called_once()

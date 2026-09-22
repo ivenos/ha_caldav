@@ -1,5 +1,3 @@
-"""Tests for what the server reports a calendar can do."""
-
 from unittest.mock import Mock, patch
 
 from caldav.davclient import DAVResponse
@@ -29,7 +27,6 @@ HOME = "/remote.php/dav/calendars/iven"
 
 
 def _multistatus(body: str) -> DAVResponse:
-    """Build a real DAVResponse so the parsing sees the actual element shapes."""
     response = Mock()
     response.status_code = 207
     response.headers = {"Content-Type": "application/xml"}
@@ -103,7 +100,7 @@ def test_calendar_the_server_did_not_answer_for_stays_permissive() -> None:
 
 def test_missing_properties_do_not_lock_the_calendar_down() -> None:
     # caldav drops a 404 propstat, so the calendar is in the result with no
-    # properties at all, which must not read as "no components, no writing".
+    # properties at all.
     client = _client(
         _home_set_response(
             f"<d:response><d:href>{HOME}/bare/</d:href><d:propstat><d:prop>"
@@ -159,8 +156,6 @@ def test_sync_collection_probe_finds_the_report() -> None:
 
 
 def test_sync_collection_probe_trusts_a_server_that_did_not_answer() -> None:
-    # The property came back empty rather than without sync-collection, which
-    # must not raise a repair issue on a server that supports it after all.
     calendar = Mock()
     calendar.get_properties.return_value = _multistatus(
         '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">'
@@ -217,7 +212,6 @@ async def test_component_set_decides_which_entities_exist(
         },
     )
 
-    # An event-only calendar has no to-do list, and a task list is no calendar.
     assert hass.states.get("calendar.events") is not None
     assert hass.states.get("todo.events") is None
     assert hass.states.get("todo.tasks") is not None
@@ -240,8 +234,7 @@ async def test_a_calendar_we_may_not_write_to_hides_its_controls(
 
 
 def test_an_empty_component_set_stays_permissive() -> None:
-    # Radicale answers an empty set with a single nameless comp element, which
-    # must not read as "this calendar holds nothing".
+    # Radicale answers an empty set with a single nameless comp element.
     client = _client(
         _home_set_response(
             f"<d:response><d:href>{HOME}/bare/</d:href><d:propstat><d:prop>"
@@ -257,8 +250,6 @@ def test_an_empty_component_set_stays_permissive() -> None:
 
 
 def test_an_empty_privilege_set_stays_permissive() -> None:
-    # A server that names no privileges is not denying them, and locking the
-    # calendar would remove every control.
     client = _client(_home_set_response(_entry(f"{HOME}/bare/", ["VEVENT"], [])))
 
     assert fetch_capabilities(client)[f"{HOME}/bare"].writable is True
@@ -276,15 +267,8 @@ def test_the_address_set_is_read_when_the_server_has_one() -> None:
 
 
 def test_a_principal_named_by_path_is_read_as_the_uri_it_stands_for() -> None:
-    """RFC 5545 has a CAL-ADDRESS be a URI, and RFC 6638 lets the set name the
-    principal by its url; sabre/dav and Nextcloud both answer with a bare path
-    for an account carrying no mail address.
-
-    Written onto an ATTENDEE as it stands, sabre reads it as a local principal,
-    fails to resolve it, and answers 500 to every DELETE of that object from
-    then on. Measured against Baikal: the event became impossible to remove at
-    all, and the whole live suite stalled on the leftover.
-    """
+    """RFC 5545 has a CAL-ADDRESS be a URI, and sabre/dav and Nextcloud answer a
+    bare path for an account carrying no mail address."""
     client = Mock()
     client.url = "http://localhost:8082/dav.php/"
     client.principal.return_value.calendar_user_address_set.return_value = [
@@ -296,7 +280,6 @@ def test_a_principal_named_by_path_is_read_as_the_uri_it_stands_for() -> None:
 
     assert fetch_address_set(client) == [
         "http://localhost:8082/dav.php/principals/admin/",
-        # Anything carrying a scheme of its own is left exactly as it came.
         "mailto:iven@example.com",
         "MailTo:Iven@Example.com",
         "http://elsewhere.test/principals/bob/",
@@ -304,9 +287,6 @@ def test_a_principal_named_by_path_is_read_as_the_uri_it_stands_for() -> None:
 
 
 def test_an_address_the_account_url_cannot_be_joined_to_is_kept() -> None:
-    """A client with no usable url must not cost the account its own address:
-    matched against nothing, no ATTENDEE line is ever recognized as ours and
-    the reply service reports the user is not on their own event."""
     client = Mock()
     type(client).url = property(
         lambda self: (_ for _ in ()).throw(ValueError("no url"))
@@ -325,9 +305,7 @@ def test_the_capability_propfind_asks_one_level_down() -> None:
 
     fetch_capabilities(client)
 
-    # At depth 0 the server answers for the home set alone, every calendar
-    # falls back to the permissive default, and a read-only shared calendar
-    # would show write controls.
+    # At depth 0 the server answers for the home set alone.
     home = client.principal.return_value.calendar_home_set
     assert home.get_properties.call_args.kwargs["depth"] == 1
 
@@ -346,14 +324,11 @@ async def test_a_calendar_with_one_component_still_gates_on_the_sync_token(
 
     await coordinator.async_refresh()
 
-    # Nothing changed on the server, so the expensive search must not run
-    # again; a half that is not supported must not read as "still stale".
     assert calendar.search.call_count == before
 
 
 def test_a_lowercase_component_name_still_counts() -> None:
-    """RFC 5545 makes them case-insensitive, and a calendar reported as holding
-    neither kind is one whose entities the prune deletes from the registry."""
+    """RFC 5545 makes component names case-insensitive."""
     import xml.etree.ElementTree as ET
 
     from custom_components.ha_caldav.capability import Capability, _components
@@ -370,9 +345,7 @@ def test_a_lowercase_component_name_still_counts() -> None:
 
 def test_a_calendar_that_hides_its_privileges_costs_no_other_calendar() -> None:
     """RFC 4918 9.1 lets a server answer 403 for a property the client may not
-    read, and caldav's parser raises on the whole response when it meets one.
-    Every calendar would then fall back to the permissive guess, offering edit
-    controls on collections that are genuinely read-only."""
+    read, and caldav's parser raises on the whole response when it meets one."""
     response = _home_set_response(
         _entry("/dav/iven/personal/", ["VEVENT", "VTODO"], ["write-content"])
         + "<d:response><d:href>/dav/alice/shared/</d:href>"
@@ -398,9 +371,7 @@ def test_a_calendar_that_hides_its_privileges_costs_no_other_calendar() -> None:
 
 def test_a_property_the_server_did_not_return_does_not_overwrite_one_it_did() -> None:
     """SabreDAV answers a second propstat with an empty shell and a 404 for a
-    property it cannot produce. Read as an answer, it blanks the component set
-    the first propstat gave and the calendar falls back to the permissive
-    guess, offering a to-do list on a collection that holds none."""
+    property it cannot produce."""
     response = _home_set_response(
         "<d:response><d:href>/dav/iven/events/</d:href>"
         "<d:propstat><d:prop><c:supported-calendar-component-set>"
@@ -422,10 +393,7 @@ def test_a_property_the_server_did_not_return_does_not_overwrite_one_it_did() ->
 
 def test_an_absolute_href_still_names_its_calendar() -> None:
     """RFC 4918 8.3 lets an href be an absolute URI, and caldav's own parser
-    reduces one to its path. Standing in for that parser means standing in for
-    its normalization too: read literally, not one calendar on such a server
-    matches, every one falls back to the permissive default, and a read-only
-    shared calendar is offered write controls whose every use fails."""
+    reduces one to its path."""
     from unittest.mock import Mock
     import xml.etree.ElementTree as ET
 
@@ -457,10 +425,6 @@ def test_an_absolute_href_still_names_its_calendar() -> None:
 
 
 def test_a_propstat_without_a_status_is_read_rather_than_crashed_on() -> None:
-    """The status element is what the propstat filter reads. Absent - and a
-    server is free to leave it out of a malformed response - reaching for its
-    text raises, and one such response costs the whole account its
-    capabilities."""
     client = _client(
         _home_set_response(
             f"<d:response><d:href>{HOME}/x/</d:href><d:propstat><d:prop>"
@@ -477,9 +441,6 @@ def test_a_propstat_without_a_status_is_read_rather_than_crashed_on() -> None:
 
 
 def test_a_response_for_another_server_does_not_answer_for_ours() -> None:
-    """calendar_key drops the scheme and the host, so a foreign href keys onto
-    the same path as a real calendar and the first one seen wins: the stranger
-    then decides whether ours is writable and what it holds."""
     import xml.etree.ElementTree as ET
 
     body = (
@@ -508,10 +469,6 @@ def test_a_response_for_another_server_does_not_answer_for_ours() -> None:
 def test_an_absolute_href_is_ignored_when_there_is_nothing_to_check_it_against(
     hass: HomeAssistant,
 ) -> None:
-    """calendar_key drops the scheme and the host, so a response for another
-    server keys onto the same path as a real calendar and the first one seen
-    wins. Without a home-set url there is nothing to tell the two apart, and
-    guessing would hand one calendar the capabilities of another."""
     import xml.etree.ElementTree as ET
 
     body = (

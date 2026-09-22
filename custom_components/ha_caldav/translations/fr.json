@@ -12,7 +12,7 @@
         },
         "data_description": {
           "url": "L'adresse de votre serveur CalDAV. Sur la plupart des serveurs, le nom d'hôte suffit.",
-          "verify_ssl": "Laissez cette option activée sauf raison contraire. Désactivée, quiconque intercepte la connexion peut se faire passer pour le serveur et lire le mot de passe."
+          "verify_ssl": "Désactivée, quiconque intercepte la connexion peut se faire passer pour le serveur et lire le mot de passe."
         },
         "sections": {
           "certificates": {
@@ -40,7 +40,7 @@
         },
         "data_description": {
           "url": "L'adresse de votre serveur CalDAV. Sur la plupart des serveurs, le nom d'hôte suffit.",
-          "verify_ssl": "Laissez cette option activée sauf raison contraire. Désactivée, quiconque intercepte la connexion peut se faire passer pour le serveur et lire le mot de passe."
+          "verify_ssl": "Désactivée, quiconque intercepte la connexion peut se faire passer pour le serveur et lire le mot de passe."
         },
         "sections": {
           "certificates": {
@@ -156,6 +156,9 @@
     "bad_recurrence_id": {
       "message": "{value} n'est ni une date ni une date avec heure."
     },
+    "cannot_connect": {
+      "message": "Impossible de se connecter au serveur CalDAV ({error})."
+    },
     "document_empty": {
       "message": "Le document ne contient ni événement ni tâche."
     },
@@ -166,7 +169,7 @@
       "message": "Le document contient plus d'un élément avec l'UID {uid}."
     },
     "end_before_start": {
-      "message": "La fin précède le début."
+      "message": "La fin doit être postérieure au début."
     },
     "etag_conflict": {
       "message": "Cet élément a changé sur le serveur depuis la dernière lecture par Home Assistant. Rechargez le calendrier et refaites la modification."
@@ -176,6 +179,9 @@
     },
     "mixed_time_types": {
       "message": "Le début et la fin doivent être de même nature : deux dates pour un événement sur toute la journée, ou deux dates avec heure."
+    },
+    "no_calendar_read": {
+      "message": "Aucun calendrier de ce compte n'a pu être lu."
     },
     "no_event_in_object": {
       "message": "L'objet de calendrier ne contient aucun événement."
@@ -239,6 +245,9 @@
     },
     "unknown_todo_item": {
       "message": "Il n'y a aucune tâche {uid} dans cette liste."
+    },
+    "unreadable_lines": {
+      "message": "Le document contient des lignes illisibles : {lines}"
     }
   },
   "selector": {

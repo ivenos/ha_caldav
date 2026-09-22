@@ -1,10 +1,10 @@
-"""Tests for calendar colors taken from the CalDAV server."""
-
 from datetime import timedelta
 from unittest.mock import Mock, patch
+import xml.etree.ElementTree as ET
 
 from caldav.davclient import DAVResponse
 from caldav.elements import ical
+from conftest import propfind_answer
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
@@ -44,8 +44,7 @@ PERSONAL_HREF = f"{PERSONAL_PATH}/"
     [
         ("#00679e", "#00679e"),
         ("#E9D859", "#e9d859"),
-        # Alpha is what Apple and older Nextcloud append; Home Assistant would
-        # throw the whole color away over it.
+        # Apple and older Nextcloud append alpha, which Home Assistant refuses.
         ("#711A76FF", "#711a76"),
         ("#FF000080", "#ff0000"),
         ("#F00", "#ff0000"),
@@ -55,8 +54,7 @@ PERSONAL_HREF = f"{PERSONAL_PATH}/"
         ("#12345", None),
         ("#1234567", None),
         ("#zzzzzz", None),
-        # Rejected at the last digit, not the first: Home Assistant validates
-        # what registration writes but not what a later poll does.
+        # Home Assistant validates what registration writes, not what a poll does.
         ("#00679z", None),
         ("red", "#ff0000"),
         ("Navy", "#000080"),
@@ -75,14 +73,14 @@ def _props(value: str | None) -> dict:
 
 
 def _client(colors: dict[str, str | None] | None = None, calendars=None) -> Mock:
-    """Build a caldav client whose home set answers a color PROPFIND."""
     client = Mock()
     principal = client.principal.return_value
     principal.calendars.return_value = calendars or []
     home = principal.calendar_home_set
-    home.get_properties.return_value.find_objects_and_props.return_value = {
-        href: _props(value) for href, value in (colors or {}).items()
-    }
+    home.url = "https://cloud.example.com/dav/"
+    home.get_properties.return_value = propfind_answer(
+        {href: _props(value) for href, value in (colors or {}).items()}
+    )
     return client
 
 
@@ -91,14 +89,11 @@ def test_fetch_collections_keys_by_path_and_reports_the_colorless() -> None:
         {
             "/remote.php/dav/calendars/iven/personal/": "#00679E",
             "/remote.php/dav/calendars/iven/work/": "#FF000080",
-            # The home set itself, and a calendar whose color is unusable.
             "/remote.php/dav/calendars/iven/": None,
             "/remote.php/dav/calendars/iven/broken/": "nope",
         }
     )
 
-    # Every href answered for is a key: absent has to stay distinguishable from
-    # colorless, or a lookup that went wrong would clear everyone's color.
     assert fetch_collections(client) == {
         "/remote.php/dav/calendars/iven/personal": Collection("#00679e", None),
         "/remote.php/dav/calendars/iven/work": Collection("#ff0000", None),
@@ -108,7 +103,6 @@ def test_fetch_collections_keys_by_path_and_reports_the_colorless() -> None:
 
 
 def _dav_response(body: str) -> DAVResponse:
-    """Wrap canned multistatus XML the way caldav hands a response over."""
     raw = requests.Response()
     raw.status_code = 207
     raw.headers["Content-Type"] = "application/xml"
@@ -142,17 +136,14 @@ MULTISTATUS = """<?xml version="1.0" encoding="utf-8"?>
 
 
 def test_fetch_collections_reads_the_unparsed_response() -> None:
-    # Run a real caldav response through it: only the unparsed form carries a
-    # row per calendar, and asking for the parsed one leaves nothing to read.
+    # Only the unparsed form of a caldav response carries a row per calendar.
     client = Mock()
     home = client.principal.return_value.calendar_home_set
     home.get_properties.side_effect = lambda props, depth=0, parse_response_xml=True: (
         _dav_response(MULTISTATUS) if not parse_response_xml else {}
     )
 
-    # Alpha off, and Apple's symbolic-color attribute does not get in the way.
-    # caldav resolves the encoding on an href exactly once, so the literal
-    # percent sequence has to come back intact.
+    # caldav resolves the encoding on an href exactly once.
     assert fetch_collections(client) == {
         "/remote.php/dav/calendars/iven": Collection(None, None),
         "/remote.php/dav/calendars/iven/a%20b": Collection("#e9d859", None),
@@ -161,9 +152,7 @@ def test_fetch_collections_reads_the_unparsed_response() -> None:
 
 
 def test_fetch_collections_keeps_a_literal_percent_sequence() -> None:
-    # caldav resolved the encoding on the href once already. Resolving it again
-    # would key this under a path no calendar url ever reduces to.
-    client = _client({"/dav/a%20b/": "#00679e"})
+    client = _client({"/dav/a%2520b/": "#00679e"})
 
     collections = fetch_collections(client)
 
@@ -181,8 +170,7 @@ def test_fetch_collections_asks_once_for_every_calendar() -> None:
     assert home.get_properties.call_args.kwargs["depth"] == 1
 
 
-# AssertionError is what caldav raises on a multistatus it does not expect, so
-# it has to be covered as squarely as a dead socket.
+# caldav raises AssertionError on a multistatus it does not expect.
 FAILURES = [OSError("boom"), AssertionError("weird xml")]
 
 
@@ -207,8 +195,6 @@ async def test_failed_fetch_keeps_the_last_known_colors(
 async def test_failed_first_fetch_is_not_an_empty_result(
     hass: HomeAssistant, failure
 ) -> None:
-    # An empty map means the server reports no colors, which would clear them.
-    # Never having read one has to stay distinguishable from that.
     entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
     entry.add_to_hass(hass)
     client = _client()
@@ -218,8 +204,6 @@ async def test_failed_first_fetch_is_not_an_empty_result(
     await coordinator.async_refresh()
 
     assert coordinator.data is None
-    # Colors are cosmetic: a server that cannot answer must not send the whole
-    # account into reauth, and must not log a traceback on every poll either.
     assert isinstance(coordinator.last_exception, UpdateFailed)
 
 
@@ -275,7 +259,6 @@ async def test_calendar_without_a_color_gets_none(hass: HomeAssistant) -> None:
 def _register_existing(
     hass: HomeAssistant, options: dict | None = None
 ) -> MockConfigEntry:
-    """Register the calendar entity the way an older install left it behind."""
     entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
     entry.add_to_hass(hass)
     registry = er.async_get(hass)
@@ -294,8 +277,7 @@ def _register_existing(
 async def test_color_reaches_an_account_that_predates_the_feature(
     hass: HomeAssistant,
 ) -> None:
-    # initial_color never runs for an entity that is already registered, so
-    # without the sync below these installs would stay colorless forever.
+    # initial_color never runs for an entity that is already registered.
     entry = _register_existing(hass)
 
     await _setup(hass, {PERSONAL_HREF: "#00679e"}, entry)
@@ -318,12 +300,9 @@ def _entity(hass: HomeAssistant):
 
 
 async def _recolor(hass: HomeAssistant, color: str | None) -> None:
-    """Change the color on the server and let the next poll pick it up."""
     entity = _entity(hass)
     home = entity.colors.client.principal.return_value.calendar_home_set
-    home.get_properties.return_value.find_objects_and_props.return_value = {
-        PERSONAL_HREF: _props(color)
-    }
+    home.get_properties.return_value = propfind_answer({PERSONAL_HREF: _props(color)})
     await entity.colors.async_refresh()
     await hass.async_block_till_done()
 
@@ -351,8 +330,6 @@ async def test_server_side_change_leaves_a_hand_picked_color_alone(
 
 async def test_cleared_color_stays_cleared(hass: HomeAssistant) -> None:
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
-    # Clearing the color in the UI is a choice too, and a later poll must not
-    # quietly undo it.
     er.async_get(hass).async_update_entity_options(
         "calendar.personal", "calendar", None
     )
@@ -379,8 +356,6 @@ async def test_color_dropped_on_the_server_is_dropped_here(
 async def test_cleared_color_survives_the_server_dropping_its_own(
     hass: HomeAssistant,
 ) -> None:
-    # Both sides end up without a color, which must not read as "never tracked"
-    # and let the next server-side color back in.
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     er.async_get(hass).async_update_entity_options(
         "calendar.personal", "calendar", None
@@ -403,7 +378,6 @@ async def test_cleared_color_survives_a_failed_poll(hass: HomeAssistant) -> None
     await entity.colors.async_refresh()
     home.get_properties.side_effect = None
 
-    # Nothing changed on the server, so the cleared color has to stay cleared.
     await _recolor(hass, "#00679e")
 
     assert "calendar" not in _options(hass)
@@ -418,8 +392,6 @@ async def test_hand_picked_color_stays_protected_once_it_matches_the_server(
         "calendar.personal", "calendar", {"color": "#abcdef"}
     )
     await _recolor(hass, "#00679e")
-    # Settling on the color the server happens to carry must not hand the
-    # entity back to automatic tracking.
     registry.async_update_entity_options(
         "calendar.personal", "calendar", {"color": "#00679e"}
     )
@@ -433,8 +405,6 @@ async def test_hand_picked_color_stays_protected_once_it_matches_the_server(
 async def test_color_picked_and_changed_again_between_polls_is_caught(
     hass: HomeAssistant,
 ) -> None:
-    # Landing back on the server's color leaves nothing for a poll to notice,
-    # so the pick has to be seen as it happens.
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     registry = er.async_get(hass)
     for color in ("#abcdef", "#00679e"):
@@ -452,7 +422,6 @@ WORK_PATH = "/remote.php/dav/calendars/iven/work"
 
 
 async def test_each_calendar_gets_its_own_color(hass: HomeAssistant) -> None:
-    # With a single calendar any mix-up looks like a match.
     await _setup(
         hass,
         {PERSONAL_HREF: "#00679e", f"{WORK_PATH}/": "#e9d859"},
@@ -467,13 +436,11 @@ async def test_each_calendar_gets_its_own_color(hass: HomeAssistant) -> None:
 
 
 async def test_color_is_polled_without_anyone_asking(hass: HomeAssistant) -> None:
-    # Everything else here drives the coordinator by hand, which would still
-    # pass if it never polled on its own.
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     home = _entity(hass).colors.client.principal.return_value.calendar_home_set
-    home.get_properties.return_value.find_objects_and_props.return_value = {
-        PERSONAL_HREF: _props("#123456")
-    }
+    home.get_properties.return_value = propfind_answer(
+        {PERSONAL_HREF: _props("#123456")}
+    )
 
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=16))
     # The scheduled poll is a background task.
@@ -485,8 +452,6 @@ async def test_color_is_polled_without_anyone_asking(hass: HomeAssistant) -> Non
 async def test_two_server_side_changes_in_a_row_both_land(
     hass: HomeAssistant,
 ) -> None:
-    # Our own write goes through the same registry the pick watcher listens on,
-    # so a first change must not leave the entity looking hand-picked.
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
 
     await _recolor(hass, "#123456")
@@ -496,7 +461,6 @@ async def test_two_server_side_changes_in_a_row_both_land(
 
 
 async def _reload(hass: HomeAssistant, entry: MockConfigEntry, color: str) -> None:
-    """Restart the entry, which drops everything not in the registry."""
     await hass.config_entries.async_unload(entry.entry_id)
     await _setup(hass, {PERSONAL_HREF: color}, entry)
 
@@ -508,8 +472,6 @@ async def test_hand_picked_color_survives_a_restart(hass: HomeAssistant) -> None
     )
     await hass.async_block_till_done()
 
-    # The in-memory note of the pick is gone after this; only the stored flag
-    # can still tell that the color is the user's.
     await _reload(hass, entry, "#00679e")
     await _recolor(hass, "#123456")
 
@@ -519,8 +481,6 @@ async def test_hand_picked_color_survives_a_restart(hass: HomeAssistant) -> None
 async def test_color_picked_while_unloaded_survives(hass: HomeAssistant) -> None:
     entry = await _setup(hass, {PERSONAL_HREF: "#00679e"})
     await hass.config_entries.async_unload(entry.entry_id)
-    # Nothing is watching the registry now, so the pick can only be noticed by
-    # comparing against what we last wrote.
     er.async_get(hass).async_update_entity_options(
         "calendar.personal", "calendar", {"color": "#abcdef"}
     )
@@ -540,8 +500,6 @@ async def test_pick_matching_the_server_survives_a_restart(hass: HomeAssistant) 
         )
         await hass.async_block_till_done()
 
-    # What is stored now looks exactly like a color we wrote ourselves. Only
-    # the flag still says otherwise, and it has to keep saying it.
     await _reload(hass, entry, "#00679e")
     await _recolor(hass, "#123456")
 
@@ -549,8 +507,6 @@ async def test_pick_matching_the_server_survives_a_restart(hass: HomeAssistant) 
 
 
 async def test_unrelated_registry_edit_is_not_a_pick(hass: HomeAssistant) -> None:
-    # Changing an icon writes to the same registry the pick watcher listens
-    # on, and must not read as the user choosing a color.
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     er.async_get(hass).async_update_entity("calendar.personal", icon="mdi:calendar")
     await hass.async_block_till_done()
@@ -561,8 +517,6 @@ async def test_unrelated_registry_edit_is_not_a_pick(hass: HomeAssistant) -> Non
 
 
 async def test_clearing_without_a_record_survives(hass: HomeAssistant) -> None:
-    # No record yet, because the first fetch failed. Clearing the color now is
-    # the only signal that it was a choice, and it has to outlive the recovery.
     entry = _register_existing(hass, {"calendar": {"color": "#abcdef"}})
     calendars = [_calendar("Personal", PERSONAL_URL)]
     with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
@@ -585,14 +539,12 @@ async def test_clearing_without_a_record_survives(hass: HomeAssistant) -> None:
 async def test_calendar_the_server_did_not_report_keeps_its_color(
     hass: HomeAssistant,
 ) -> None:
-    # An href that stops matching is a lookup gone wrong, not a color someone
-    # removed, and clearing it is the one thing the user cannot undo.
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     entity = _entity(hass)
     home = entity.colors.client.principal.return_value.calendar_home_set
-    home.get_properties.return_value.find_objects_and_props.return_value = {
-        "/somewhere/else/": _props("#123456")
-    }
+    home.get_properties.return_value = propfind_answer(
+        {"/somewhere/else/": _props("#123456")}
+    )
 
     await entity.colors.async_refresh()
     await hass.async_block_till_done()
@@ -616,8 +568,6 @@ async def test_overridden_calendar_stops_writing(hass: HomeAssistant) -> None:
 
 
 async def test_a_record_missing_a_key_is_tolerated(hass: HomeAssistant) -> None:
-    # Nothing released ever wrote this namespace, but a hand-edited registry
-    # must not put the poll into a crash loop.
     entry = _register_existing(
         hass,
         {"calendar": {"color": "#00679e"}, COLOR_STATE: {"color": "#00679e"}},
@@ -629,7 +579,6 @@ async def test_a_record_missing_a_key_is_tolerated(hass: HomeAssistant) -> None:
 
 
 async def test_unchanged_color_touches_nothing(hass: HomeAssistant) -> None:
-    # This runs on every poll, so it has to stay a no-op when nothing moved.
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     writes = []
     hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, writes.append)
@@ -642,8 +591,6 @@ async def test_unchanged_color_touches_nothing(hass: HomeAssistant) -> None:
 async def test_color_cleared_while_unloaded_survives(hass: HomeAssistant) -> None:
     entry = await _setup(hass, {PERSONAL_HREF: "#00679e"})
     await hass.config_entries.async_unload(entry.entry_id)
-    # Same as picking one while unloaded: nothing is watching, so an empty
-    # color has to read as a choice from the stored state alone.
     er.async_get(hass).async_update_entity_options(
         "calendar.personal", "calendar", None
     )
@@ -668,8 +615,6 @@ async def test_cleared_color_survives_a_restart(hass: HomeAssistant) -> None:
 
 
 async def test_startup_failure_keeps_the_visible_color(hass: HomeAssistant) -> None:
-    # A failed first fetch reports no colors at all. Taking that at face value
-    # would strip every calendar until the next successful poll.
     entry = await _setup(hass, {PERSONAL_HREF: "#00679e"})
     await hass.config_entries.async_unload(entry.entry_id)
 
@@ -685,8 +630,6 @@ async def test_startup_failure_keeps_the_visible_color(hass: HomeAssistant) -> N
 
 
 async def test_entity_enabled_later_follows_the_server(hass: HomeAssistant) -> None:
-    # Disabled, so nothing of ours ever ran for it: the color comes from
-    # registration alone, and enabling it later still has to pick up a change.
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="iven",
@@ -724,12 +667,8 @@ async def test_setup_survives_a_server_that_cannot_answer(
 async def test_a_failed_color_read_names_no_url_and_no_body(
     hass: HomeAssistant,
 ) -> None:
-    """UpdateFailed is logged at error level, in the plain log.
-
-    caldav's own message carries the url it was reading, the account name in
-    it, and the whole response body it got back, which for a failing REPORT is
-    calendar content.
-    """
+    """UpdateFailed is logged at error level, and caldav's message carries the url
+    it was reading and the whole response body."""
     from caldav.lib.error import PropfindError
 
     entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
@@ -754,9 +693,6 @@ async def test_a_failed_color_read_names_no_url_and_no_body(
 async def test_writing_a_color_after_a_hand_pick_makes_the_calendar_follow_again(
     hass: HomeAssistant,
 ) -> None:
-    """Left recorded against the old color, the registry watcher reads the
-    user's earlier pick as a fresh one and puts the override straight back, so
-    the service reports success and nothing on screen ever changes again."""
     await _setup(hass, {PERSONAL_HREF: "#00679e"})
     er.async_get(hass).async_update_entity_options(
         "calendar.personal", "calendar", {"color": "#abcdef"}
@@ -776,6 +712,29 @@ async def test_writing_a_color_after_a_hand_pick_makes_the_calendar_follow_again
 
 
 def test_fetch_collections_keys_an_absolute_href_by_its_path() -> None:
-    client = _client({"https://cloud.example.com/dav/a%20b/": "#00679e"})
+    client = _client({"https://cloud.example.com/dav/a%2520b/": "#00679e"})
 
     assert fetch_collections(client) == {"/dav/a%20b": Collection("#00679e", None)}
+
+
+def test_a_color_refused_on_one_calendar_leaves_the_others_theirs() -> None:
+    client = Mock()
+    home = client.principal.return_value.calendar_home_set
+    home.url = "https://cloud.example.com/dav/"
+    home.get_properties.return_value = Mock(
+        tree=ET.fromstring(
+            '<d:multistatus xmlns:d="DAV:" xmlns:ic="http://apple.com/ns/ical/">'
+            "<d:response><d:href>/dav/personal/</d:href><d:propstat><d:prop>"
+            "<ic:calendar-color>#00679e</ic:calendar-color></d:prop>"
+            "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+            "<d:response><d:href>/dav/shared/</d:href><d:propstat><d:prop>"
+            "<ic:calendar-color/></d:prop>"
+            "<d:status>HTTP/1.1 403 Forbidden</d:status></d:propstat></d:response>"
+            "</d:multistatus>"
+        )
+    )
+
+    assert fetch_collections(client) == {
+        "/dav/personal": Collection("#00679e", None),
+        "/dav/shared": Collection(None, None),
+    }

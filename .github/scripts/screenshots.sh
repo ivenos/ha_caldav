@@ -8,10 +8,9 @@ HA="$NAME-ha"
 DAV="$NAME-dav"
 NETWORK="$NAME"
 WORK="${HA_CALDAV_SCREENSHOTS_DIR:-$HOME/.cache/ha_caldav-screenshots-$PORT}"
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 HARNESS=$(sed -n 's/^pytest-homeassistant-custom-component==//p' "$ROOT/requirements_test.txt")
 : "${HARNESS:?could not be read out of requirements_test.txt}"
-# The Home Assistant release the test harness pins.
 HA_VERSION=$(curl -sf "https://pypi.org/pypi/pytest-homeassistant-custom-component/$HARNESS/json" \
     | python3 -c "import json, sys; print(next(r.split('==')[1] for r in json.load(sys.stdin)['info']['requires_dist'] if r.startswith('homeassistant==')))")
 HA_IMAGE="${HA_IMAGE:-ghcr.io/home-assistant/home-assistant:$HA_VERSION}"

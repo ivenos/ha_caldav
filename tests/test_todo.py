@@ -1,6 +1,6 @@
-"""Tests for the CalDAV to-do list entity."""
-
+import asyncio
 from datetime import UTC, date, datetime
+import time
 from unittest.mock import Mock, patch
 
 from caldav.lib.error import DAVError
@@ -15,6 +15,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity_component import EntityComponent
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+import vobject
 
 from custom_components.ha_caldav.const import CONF_READ_ONLY, DOMAIN
 
@@ -97,8 +98,7 @@ async def test_delete_forwards_every_uid(hass: HomeAssistant) -> None:
     with patch("custom_components.ha_caldav.todo.delete_todos") as delete:
         await entity.async_delete_todo_items(["uid-1", "uid-2"])
 
-    # One call for the whole selection: a lookup per uid is a whole-collection
-    # download per item on a server that refuses the uid filter.
+    # On a server refusing the uid filter, a lookup is a whole-collection download.
     delete.assert_called_once()
     assert delete.call_args.args[1] == ["uid-1", "uid-2"]
 
@@ -122,7 +122,6 @@ async def test_server_error_becomes_home_assistant_error(hass: HomeAssistant) ->
 
 
 def _dav_todo(body: str) -> Mock:
-    """Build a caldav-like to-do whose component is a real icalendar VTODO."""
     from icalendar import Calendar as ICalCalendar
 
     instance = ICalCalendar.from_ical(
@@ -208,7 +207,6 @@ def test_sort_order_puts_unordered_items_last() -> None:
 
 
 def test_reorder_writes_nothing_when_the_order_already_holds() -> None:
-    """The positions need not be dense, only in the requested order."""
     from custom_components.ha_caldav.api import reorder_todos
 
     todos = {
@@ -327,7 +325,6 @@ async def test_the_stored_order_survives_a_poll(hass: HomeAssistant) -> None:
         return item
 
     calendar = _calendar("Personal")
-    # Returned in the wrong order, with one item never reordered at all.
     calendar.search.side_effect = lambda **kwargs: (
         [resource("second", "1"), resource("unsorted", None), resource("first", "0")]
         if kwargs.get("todo")
@@ -391,8 +388,6 @@ async def test_the_poll_caches_an_etag_for_every_item(hass: HomeAssistant) -> No
 
     await _setup_with(hass, calendar)
 
-    # Without this the conflict check never fires for a to-do in practice, and
-    # no test setting the cache by hand would notice.
     assert _entity(hass).coordinator.todo_etags == {"uid-1": '"etag-1"'}
 
 
@@ -424,7 +419,6 @@ async def test_completing_a_recurring_task_keeps_a_rename_from_the_same_call(
         {"summary": "Water the plants", "status": "COMPLETED", "due": None},
     )
 
-    # The roll owns the due date; the rename in the same call is not its to drop.
     assert str(todo.icalendar_component["SUMMARY"]) == "Water the plants"
     assert todo.icalendar_component["DUE"].dt.isoformat() == "2026-07-17"
 
@@ -470,9 +464,6 @@ async def test_a_new_item_carries_its_due_date_and_description(
 async def test_deleting_an_item_clears_its_etag_after_the_write(
     hass: HomeAssistant,
 ) -> None:
-    # Keeping it flags the next write against a reused uid as a conflict that
-    # never happened. The calendar half asserts both; this one only asserted
-    # that the etag went out.
     await _setup(hass)
     entity = _entity(hass)
     entity.coordinator.todo_etags = {"uid-1": '"e"'}
@@ -484,8 +475,6 @@ async def test_deleting_an_item_clears_its_etag_after_the_write(
 
 
 async def test_renaming_an_item_does_not_reopen_it(hass: HomeAssistant) -> None:
-    # A rename names no status; sending one anyway resolves to NEEDS-ACTION
-    # and quietly un-completes a finished task.
     await _setup(hass)
     entity = _entity(hass)
 
@@ -498,11 +487,7 @@ async def test_renaming_an_item_does_not_reopen_it(hass: HomeAssistant) -> None:
 async def test_a_reorder_clears_the_etags_of_everything_it_writes(
     hass: HomeAssistant,
 ) -> None:
-    """The moved item is written, and so is every other one whenever the list
-    has to be renumbered, which is the first drag of any list the server never
-    numbered. The refresh behind the write is debounced by ten seconds, so the
-    next tick of one of them was refused as a conflict the user made
-    themselves."""
+    """The refresh behind a write is debounced by ten seconds."""
     await _setup(hass)
     entity = _entity(hass)
     entity.coordinator.data.todos = [
@@ -521,10 +506,6 @@ async def test_a_reorder_clears_the_etags_of_everything_it_writes(
 async def test_the_etag_a_write_invalidates_is_dropped_under_the_lock(
     hass: HomeAssistant,
 ) -> None:
-    """A poll merges into the same cache from an executor thread. Without the
-    lock, a merge that read its etags before the PUT landed can put the stale
-    one back after the pop, and the next edit of that object is refused over a
-    conflict the user caused themselves seconds earlier."""
     import threading
 
     await _setup(hass)
@@ -552,3 +533,73 @@ async def test_the_etag_a_write_invalidates_is_dropped_under_the_lock(
 
     assert held, "the cache was edited without holding the lock a poll merges under"
     assert "uid-1" not in entity.coordinator.todo_etags
+
+
+async def test_an_update_right_after_another_merges_into_what_that_one_wrote(
+    hass: HomeAssistant,
+) -> None:
+    server = {"summary": "Milk", "due": None, "version": 0}
+
+    def search(**kwargs):
+        if not kwargs.get("todo"):
+            return []
+        due = f"DUE;VALUE=DATE:{server['due']:%Y%m%d}\n" if server["due"] else ""
+        item = Mock()
+        item.props = {}
+        item.vobject_instance = vobject.readOne(
+            "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//t//EN\nBEGIN:VTODO\n"
+            f"UID:uid-1\nDTSTAMP:20260101T000000Z\nSUMMARY:{server['summary']}\n"
+            f"{due}STATUS:NEEDS-ACTION\nEND:VTODO\nEND:VCALENDAR\n"
+        )
+        return [item]
+
+    def update(calendar, uid, data, expected_etag=None):
+        server.update(
+            summary=data["summary"], due=data.get("due"), version=server["version"] + 1
+        )
+        time.sleep(0.01)
+
+    await _setup(hass)
+    calendar = _entity(hass).calendar
+    calendar.search.side_effect = search
+    calendar.objects_by_sync_token.side_effect = lambda token: Mock(
+        sync_token=str(server["version"])
+    )
+    await _entity(hass).coordinator.async_refresh()
+
+    with patch("custom_components.ha_caldav.todo.update_todo", update):
+        for change in (
+            {"description": "Two litres"},
+            {"due_date": "2026-10-01"},
+            {"rename": "Oat milk"},
+        ):
+            await hass.services.async_call(
+                "todo",
+                "update_item",
+                {"entity_id": "todo.personal", "item": "uid-1", **change},
+                blocking=True,
+            )
+
+    assert server["summary"] == "Oat milk"
+    assert server["due"] == date(2026, 10, 1)
+
+
+async def test_two_quick_edits_of_one_item_do_not_conflict_with_each_other(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+    entity = _entity(hass)
+    entity.coordinator.todo_etags = {"uid-1": '"e1"'}
+    expected: list = []
+
+    def update(calendar, uid, data, expected_etag=None):
+        expected.append(expected_etag)
+        time.sleep(0.05)
+
+    with patch("custom_components.ha_caldav.todo.update_todo", update):
+        await asyncio.gather(
+            entity.async_update_todo_item(TodoItem(uid="uid-1", summary="Milk")),
+            entity.async_update_todo_item(TodoItem(uid="uid-1", summary="Oat milk")),
+        )
+
+    assert expected == ['"e1"', None]

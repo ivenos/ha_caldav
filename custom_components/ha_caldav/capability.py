@@ -55,7 +55,7 @@ def fetch_capabilities(client: caldav.DAVClient) -> dict[str, Capability]:
         parse_response_xml=False,
     )
     capabilities: dict[str, Capability] = {}
-    for href, props in _objects_and_props(response, home.url).items():
+    for href, props in objects_and_props(response, home.url).items():
         components = _components(props.get(cdav.SupportedCalendarComponentSet.tag))
         privileges = _privileges(props.get(CurrentUserPrivilegeSet.tag))
         capabilities[href] = Capability(
@@ -65,12 +65,12 @@ def fetch_capabilities(client: caldav.DAVClient) -> dict[str, Capability]:
     return capabilities
 
 
-def _objects_and_props(response: Any, base: Any = None) -> dict[str, dict[str, Any]]:
-    """Return href -> property tag -> element, tolerating a refused propstat.
+def objects_and_props(response: Any, base: Any = None) -> dict[str, dict[str, Any]]:
+    """Return calendar key -> property tag -> element, past a refused propstat.
 
     RFC 4918 9.1 lets a server answer 403 for one property, on which caldav's
     own parser raises for the whole response. RFC 4918 8.3 lets an href be
-    absolute, hence calendar_key. First propstat wins, as in caldav.
+    absolute, hence calendar_key.
     """
     found: dict[str, dict[str, Any]] = {}
     for entry in response.tree.findall(".//" + dav.Response.tag):

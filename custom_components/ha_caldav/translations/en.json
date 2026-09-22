@@ -12,7 +12,7 @@
         },
         "data_description": {
           "url": "The address of your CalDAV server. On most servers the bare host name is enough.",
-          "verify_ssl": "Leave this on unless you know why not. Off, anyone who can intercept the connection can pose as the server and read the password."
+          "verify_ssl": "With this off, anyone who can intercept the connection can pose as the server and read the password."
         },
         "sections": {
           "certificates": {
@@ -40,7 +40,7 @@
         },
         "data_description": {
           "url": "The address of your CalDAV server. On most servers the bare host name is enough.",
-          "verify_ssl": "Leave this on unless you know why not. Off, anyone who can intercept the connection can pose as the server and read the password."
+          "verify_ssl": "With this off, anyone who can intercept the connection can pose as the server and read the password."
         },
         "sections": {
           "certificates": {
@@ -156,6 +156,9 @@
     "bad_recurrence_id": {
       "message": "{value} is not a date or a date and time."
     },
+    "cannot_connect": {
+      "message": "Cannot connect to the CalDAV server ({error})."
+    },
     "document_empty": {
       "message": "The document has no event and no to-do item in it."
     },
@@ -166,7 +169,7 @@
       "message": "The document holds more than one item with the UID {uid}."
     },
     "end_before_start": {
-      "message": "The end is before the start."
+      "message": "The end has to be after the start."
     },
     "etag_conflict": {
       "message": "This item changed on the server since Home Assistant last read it. Reload the calendar and make the edit again."
@@ -176,6 +179,9 @@
     },
     "mixed_time_types": {
       "message": "Give a start and an end of the same kind: two dates for an all-day event, or two date-and-times."
+    },
+    "no_calendar_read": {
+      "message": "No calendar on this account could be read."
     },
     "no_event_in_object": {
       "message": "The calendar object holds no event."
@@ -239,6 +245,9 @@
     },
     "unknown_todo_item": {
       "message": "There is no to-do item {uid} on this list."
+    },
+    "unreadable_lines": {
+      "message": "The document has lines that cannot be read: {lines}"
     }
   },
   "selector": {

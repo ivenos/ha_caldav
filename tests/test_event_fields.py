@@ -1,5 +1,3 @@
-"""Tests for the VEVENT properties Home Assistant has no field for."""
-
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -29,10 +27,7 @@ def _component() -> ICalEvent:
 
 
 def _written(component: ICalEvent) -> str:
-    """Return the serialized event, unfolded so assertions can match on values.
-
-    RFC 5545 folds lines at 75 octets, which lands mid-address on an ATTENDEE.
-    """
+    """Return the serialized event unfolded: RFC 5545 folds lines at 75 octets."""
     calendar = ICalCalendar()
     calendar.add("prodid", "-//test//EN")
     calendar.add("version", "2.0")
@@ -94,12 +89,8 @@ def test_attendees_keep_their_parameters() -> None:
 
 
 def test_an_attendee_name_is_read_through_the_escaping_of_its_parameter() -> None:
-    """RFC 6868 escapes what a parameter value cannot hold literally.
-
-    icalendar writes them and resolves them again; vobject, which is what the
-    read path is, hands them back as they stand. A name with a quote in it
-    reached the dashboard, the templates and the notifications as ^'.
-    """
+    """RFC 6868 escapes what a parameter value cannot hold literally, and vobject
+    hands the escapes back as they stand."""
     extras = read_extras(
         _vevent("ATTENDEE;CN=\"Jane ^'JJ^' Doe^nHead of ^^\":mailto:jane@example.com")
     )
@@ -110,12 +101,6 @@ def test_an_attendee_name_is_read_through_the_escaping_of_its_parameter() -> Non
 
 
 def test_an_attendee_name_does_not_grow_each_time_it_is_written_back() -> None:
-    """The attributes an entity publishes are what a service call feeds back in.
-
-    Read without resolving the escaping, the ^ of the stored name was escaped
-    again on the way out, so an automation that re-sent the attendee list it
-    had just read doubled the escapes on every run.
-    """
     once = read_extras(_vevent("ATTENDEE;CN=\"Jane ^'JJ^' Doe\":mailto:j@e.test"))
 
     twice = once
@@ -263,8 +248,6 @@ def test_an_attendee_who_stays_keeps_what_the_server_recorded() -> None:
         encode=False,
     )
 
-    # An unrelated edit rewrites the whole list, and a reply already given must
-    # survive it rather than being reset to NEEDS-ACTION.
     apply_extras(
         component, {"attendees": [{"email": "ann@example.com", "name": "Ann Meier"}]}
     )
@@ -298,7 +281,6 @@ def _held_attendee(address: str, **params: str):
 
 
 def _valarms(written: str) -> list[str]:
-    """Return each VALARM on its own, so an assertion cannot match a sibling."""
     return [part.split("END:VALARM")[0] for part in written.split("BEGIN:VALARM")[1:]]
 
 
@@ -323,8 +305,7 @@ def test_an_audio_alarm_gets_no_description() -> None:
         },
     )
 
-    # RFC 5545 does not permit a DESCRIPTION on an AUDIO alarm, and a sibling
-    # DISPLAY alarm in the same object would satisfy a whole-document match.
+    # RFC 5545 does not permit a DESCRIPTION on an AUDIO alarm.
     display, audio = _valarms(_written(component))
     assert "DESCRIPTION" in display
     assert "DESCRIPTION" not in audio
@@ -374,7 +355,6 @@ def test_an_address_that_already_names_a_scheme_is_left_alone() -> None:
 
 
 def test_a_sub_minute_alarm_still_reads_as_one_minute_before() -> None:
-    """Rounded away from zero, or it would report a reminder after the event."""
     event = _vevent(
         "BEGIN:VALARM\nACTION:DISPLAY\nDESCRIPTION:x\nTRIGGER:-PT90S\nEND:VALARM"
     )
@@ -406,10 +386,7 @@ def test_categories_are_reported_without_blanks_or_padding() -> None:
 
 
 def test_an_all_day_until_keeps_its_date_wherever_this_runs() -> None:
-    """Google writes a DATE start with a UTC UNTIL. Reconciling that through
-    the local zone moves the date a day west of UTC and drops the last
-    occurrence, which would make the series shape depend on the installation.
-    """
+    """Google writes a DATE start with a UTC UNTIL."""
     from custom_components.ha_caldav.event import rule_from
 
     document = ICalCalendar.from_ical(
@@ -421,9 +398,6 @@ def test_an_all_day_until_keeps_its_date_wherever_this_runs() -> None:
     )
     master = next(iter(document.walk("VEVENT")))
 
-    # The stored value, not a datetime made from it: converting first is what
-    # makes an all-day series look like a floating one, and the two read the
-    # UNTIL beside them in different frames.
     moments = list(rule_from(master["RRULE"], master["DTSTART"].dt))
 
     assert moments[-1].date() == date(2026, 7, 31)
@@ -431,10 +405,7 @@ def test_an_all_day_until_keeps_its_date_wherever_this_runs() -> None:
 
 
 def test_a_floating_until_is_read_in_local_terms_not_in_utc() -> None:
-    """A floating series is dated in local terms and to_utc reads it that way,
-    so its end has to be a local wall time too. Read in UTC the rule ends a
-    whole offset away from its own occurrences, and the series keeps or loses
-    its last one depending on where Home Assistant runs."""
+    """RFC 5545 3.3.10 has the UNTIL of a floating series be local time too."""
     from custom_components.ha_caldav.event import rule_from
 
     document = ICalCalendar.from_ical(
@@ -452,15 +423,10 @@ def test_a_floating_until_is_read_in_local_terms_not_in_utc() -> None:
     finally:
         dt_util.set_default_time_zone(previous)
 
-    # 19:00Z is 20:00 in Berlin, so the occurrence on 2 February is the last one
-    # the rule still reaches.
     assert moments[-1] == datetime(2026, 2, 2, 20, 0)
 
 
 def test_naming_the_same_organizer_again_keeps_their_parameters() -> None:
-    """read_extras reports the bare address, so an unrelated edit names it
-    again; rebuilt from that alone the line loses CN and the SENT-BY that
-    authorizes an assistant to act for them."""
     event = ICalEvent.from_ical(
         "BEGIN:VEVENT\r\nUID:u\r\nDTSTAMP:20260101T000000Z\r\n"
         "DTSTART:20260706T090000Z\r\n"
@@ -521,12 +487,8 @@ def test_an_attendee_added_for_the_first_time_is_asked_to_reply() -> None:
 
 
 def test_attendees_written_without_an_organizer_get_one() -> None:
-    """RFC 5546 3 requires ORGANIZER wherever ATTENDEE appears. sabre/dav -
-    Baikal and much else - hands the missing one to its scheduling plugin when
-    the object is deleted and answers 500, and the event cannot be removed at
-    all after that. Nextcloud guards its own copy of that plugin, and the two
-    servers that do no scheduling never look, so only a sabre server shows it.
-    """
+    """RFC 5546 3 requires ORGANIZER wherever ATTENDEE appears, and sabre/dav
+    answers 500 on deleting an object without one."""
     from custom_components.ha_caldav.event import apply_extras
 
     component = ICalEvent()
@@ -540,8 +502,6 @@ def test_attendees_written_without_an_organizer_get_one() -> None:
 
 
 def test_an_organizer_the_server_already_holds_is_not_claimed() -> None:
-    # Someone else's event, on a calendar shared with us: naming ourselves the
-    # organizer would take it over.
     from custom_components.ha_caldav.event import apply_extras
 
     component = ICalEvent()
@@ -566,9 +526,7 @@ def test_an_event_without_attendees_gets_no_organizer() -> None:
 
 @pytest.mark.parametrize("interval", ["1", "2", "12"])
 def test_an_ordinary_interval_is_accepted(interval: str) -> None:
-    """The guard is against a non-positive INTERVAL. One off by a step refuses
-    INTERVAL=1, which many clients write out explicitly, and every such series
-    becomes uneditable."""
+    """Many clients write INTERVAL=1 out explicitly."""
     from custom_components.ha_caldav.event import rule_from
 
     document = ICalCalendar.from_ical(
@@ -587,10 +545,7 @@ def test_an_ordinary_interval_is_accepted(interval: str) -> None:
 
 
 def test_a_line_break_in_the_organizer_does_not_reach_the_content_line() -> None:
-    """icalendar asserts on an unescaped one and the failure reaches the user as
-    a server error, though nothing about it came from the server. A template in
-    a service call is enough to produce one; create_event escapes the same text
-    correctly, so only this path was exposed."""
+    """icalendar asserts on an unescaped line break."""
     from custom_components.ha_caldav.event import apply_extras
 
     component = ICalEvent()
@@ -598,7 +553,6 @@ def test_a_line_break_in_the_organizer_does_not_reach_the_content_line() -> None
     apply_extras(component, {"organizer": "ada@example.com\r\nEND:VEVENT"})
 
     lines = component.to_ical().decode("utf-8").splitlines()
-    # One content line, so the text cannot pass for structure around it.
     assert lines == [
         "BEGIN:VEVENT",
         "ORGANIZER:ada@example.com END:VEVENT",
@@ -607,7 +561,6 @@ def test_a_line_break_in_the_organizer_does_not_reach_the_content_line() -> None
 
 
 def test_a_line_break_in_the_url_does_not_reach_the_content_line() -> None:
-    # Same hazard as the organizer, same source: a template in a service call.
     from custom_components.ha_caldav.event import apply_extras
 
     component = ICalEvent()
@@ -623,17 +576,14 @@ def test_a_line_break_in_the_url_does_not_reach_the_content_line() -> None:
 
 
 def test_a_line_break_in_an_attendee_does_not_reach_the_content_line() -> None:
-    """Same hazard as the organizer, and a YAML folded scalar is enough on its
-    own: `attendees: >` leaves a trailing newline on the address. icalendar
-    asserts on a line feed, and a bare carriage return it does not catch at all
-    and writes into the document that is PUT."""
+    """A YAML folded scalar leaves a trailing newline, and icalendar asserts on a
+    line feed but writes a bare carriage return into the document."""
     from custom_components.ha_caldav.event import apply_extras
 
     component = ICalEvent()
 
     apply_extras(component, {"attendees": ["guest@example.com\r\nEND:VEVENT"]})
 
-    # Unfolded, so a break that RFC 5545 continuation hid still shows up.
     document = component.to_ical().decode("utf-8")
     lines = document.replace("\r\n ", "").splitlines()
     assert lines == [
@@ -645,11 +595,8 @@ def test_a_line_break_in_an_attendee_does_not_reach_the_content_line() -> None:
 
 
 def test_an_organizer_named_by_principal_url_stays_a_url() -> None:
-    """RFC 6638 lets calendar-user-address-set name a principal by its url, and
-    that is what sabre/dav, Baikal and Nextcloud return for an account with no
-    mail address on it. Prefixed with mailto: it matches no principal, so the
-    scheduling server the organizer exists to appease reads the object as an
-    invitation from somebody it has never heard of."""
+    """RFC 6638 lets calendar-user-address-set name a principal by its url, which
+    sabre/dav and Nextcloud return for an account with no mail address."""
     component = _component()
     component.add("ATTENDEE", "mailto:ann@example.com")
 

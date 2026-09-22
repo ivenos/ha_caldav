@@ -1,11 +1,10 @@
-"""Tests for the CalDAV diagnostics."""
-
 from datetime import timedelta
 import json
 from unittest.mock import Mock
 
 from caldav.elements import ical
 from caldav.lib.error import DAVError
+from conftest import propfind_answer
 from homeassistant.components.diagnostics import REDACTED
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
@@ -50,7 +49,6 @@ def _calendar(name: str, components: list[str]) -> Mock:
 def _runtime(
     client: Mock, calendars: list[ManagedCalendar] | None = None
 ) -> HaCaldavRuntimeData:
-    """Wrap a client the way a loaded entry holds it."""
     return HaCaldavRuntimeData(
         client=client, colors=Mock(), calendars=calendars or [], address_set=[]
     )
@@ -60,10 +58,12 @@ def _client(calendars: list[Mock], colors: dict[str, str] | None = None) -> Mock
     client = Mock()
     client.principal.return_value.calendars.return_value = calendars
     home = client.principal.return_value.calendar_home_set
-    home.get_properties.return_value.find_objects_and_props.return_value = {
-        href: {ical.CalendarColor.tag: Mock(text=value)}
-        for href, value in (colors or {}).items()
-    }
+    home.get_properties.return_value = propfind_answer(
+        {
+            href: {ical.CalendarColor.tag: Mock(text=value)}
+            for href, value in (colors or {}).items()
+        }
+    )
     return client
 
 
@@ -111,7 +111,6 @@ async def test_diagnostics_error_reports_type_not_url(hass: HomeAssistant) -> No
     diag = await async_get_config_entry_diagnostics(hass, entry)
 
     assert diag["calendars"] == {"error": "DAVError"}
-    # The server URL from the error text must not leak into the document.
     assert "cloud.example.com" not in json.dumps(diag)
 
 
@@ -163,7 +162,6 @@ async def test_diagnostics_survives_a_failed_color_lookup(hass: HomeAssistant) -
 
     diag = await async_get_config_entry_diagnostics(hass, entry)
 
-    # A lookup that failed must not read as a calendar without a color.
     assert diag["calendars"] == [
         {"name": "Personal", "color_error": "AssertionError", "components": ["VEVENT"]}
     ]
@@ -188,8 +186,7 @@ async def test_diagnostics_keeps_the_account_out_of_the_calendar_options(
 
     diag = await async_get_config_entry_diagnostics(hass, entry)
 
-    # The key is the collection path, which on every mainstream server spells
-    # out the account the redaction above strips from entry.data.
+    # The collection path spells out the account on every mainstream server.
     assert diag["options"]["calendar_options"] == {"therapie": {"read_only": True}}
     assert "iven" not in json.dumps(diag)
 
@@ -200,8 +197,7 @@ async def test_diagnostics_survives_a_server_answering_with_nonsense(
     entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="w")
     entry.add_to_hass(hass)
     client = Mock()
-    # caldav comes out of a 207 whose body is not xml with a bare TypeError,
-    # which is not a network error; letting it escape 500s the download.
+    # caldav comes out of a 207 whose body is not xml with a bare TypeError.
     client.principal.side_effect = TypeError("argument of type 'NoneType'")
     entry.runtime_data = _runtime(client)
 
@@ -227,12 +223,7 @@ async def test_diagnostics_reports_an_unmanaged_calendar_that_answers_oddly(
 async def test_the_selected_calendars_carry_no_account_name(
     hass: HomeAssistant,
 ) -> None:
-    """The selection is stored as full collection paths.
-
-    On most servers those spell out the account name, which is the one thing
-    the redaction above exists to hide, in a file the issue template asks
-    people to attach to a public report.
-    """
+    """On most servers a collection path spells out the account name."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data=ENTRY_DATA,
@@ -258,8 +249,6 @@ async def test_the_selected_calendars_carry_no_account_name(
 
 
 async def test_diagnostics_redacts_the_tls_material(hass: HomeAssistant) -> None:
-    """Those are filesystem paths naming the account's own client private key,
-    in a file the issue template asks people to attach to a public report."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -284,8 +273,6 @@ async def test_diagnostics_redacts_the_tls_material(hass: HomeAssistant) -> None
 async def test_diagnostics_report_a_managed_calendar_from_what_was_read(
     hass: HomeAssistant,
 ) -> None:
-    """A calendar the entry manages is reported from the capability the setup
-    already read, not from a fresh probe of the server."""
     calendar = _calendar("Personal", ["VEVENT", "VTODO"])
     calendar.get_supported_components.side_effect = DAVError("asked again")
     managed = ManagedCalendar(
@@ -308,8 +295,6 @@ async def test_diagnostics_report_a_managed_calendar_from_what_was_read(
 async def test_diagnostics_report_how_current_each_half_is(
     hass: HomeAssistant,
 ) -> None:
-    """A half serves its last result for a few polls before the entity says so,
-    and this is the only place a report would show that it did."""
     calendar = _calendar("Personal", ["VEVENT", "VTODO"])
     entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
     entry.add_to_hass(hass)
@@ -340,7 +325,6 @@ async def test_diagnostics_report_how_current_each_half_is(
     assert poll["last_full_read"].startswith(
         f"{coordinator._fetched_at:%Y-%m-%dT%H:%M}"
     )
-    # This is what a user attaches to an issue.
     json.dumps(diag)
 
 

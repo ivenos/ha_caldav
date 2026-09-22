@@ -1,5 +1,3 @@
-"""Tests for the CalDAV services."""
-
 from datetime import UTC, date, datetime, timedelta
 from unittest.mock import Mock, patch
 
@@ -177,8 +175,8 @@ async def test_create_event_carries_the_extra_properties(hass: HomeAssistant) ->
 
     data = create.call_args.args[1]
     assert data["summary"] == "Standup"
-    # A naive value from the selector must arrive anchored in Home Assistant's
-    # timezone, not left floating for caldav to resolve against the OS.
+    # The datetime selector sends a naive value, which caldav would resolve against
+    # the OS timezone.
     assert data["dtstart"].tzinfo is not None
     assert data["dtstart"] == dt_util.as_local(datetime(2026, 7, 6, 9, 0))
     assert data["url"] == "https://meet.example.com/x"
@@ -205,7 +203,6 @@ async def test_update_event_only_forwards_the_named_fields(
         )
 
     data = update.call_args.args[2]
-    # Nothing else was named, so nothing else may be touched on the server.
     assert data == {"status": "CANCELLED"}
     assert update.call_args.args[1] == "uid-1"
 
@@ -271,7 +268,6 @@ async def test_delete_event_forwards_the_occurrence_and_its_range(
 async def test_a_delete_with_a_range_but_no_occurrence_deletes_nothing(
     hass: HomeAssistant,
 ) -> None:
-    # Without the occurrence the range starts at, the whole series would go.
     await _setup(hass)
 
     with (
@@ -300,9 +296,7 @@ async def test_move_event_writes_to_the_target_and_refreshes_it(
 
     with (
         patch("custom_components.ha_caldav.services.move_event") as move,
-        patch.object(
-            _managed(entry, "Work").coordinator, "async_request_refresh"
-        ) as refresh,
+        patch.object(_managed(entry, "Work").coordinator, "async_refresh") as refresh,
     ):
         await hass.services.async_call(
             DOMAIN,
@@ -319,7 +313,6 @@ async def test_move_event_writes_to_the_target_and_refreshes_it(
     assert move.call_args.args[1] is target
     assert move.call_args.args[2] == "uid-1"
     assert move.call_args.args[3] is False
-    # Both lists changed, so the target has to poll again as well.
     refresh.assert_called_once()
 
 
@@ -395,7 +388,6 @@ async def test_setting_a_color_refreshes_the_color_poller(
 
     assert setter.call_args.args[0] is calendar
     assert setter.call_args.args[1] == "#00679e"
-    # The color we just pushed has to become the one the entity shows.
     refresh.assert_called_once()
 
 
@@ -460,15 +452,12 @@ async def test_create_calendar_reloads_the_account(hass: HomeAssistant) -> None:
 
     assert create.call_args.args[1] == "Holidays"
     assert create.call_args.args[2] == ["VEVENT"]
-    # Without the reload the collection exists on the server and nowhere else.
     reload.assert_called_once_with(entry.entry_id)
 
 
 async def test_a_new_calendar_is_added_to_an_explicit_selection(
     hass: HomeAssistant,
 ) -> None:
-    # Anyone who has opened the options once has a list, and a calendar
-    # missing from it is skipped at setup.
     entry = await _setup(hass, options={CONF_CALENDARS: ["Personal"]})
 
     with (
@@ -485,7 +474,6 @@ async def test_a_new_calendar_is_added_to_an_explicit_selection(
         )
         await hass.async_block_till_done()
 
-    # By url: a name stops matching once the calendar is renamed.
     assert entry.options[CONF_CALENDARS] == [
         "/remote.php/dav/Personal",
         "/remote.php/dav/Holidays",
@@ -588,7 +576,7 @@ async def test_a_server_error_becomes_a_home_assistant_error(
             return_response=True,
         )
 
-    # The collection url carries the account name; it belongs in the log only.
+    # The collection url carries the account name.
     assert "cloud.example.com" not in str(raised.value)
 
 
@@ -712,8 +700,6 @@ async def test_a_date_paired_with_a_datetime_is_refused(hass: HomeAssistant) -> 
 async def test_a_misspelled_recurrence_range_is_refused(hass: HomeAssistant) -> None:
     await _setup(hass)
 
-    # Accepting it would silently edit the single occurrence instead. Every
-    # other part of the call is valid, so only the spelling can refuse it.
     with pytest.raises(vol.Invalid, match="recurrence_range"):
         await hass.services.async_call(
             DOMAIN,
@@ -758,7 +744,6 @@ async def test_a_read_only_calendar_refuses_every_write_service(
                 {"entity_id": "calendar.personal", **data},
                 blocking=True,
             )
-        # Named, because any other failure would satisfy a bare raises() too.
         assert refusal.value.translation_key == "read_only", service
 
 
@@ -774,7 +759,6 @@ async def test_moving_into_a_read_only_calendar_is_refused(
         },
     )
 
-    # The source is writable, so only the target's own state can stop this.
     with (
         patch("custom_components.ha_caldav.services.move_event") as move,
         pytest.raises(ServiceValidationError) as refusal,
@@ -826,8 +810,6 @@ async def test_pushing_a_color_makes_the_entity_follow_the_server_again(
         blocking=True,
     )
 
-    # Otherwise the entity keeps showing the old color it was given by hand,
-    # while every other client already has the new one.
     assert entity._picked is False
     assert calendar.set_properties.call_count == 1
 
@@ -861,9 +843,6 @@ async def test_move_to_another_integrations_calendar_is_rejected(
     hass: HomeAssistant,
 ) -> None:
     await _setup(hass)
-    # Registered by somebody else, and their entry is loaded. Aiming at an
-    # unregistered entity, or one whose entry is not loaded, would be caught by
-    # a different check and leave this one untested.
     foreign = MockConfigEntry(domain="google", unique_id="google-1")
     foreign.add_to_hass(hass)
     foreign.mock_state(hass, ConfigEntryState.LOADED)
@@ -888,7 +867,7 @@ async def test_move_to_another_integrations_calendar_is_rejected(
         )
 
     assert refusal.value.translation_key == "unknown_target"
-    # Nothing set this entry up, so nothing may try to tear it down either.
+    # Teardown unloads every loaded entry, and nothing set this one up.
     foreign.mock_state(hass, ConfigEntryState.NOT_LOADED)
 
 
@@ -901,7 +880,7 @@ async def test_a_move_refreshes_the_calendar_it_came_from(
     with (
         patch("custom_components.ha_caldav.services.move_event"),
         patch.object(
-            _managed(entry, "Personal").coordinator, "async_request_refresh"
+            _managed(entry, "Personal").coordinator, "async_refresh"
         ) as refresh,
     ):
         await hass.services.async_call(
@@ -915,7 +894,6 @@ async def test_a_move_refreshes_the_calendar_it_came_from(
             blocking=True,
         )
 
-    # The event left this calendar, so it is as stale as the target.
     refresh.assert_called_once()
 
 
@@ -939,14 +917,10 @@ async def test_a_free_busy_answer_the_library_cannot_read_is_reported(
             return_response=True,
         )
 
-    # A server is free to answer with something vobject parses and we cannot
-    # read; that has to reach the user as a failure, not as a traceback.
-    assert failure.value.translation_key is not None
+    assert failure.value.translation_key == "server_error"
 
 
 async def test_create_event_forwards_the_recurrence_rule(hass: HomeAssistant) -> None:
-    # rrule is declared in both schemas and described in services.yaml; without
-    # this the field could stop reaching the server and every test stay green.
     await _setup(hass)
 
     with patch("custom_components.ha_caldav.calendar.create_event") as create:
@@ -987,8 +961,7 @@ async def test_update_event_forwards_the_recurrence_rule(hass: HomeAssistant) ->
 async def test_an_empty_rule_is_how_a_recurrence_is_removed(
     hass: HomeAssistant,
 ) -> None:
-    # Otherwise a series is a one-way door: expand strips RRULE from what the
-    # frontend echoes back, so nothing else can ever ask for it to go.
+    # Expanding strips RRULE from what the frontend echoes back.
     await _setup(hass)
 
     with patch("custom_components.ha_caldav.calendar.update_event") as update:
@@ -1005,12 +978,8 @@ async def test_an_empty_rule_is_how_a_recurrence_is_removed(
 async def test_moving_into_a_calendar_the_caller_may_not_control_is_refused(
     hass: HomeAssistant,
 ) -> None:
-    """target_entity_id is a field, not a service target.
-
-    Home Assistant checks POLICY_CONTROL for entities named in a target and
-    not for one named in a field, and this service writes into the entity
-    named here.
-    """
+    """Home Assistant checks POLICY_CONTROL for entities named in a target, not for
+    one named in a field like target_entity_id."""
     from homeassistant.auth.permissions import PolicyPermissions
     from homeassistant.exceptions import Unauthorized
 
@@ -1044,7 +1013,7 @@ def test_an_event_that_ends_when_it_starts_is_refused() -> None:
 
 
 def test_a_window_that_ends_before_it_starts_is_refused() -> None:
-    """A server answers one with nothing, which reads as "everything is free"."""
+    """A server answers a backwards window with nothing."""
     from custom_components.ha_caldav.services import _check_window
 
     with pytest.raises(ServiceValidationError):
@@ -1055,7 +1024,6 @@ def test_a_window_that_ends_before_it_starts_is_refused() -> None:
 
 
 def test_an_update_naming_nothing_but_a_uid_is_refused() -> None:
-    """The PUT would move SEQUENCE and announce a revision nobody made."""
     from custom_components.ha_caldav.services import UPDATE_EVENT_SCHEMA
 
     with pytest.raises(vol.Invalid):
@@ -1065,7 +1033,6 @@ def test_an_update_naming_nothing_but_a_uid_is_refused() -> None:
 
 
 def test_a_color_the_read_path_could_not_recognize_is_refused() -> None:
-    """Stored verbatim it comes back as no color, clearing the one there was."""
     import voluptuous as voluptuous_schema
 
     from custom_components.ha_caldav.const import ATTR_COLOR
@@ -1081,10 +1048,7 @@ def test_a_color_the_read_path_could_not_recognize_is_refused() -> None:
 async def test_replying_to_an_invitation_clears_the_events_etag(
     hass: HomeAssistant,
 ) -> None:
-    """The reply is a PUT, so the etag the coordinator holds is stale the
-    moment it lands, and the refresh behind it is debounced. Editing the event
-    straight afterwards was refused over a conflict that was the user's own
-    reply."""
+    """The reply is a PUT, and the refresh behind it is debounced."""
     entry = await _setup(hass)
     entity = hass.data["entity_components"]["calendar"].get_entity("calendar.personal")
     entity.coordinator.etags = {"uid-1": '"e"'}
@@ -1108,9 +1072,6 @@ async def test_replying_to_an_invitation_clears_the_events_etag(
 async def test_deleting_a_calendar_takes_its_key_out_of_the_selection(
     hass: HomeAssistant,
 ) -> None:
-    """Entries written before v1.2.0 selected by display name, so matching
-    only one shape left the other behind forever and the option ended up
-    holding keys for collections that no longer exist."""
     calendar = _calendar("Personal")
     entry = await _setup(
         hass, [calendar], options={CONF_CALENDARS: ["/remote.php/dav/Personal"]}
@@ -1129,16 +1090,12 @@ async def test_deleting_a_calendar_takes_its_key_out_of_the_selection(
         )
         await hass.async_block_till_done()
 
-    # Dropped rather than emptied: an empty list reads as every calendar.
     assert CONF_CALENDARS not in entry.options
 
 
 async def test_a_move_between_two_accounts_sharing_a_path_is_allowed(
     hass: HomeAssistant,
 ) -> None:
-    """Two Nextcloud accounts both call their default calendar /personal/, and
-    the guard compared a key that drops the scheme and the host by design. A
-    move from one server to the other was refused as a move onto itself."""
     here = _calendar("Personal")
     await _setup(hass, [here])
 
@@ -1174,10 +1131,7 @@ async def test_a_move_between_two_accounts_sharing_a_path_is_allowed(
 
 
 async def test_a_search_is_read_off_the_event_loop(hass: HomeAssistant) -> None:
-    """vobject parses an item the first time its components are asked for, so
-    building the result costs as much as the request does, and the window is
-    optional here: an unbounded text search over a large collection is
-    unbounded time with all of Home Assistant waiting on it."""
+    """vobject parses an item the first time its components are asked for."""
     import threading
 
     from custom_components.ha_caldav import services
@@ -1206,9 +1160,6 @@ async def test_a_search_is_read_off_the_event_loop(hass: HomeAssistant) -> None:
 async def test_a_window_that_starts_and_ends_at_the_same_moment_is_allowed(
     hass: HomeAssistant,
 ) -> None:
-    """The refusal is for a window that ends before it starts. One step out and
-    an instantaneous window is refused too, which is a legitimate thing to ask
-    a free/busy report for."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     calendar.freebusy_request.return_value = Mock(
@@ -1233,12 +1184,7 @@ async def test_a_window_that_starts_and_ends_at_the_same_moment_is_allowed(
 async def test_a_target_named_by_a_user_who_no_longer_exists_is_refused(
     hass: HomeAssistant,
 ) -> None:
-    """Home Assistant checks POLICY_CONTROL for entities named in a target, not
-    for one named in a field, and this service writes into the entity named
-    there. Driven directly: the service call is refused by core's own check
-    before ever reaching here, so nothing going through it can tell whether
-    this arm exists.
-    """
+    """Core refuses a call from a user who no longer exists before the service runs."""
     from homeassistant.core import Context
     from homeassistant.exceptions import UnknownUser
 
@@ -1263,10 +1209,8 @@ async def test_a_target_named_by_a_user_who_no_longer_exists_is_refused(
 async def test_a_lowercase_option_reaches_the_write_path_as_its_rfc_name(
     hass: HomeAssistant, field: str, sent: str, written: str
 ) -> None:
-    """hassfest holds a selector's option keys to [a-z0-9-_]+, so the picker
-    cannot offer OPAQUE or THISANDFUTURE as the value itself. What the schema
-    takes and what RFC 5545 wants stored are therefore two spellings of one
-    thing, and only the second may reach the object."""
+    """hassfest holds a selector's option keys to [a-z0-9-_]+, so the picker cannot
+    offer OPAQUE or THISANDFUTURE as the value itself."""
     await _setup(hass)
 
     with patch("custom_components.ha_caldav.calendar.create_event") as create:
@@ -1287,7 +1231,6 @@ async def test_a_lowercase_option_reaches_the_write_path_as_its_rfc_name(
 
 
 async def test_the_rfc_spelling_is_still_accepted(hass: HomeAssistant) -> None:
-    # An automation written before the picker offered lowercase keeps working.
     await _setup(hass)
 
     with patch("custom_components.ha_caldav.calendar.create_event") as create:
@@ -1310,10 +1253,6 @@ async def test_the_rfc_spelling_is_still_accepted(hass: HomeAssistant) -> None:
 async def test_a_recurrence_range_without_an_occurrence_is_refused(
     hass: HomeAssistant,
 ) -> None:
-    """A range says where in the series to start, so on its own it has nothing
-    to start from. Accepted anyway it was dropped without a word, and a call
-    meaning "this occurrence and the ones after it" rewrote the whole series,
-    the past included."""
     await _setup(hass)
 
     with (
@@ -1327,9 +1266,6 @@ async def test_a_recurrence_range_without_an_occurrence_is_refused(
                 "entity_id": "calendar.personal",
                 "uid": "uid-1",
                 "summary": "Renamed",
-                # The RFC spelling, which the schema took before this check
-                # existed: a lowercase one would be refused for its case alone
-                # and prove nothing about the missing occurrence.
                 "recurrence_range": "THISANDFUTURE",
             },
             blocking=True,
@@ -1341,8 +1277,6 @@ async def test_a_recurrence_range_without_an_occurrence_is_refused(
 async def test_a_search_window_that_ends_before_it_starts_is_refused(
     hass: HomeAssistant,
 ) -> None:
-    """The server answers one with nothing, and an automation reads that as
-    "nothing matched" rather than as a window it asked for backwards."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     calendar.search.reset_mock()
@@ -1368,8 +1302,6 @@ async def test_a_search_window_that_ends_before_it_starts_is_refused(
 async def test_a_free_busy_window_that_ends_before_it_starts_is_refused(
     hass: HomeAssistant,
 ) -> None:
-    """Nothing back from a free/busy report reads as "the whole window is
-    free", which is what an automation books a meeting on top of."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
 
@@ -1393,8 +1325,8 @@ async def test_a_free_busy_window_that_ends_before_it_starts_is_refused(
 async def test_an_event_created_with_attendees_names_the_account_as_organizer(
     hass: HomeAssistant,
 ) -> None:
-    """RFC 5546 3 requires it, and sabre/dav answers 500 on deleting an object
-    that lists attendees without one: the event becomes impossible to remove."""
+    """RFC 5546 3 requires it, and sabre/dav answers 500 on deleting an object that
+    lists attendees without one."""
     calendar = _calendar("Personal")
     with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
         principal = client.return_value.principal.return_value
@@ -1431,9 +1363,7 @@ async def test_an_event_created_with_attendees_names_the_account_as_organizer(
 async def test_a_search_hit_the_read_path_cannot_place_is_left_out(
     hass: HomeAssistant,
 ) -> None:
-    """A server matches on the resource, not on the component, so a text search
-    comes back with the to-do sharing a uid with an event as well. Passed on,
-    the answer would carry an entry with no start, no end and no summary."""
+    """A server matches a text search on the resource, not on the component."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     todo_only = Mock()
@@ -1459,11 +1389,8 @@ async def test_a_search_hit_the_read_path_cannot_place_is_left_out(
 async def test_free_busy_periods_written_on_one_line_are_all_reported(
     hass: HomeAssistant,
 ) -> None:
-    """RFC 5545 3.8.2.6 lets one FREEBUSY line carry several periods, comma
-    separated, and icalendar hands the line back as a list of them where a
-    single period comes back bare. Read as one, a server that writes its whole
-    day on one line would report a single busy slot and an automation would
-    book a meeting into the rest of it."""
+    """RFC 5545 3.8.2.6 lets one FREEBUSY line carry several periods, and icalendar
+    hands those back as a list where a single period comes back bare."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     calendar.freebusy_request.return_value = Mock(
@@ -1495,12 +1422,10 @@ async def test_free_busy_periods_written_on_one_line_are_all_reported(
 
 
 async def test_an_update_carries_the_window_it_was_given(hass: HomeAssistant) -> None:
-    """The service names its start and end in fields of its own, and an update
-    may set either, both or neither."""
     entry = await _setup(hass)
 
     with (
-        patch.object(_managed(entry, "Personal").coordinator, "async_request_refresh"),
+        patch.object(_managed(entry, "Personal").coordinator, "async_refresh"),
         patch("custom_components.ha_caldav.calendar.update_event") as write,
     ):
         await hass.services.async_call(
@@ -1527,8 +1452,6 @@ async def test_an_update_carries_the_window_it_was_given(hass: HomeAssistant) ->
 async def test_moving_an_event_onto_its_own_calendar_is_refused(
     hass: HomeAssistant,
 ) -> None:
-    """Nothing to do, and the write path would put the copy where the original
-    is and then delete it."""
     await _setup(hass)
 
     with pytest.raises(ServiceValidationError) as refusal:
@@ -1549,7 +1472,6 @@ async def test_moving_an_event_onto_its_own_calendar_is_refused(
 async def test_moving_into_an_account_that_is_not_loaded_is_refused(
     hass: HomeAssistant,
 ) -> None:
-    """Its calendars are not in reach, so there is nothing to write onto."""
     await _setup(hass)
     asleep = MockConfigEntry(
         domain=DOMAIN,
@@ -1585,8 +1507,7 @@ async def test_moving_into_an_account_that_is_not_loaded_is_refused(
 async def test_moving_onto_a_calendar_the_account_no_longer_holds_is_refused(
     hass: HomeAssistant,
 ) -> None:
-    """A registry entry outlives the calendar it was made for: one deleted on
-    the server, or taken out of the selection, leaves its entity behind."""
+    """A registry entry outlives the calendar it was made for."""
     entry = await _setup(hass)
     er.async_get(hass).async_get_or_create(
         "calendar",
@@ -1830,3 +1751,114 @@ async def test_only_an_administrator_manages_calendars(
             blocking=True,
             context=Context(user_id=user.id),
         )
+
+
+async def test_an_empty_text_from_an_automation_clears_the_field(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+
+    with patch("custom_components.ha_caldav.calendar.update_event") as update:
+        await hass.services.async_call(
+            DOMAIN,
+            "update_event",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "location": "",
+                "url": "",
+            },
+            blocking=True,
+        )
+
+    data = update.call_args.args[2]
+    assert data["location"] is None
+    assert data["url"] is None
+
+
+async def test_an_empty_rule_on_a_new_event_is_no_rule(hass: HomeAssistant) -> None:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+
+    await hass.services.async_call(
+        DOMAIN,
+        "create_event",
+        {
+            "entity_id": "calendar.personal",
+            "summary": "Once",
+            "start_date_time": "2026-07-06 09:00:00",
+            "end_date_time": "2026-07-06 10:00:00",
+            "rrule": "",
+            "location": "",
+        },
+        blocking=True,
+    )
+
+    written = calendar.save_event.call_args.args[0].to_ical().decode()
+    assert "RRULE" not in written
+    assert "LOCATION" not in written
+
+
+async def test_deleting_one_of_several_selected_calendars_keeps_the_others(
+    hass: HomeAssistant,
+) -> None:
+    personal, work = _calendar("Personal"), _calendar("Work")
+    entry = await _setup(
+        hass,
+        [personal, work],
+        options={
+            CONF_CALENDARS: ["/remote.php/dav/Personal", "/remote.php/dav/Work"],
+            CONF_CALENDAR_OPTIONS: {
+                "/remote.php/dav/Personal": {CONF_READ_ONLY: False},
+                "/remote.php/dav/Work": {CONF_READ_ONLY: True},
+            },
+        },
+    )
+
+    with (
+        patch("custom_components.ha_caldav.services.delete_calendar"),
+        patch("custom_components.ha_caldav.caldav.DAVClient") as client,
+    ):
+        client.return_value.principal.return_value.calendars.return_value = [work]
+        await hass.services.async_call(
+            DOMAIN,
+            "delete_calendar",
+            {"config_entry_id": entry.entry_id, "name": "Personal"},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    assert entry.options[CONF_CALENDARS] == ["/remote.php/dav/Work"]
+    assert entry.options[CONF_CALENDAR_OPTIONS] == {
+        "/remote.php/dav/Work": {CONF_READ_ONLY: True}
+    }
+
+
+async def test_deleting_a_calendar_whose_path_ends_in_todo_spares_its_neighbor(
+    hass: HomeAssistant,
+) -> None:
+    work, work_todo = _calendar("work"), _calendar("work-todo")
+    entry = await _setup(hass, [work, work_todo])
+    registry = er.async_get(hass)
+    removed: list[str] = []
+    remove = registry.async_remove
+
+    def recording(entity_id: str) -> None:
+        removed.append(entity_id)
+        remove(entity_id)
+
+    with (
+        patch("custom_components.ha_caldav.services.delete_calendar"),
+        patch("custom_components.ha_caldav.caldav.DAVClient") as client,
+        patch.object(registry, "async_remove", recording),
+    ):
+        client.return_value.principal.return_value.calendars.return_value = [work]
+        await hass.services.async_call(
+            DOMAIN,
+            "delete_calendar",
+            {"config_entry_id": entry.entry_id, "name": "work-todo"},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    assert sorted(removed) == ["calendar.work_todo", "todo.work_todo"]

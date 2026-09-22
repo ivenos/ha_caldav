@@ -12,7 +12,7 @@
         },
         "data_description": {
           "url": "La dirección de tu servidor CalDAV. En la mayoría de los servidores basta con el nombre del host.",
-          "verify_ssl": "Déjalo activado a menos que sepas por qué desactivarlo. Desactivado, cualquiera que intercepte la conexión puede hacerse pasar por el servidor y leer la contraseña."
+          "verify_ssl": "Desactivado, cualquiera que intercepte la conexión puede hacerse pasar por el servidor y leer la contraseña."
         },
         "sections": {
           "certificates": {
@@ -40,7 +40,7 @@
         },
         "data_description": {
           "url": "La dirección de tu servidor CalDAV. En la mayoría de los servidores basta con el nombre del host.",
-          "verify_ssl": "Déjalo activado a menos que sepas por qué desactivarlo. Desactivado, cualquiera que intercepte la conexión puede hacerse pasar por el servidor y leer la contraseña."
+          "verify_ssl": "Desactivado, cualquiera que intercepte la conexión puede hacerse pasar por el servidor y leer la contraseña."
         },
         "sections": {
           "certificates": {
@@ -156,6 +156,9 @@
     "bad_recurrence_id": {
       "message": "{value} no es una fecha ni una fecha con hora."
     },
+    "cannot_connect": {
+      "message": "No se puede conectar con el servidor CalDAV ({error})."
+    },
     "document_empty": {
       "message": "El documento no contiene ningún evento ni ninguna tarea."
     },
@@ -166,7 +169,7 @@
       "message": "El documento contiene más de un elemento con el UID {uid}."
     },
     "end_before_start": {
-      "message": "El fin es anterior al inicio."
+      "message": "El fin tiene que ser posterior al inicio."
     },
     "etag_conflict": {
       "message": "Este elemento ha cambiado en el servidor desde la última vez que Home Assistant lo leyó. Recarga el calendario y vuelve a hacer el cambio."
@@ -176,6 +179,9 @@
     },
     "mixed_time_types": {
       "message": "El inicio y el fin deben ser del mismo tipo: dos fechas para un evento de todo el día, o dos fechas con hora."
+    },
+    "no_calendar_read": {
+      "message": "No se pudo leer ningún calendario de esta cuenta."
     },
     "no_event_in_object": {
       "message": "El objeto de calendario no contiene ningún evento."
@@ -239,6 +245,9 @@
     },
     "unknown_todo_item": {
       "message": "En esta lista no hay ninguna tarea {uid}."
+    },
+    "unreadable_lines": {
+      "message": "El documento contiene líneas que no se pueden leer: {lines}"
     }
   },
   "selector": {

@@ -1,5 +1,3 @@
-"""Tests for completing recurring to-do items."""
-
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
@@ -29,9 +27,8 @@ class FakeTodo:
 
     @icalendar_instance.setter
     def icalendar_instance(self, value) -> None:
-        # caldav keeps the document handed to it and serializes it only on the
-        # way out. Writes go through here rather than through data because a
-        # string is put through vcal.fix, which rewrites the object.
+        # caldav keeps the document handed to it and serializes it only on the way
+        # out; a string is put through vcal.fix, which rewrites the object.
         self._cal = value
         self.data = value.to_ical().decode("utf-8")
 
@@ -49,12 +46,7 @@ class FakeTodo:
         self.saved = True
 
     def stored(self):
-        """Return the to-do out of the document that would reach the server.
-
-        Off the wire rather than off the component still in memory: the write
-        path builds what it sends through zoned_document, and read from the
-        object it mutated, an assertion here would never see what that made.
-        """
+        """Return the to-do out of the document that would reach the server."""
         return next(
             item
             for item in ICalendar.from_ical(self.data).walk()
@@ -135,8 +127,7 @@ def test_completing_non_recurring_todo_marks_completed() -> None:
 
 
 def test_completing_misaligned_count_one_closes_without_invalid_count() -> None:
-    # 2026-07-07 is a Tuesday; the rule only fires on Mondays, so the anchor is
-    # not itself an occurrence. Completing must close, not write COUNT=0.
+    # 2026-07-07 is a Tuesday, so the anchor is not itself an occurrence.
     calendar = FakeTodoCalendar(
         _vtodo("DUE:20260707T090000Z\r\nRRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=1")
     )
@@ -148,9 +139,7 @@ def test_completing_misaligned_count_one_closes_without_invalid_count() -> None:
 
 
 def test_completing_with_a_mismatched_until_still_rolls_the_item() -> None:
-    # A floating anchor with a UTC UNTIL is what Google writes. dateutil
-    # refuses the pair outright, so the zone is reconciled before it is asked
-    # and the series keeps rolling instead of quietly closing.
+    # Google writes a floating anchor with a UTC UNTIL, which dateutil refuses.
     calendar = FakeTodoCalendar(
         _vtodo("DUE:20260706T090000\r\nRRULE:FREQ=WEEKLY;UNTIL=20260720T090000Z")
     )
@@ -170,7 +159,6 @@ def test_completing_recurring_todo_with_until_rolls_then_closes() -> None:
     assert str(vtodo["STATUS"]) == "NEEDS-ACTION"
     assert vtodo["DUE"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
 
-    # The next occurrence (07-20) is past UNTIL, so the second completion closes.
     update_todo(
         calendar,
         "t1",
@@ -184,8 +172,7 @@ def test_completing_recurring_todo_with_until_rolls_then_closes() -> None:
 
 
 def test_completing_recurring_tzid_todo_preserves_wall_clock_across_dst() -> None:
-    # Europe/Berlin leaves DST on 2026-10-25; a weekly 09:00 task rolling from
-    # 10-24 to 10-31 must stay 09:00 wall clock and flip +02:00 -> +01:00.
+    # Europe/Berlin leaves DST on 2026-10-25.
     calendar = FakeTodoCalendar(
         _vtodo("DUE;TZID=Europe/Berlin:20261024T090000\r\nRRULE:FREQ=WEEKLY")
     )
@@ -215,8 +202,7 @@ def test_completing_an_item_that_is_already_done_keeps_one_stamp() -> None:
 
     update_todo(calendar, "t1", {"summary": "Water plants", "status": "COMPLETED"})
 
-    # icalendar's add turns a second write into a list, and the object would go
-    # back with two COMPLETED properties.
+    # icalendar's add turns a second write into a list.
     vtodo = calendar.todo.stored()
     assert str(vtodo["STATUS"]) == "COMPLETED"
     assert not isinstance(vtodo["COMPLETED"], list)
@@ -224,8 +210,7 @@ def test_completing_an_item_that_is_already_done_keeps_one_stamp() -> None:
 
 
 def test_a_recurring_todo_with_both_anchors_rolls_by_the_start() -> None:
-    # DTSTART is what the rule is anchored on; measuring the step from DUE
-    # instead moves a task with a BYDAY rule backwards.
+    # RFC 5545 anchors the rule on DTSTART.
     calendar = FakeTodoCalendar(
         _vtodo(
             "DTSTART;VALUE=DATE:20260706\r\nDUE;VALUE=DATE:20260707\r\n"
@@ -241,11 +226,8 @@ def test_a_recurring_todo_with_both_anchors_rolls_by_the_start() -> None:
 
 
 def test_a_due_date_cannot_be_moved_in_front_of_the_start() -> None:
-    """RFC 5545 puts DUE after DTSTART.
-
-    Home Assistant shows no start for a to-do, so the DTSTART another client
-    set is invisible here and a due date dragged earlier would sail past.
-    """
+    """RFC 5545 puts DUE after DTSTART, and Home Assistant shows no start for a
+    to-do."""
     import pytest
 
     from custom_components.ha_caldav.errors import Refused
@@ -276,13 +258,8 @@ DOUBLED = (
 
 
 def test_a_todo_written_with_two_rules_can_still_be_completed() -> None:
-    """RFC 2445 let some properties repeat and old clients still write them so.
-
-    icalendar hands a repeated property back as a list, which has no .get, so
-    the roll died on it: the item renamed and re-dated perfectly well and could
-    never be ticked off again, with the refusal reaching the user as a server
-    error that named neither the item nor the property.
-    """
+    """RFC 2445 let some properties repeat, and icalendar hands a repeated one back
+    as a list."""
     calendar = FakeTodoCalendar(
         DOUBLED.format(
             "DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY\r\nRRULE:FREQ=DAILY\r\n"
@@ -292,14 +269,12 @@ def test_a_todo_written_with_two_rules_can_still_be_completed() -> None:
     update_todo(calendar, "t1", {"summary": "Water plants", "status": "COMPLETED"})
 
     vtodo = calendar.todo.stored()
-    # The first of the two, as everything else that reduces one does.
     assert str(vtodo["STATUS"]) == "NEEDS-ACTION"
     assert vtodo["DUE"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
     assert not isinstance(vtodo["RRULE"], list)
 
 
 def test_a_todo_written_with_two_starts_can_still_be_dated() -> None:
-    """_check_todo_span reads DTSTART.dt, which a list does not have either."""
     calendar = FakeTodoCalendar(
         DOUBLED.format(
             "DTSTART:20260706T090000Z\r\nDTSTART:20260707T090000Z\r\n"
@@ -396,7 +371,7 @@ def test_a_utc_due_rolls_with_the_wall_clock_of_its_start() -> None:
     update_todo(calendar, "t1", {"summary": "Water plants", "status": "COMPLETED"})
 
     stored = calendar.todo.stored()
-    # Berlin leaves summer time on 2026-10-25; the hour between the two stays.
+    # Berlin leaves summer time on 2026-10-25.
     assert stored["DTSTART"].dt == datetime(2026, 10, 26, 9, 0, tzinfo=zone)
     assert stored["DUE"].dt == datetime(2026, 10, 26, 9, 0, tzinfo=UTC)
 
@@ -436,3 +411,40 @@ def test_an_edit_keeps_a_floating_due_time_floating() -> None:
     )
 
     assert calendar.todo.stored()["DUE"].dt == datetime(2026, 7, 6, 9, 0)
+
+
+def test_a_moved_due_time_is_written_in_the_zone_already_stored() -> None:
+    new_york = ZoneInfo("America/New_York")
+    calendar = FakeTodoCalendar(_vtodo("DUE;TZID=America/New_York:20260706T100000"))
+
+    update_todo(
+        calendar,
+        "t1",
+        {
+            "summary": "Renamed",
+            "status": "NEEDS-ACTION",
+            "due": datetime(2026, 7, 6, 17, 0, tzinfo=ZoneInfo("Europe/Berlin")),
+        },
+    )
+
+    due = calendar.todo.stored()["DUE"].dt
+    assert (due.replace(tzinfo=None), due.tzinfo) == (
+        datetime(2026, 7, 6, 11),
+        new_york,
+    )
+
+
+def test_a_moved_floating_due_time_stays_floating() -> None:
+    calendar = FakeTodoCalendar(_vtodo("DUE:20260706T090000"))
+
+    update_todo(
+        calendar,
+        "t1",
+        {
+            "summary": "Renamed",
+            "status": "NEEDS-ACTION",
+            "due": dt_util.as_local(datetime(2026, 7, 6, 10, 0)),
+        },
+    )
+
+    assert calendar.todo.stored()["DUE"].dt == datetime(2026, 7, 6, 10, 0)

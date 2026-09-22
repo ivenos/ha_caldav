@@ -24,9 +24,8 @@ from .coordinator import (
 )
 from .entity import HaCaldavEntity
 
-# Service calls only; the panel comes in over the websocket, and the lock in
-# HaCaldavEntity.async_write is what serializes writes.
-PARALLEL_UPDATES = 1
+# The lock in HaCaldavEntity.async_write serializes the writes to a collection.
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
@@ -81,8 +80,7 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
     async def async_update_todo_item(self, item: TodoItem) -> None:
         """Update an item on the list."""
         await self.async_write(
-            partial(
-                update_todo,
+            lambda: update_todo(
                 self.calendar,
                 item.uid,
                 _item_data(item),
@@ -95,8 +93,8 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
     async def async_delete_todo_items(self, uids: list[str]) -> None:
         """Delete items from the list."""
         await self.async_write(
-            partial(
-                delete_todos, self.calendar, uids, dict(self.coordinator.todo_etags)
+            lambda: delete_todos(
+                self.calendar, uids, dict(self.coordinator.todo_etags)
             ),
             "delete",
             forget=("todo_etags", tuple(uids)),
@@ -106,8 +104,7 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
         self, uid: str, previous_uid: str | None = None
     ) -> None:
         """Move an item behind another one, or to the front of the list."""
-        items = self.coordinator.data.todos if self.coordinator.data else []
-        order = [item.uid for item in items if item.uid]
+        order = self._order()
         for wanted in (uid, previous_uid):
             if wanted is not None and wanted not in order:
                 raise ServiceValidationError(
@@ -117,14 +114,21 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
                 )
         if previous_uid == uid:
             return
-        order.remove(uid)
-        order.insert(0 if previous_uid is None else order.index(previous_uid) + 1, uid)
-        await self.async_write(
-            partial(reorder_todos, self.calendar, order),
-            "reorder",
-            # A renumbering rewrites every item, and the refresh is debounced.
-            forget=("todo_etags", tuple(order)),
-        )
+
+        def reorder() -> None:
+            wanted = [item for item in self._order() if item != uid]
+            if previous_uid is not None and previous_uid not in wanted:
+                return
+            place = 0 if previous_uid is None else wanted.index(previous_uid) + 1
+            wanted.insert(place, uid)
+            reorder_todos(self.calendar, wanted)
+
+        # A renumbering rewrites every item.
+        await self.async_write(reorder, "reorder", forget=("todo_etags", tuple(order)))
+
+    def _order(self) -> list[str]:
+        items = self.coordinator.data.todos if self.coordinator.data else []
+        return [item.uid for item in items if item.uid]
 
 
 def _item_data(item: TodoItem) -> dict[str, Any]:

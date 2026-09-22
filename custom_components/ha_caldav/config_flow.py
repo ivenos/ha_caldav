@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 
 import caldav
 from caldav.davclient import requests
-from caldav.lib.error import AuthorizationError
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
@@ -53,14 +52,11 @@ from .const import (
     CONF_DAYS,
     CONF_INCLUDE_ALL_DAY,
     CONF_READ_ONLY,
-    DEFAULT_DAYS,
-    DEFAULT_INCLUDE_ALL_DAY,
-    DEFAULT_READ_ONLY,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_TIMEOUT,
     DOMAIN,
 )
-from .errors import NETWORK_ERRORS
+from .errors import NETWORK_ERRORS, rejected
 from .options import account_settings, request_timeout
 
 _LOGGER = logging.getLogger(__name__)
@@ -238,6 +234,7 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
         """Manage which calendars are used and how the next event is picked."""
         errors: dict[str, str] = {}
         options = self.config_entry.options
+        account = account_settings(self.config_entry)
         choices = await self._async_calendar_choices()
         if user_input is not None:
             # Here rather than in the schema: a voluptuous message reaches the
@@ -259,24 +256,11 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
                 CONF_SCAN_INTERVAL,
                 default=options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
             )
-        ] = _minutes()
+        ] = _number(1, 1440, "min")
         fields[
             vol.Optional(CONF_TIMEOUT, default=request_timeout(self.config_entry))
-        ] = _seconds()
-        fields[
-            vol.Optional(CONF_DAYS, default=options.get(CONF_DAYS, DEFAULT_DAYS))
-        ] = _days()
-        fields[
-            vol.Optional(
-                CONF_INCLUDE_ALL_DAY,
-                default=options.get(CONF_INCLUDE_ALL_DAY, DEFAULT_INCLUDE_ALL_DAY),
-            )
-        ] = cv.boolean
-        fields[
-            vol.Optional(
-                CONF_READ_ONLY, default=options.get(CONF_READ_ONLY, DEFAULT_READ_ONLY)
-            )
-        ] = cv.boolean
+        ] = _number(5, 120, "s")
+        fields.update(_calendar_fields(account))
 
         return self.async_show_form(
             step_id="account", data_schema=vol.Schema(fields), errors=errors
@@ -318,8 +302,6 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
             overrides.pop(name, None)
             overrides.pop(key, None)
             if not reset:
-                # Only what differs, so an account-wide change still reaches
-                # the rest.
                 changed = {
                     field: value
                     for field, value in user_input.items()
@@ -334,33 +316,13 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
                 }
             )
 
-        options = self.config_entry.options
         current = overrides.get(key, overrides.get(name, {}))
         return self.async_show_form(
             step_id="calendar",
             description_placeholders={"calendar": name},
             data_schema=vol.Schema(
                 {
-                    vol.Optional(
-                        CONF_DAYS,
-                        default=current.get(
-                            CONF_DAYS, options.get(CONF_DAYS, DEFAULT_DAYS)
-                        ),
-                    ): _days(),
-                    vol.Optional(
-                        CONF_INCLUDE_ALL_DAY,
-                        default=current.get(
-                            CONF_INCLUDE_ALL_DAY,
-                            options.get(CONF_INCLUDE_ALL_DAY, DEFAULT_INCLUDE_ALL_DAY),
-                        ),
-                    ): cv.boolean,
-                    vol.Optional(
-                        CONF_READ_ONLY,
-                        default=current.get(
-                            CONF_READ_ONLY,
-                            options.get(CONF_READ_ONLY, DEFAULT_READ_ONLY),
-                        ),
-                    ): cv.boolean,
+                    **_calendar_fields({**account, **current}),
                     vol.Optional(CONF_RESET, default=False): cv.boolean,
                 }
             ),
@@ -392,42 +354,31 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
         return self._choices
 
 
-def _minutes() -> Any:
-    """Return the poll-interval field, bounded by the frontend itself.
+def _number(low: int, high: int, unit: str) -> NumberSelector:
+    """Return a whole-number field bounded by the frontend itself.
 
     A voluptuous range answers with its own English message.
     """
     return NumberSelector(
         NumberSelectorConfig(
-            min=1,
-            max=1440,
+            min=low,
+            max=high,
             step=1,
             mode=NumberSelectorMode.BOX,
-            unit_of_measurement="min",
+            unit_of_measurement=unit,
         )
     )
 
 
-def _seconds() -> Any:
-    """Return the request-timeout field, bounded by the frontend itself.
-
-    caldav retries a failed request unauthenticated until the account has
-    authenticated once, so a connection attempt can cost three times this.
-    """
-    return NumberSelector(
-        NumberSelectorConfig(
-            min=5, max=120, step=1, mode=NumberSelectorMode.BOX, unit_of_measurement="s"
-        )
-    )
-
-
-def _days() -> Any:
-    """Return the look-ahead field, bounded by the frontend itself."""
-    return NumberSelector(
-        NumberSelectorConfig(
-            min=1, max=365, step=1, mode=NumberSelectorMode.BOX, unit_of_measurement="d"
-        )
-    )
+def _calendar_fields(values: Mapping[str, Any]) -> dict[Any, Any]:
+    """Return the fields a single calendar can override, filled in with these."""
+    return {
+        vol.Optional(CONF_DAYS, default=values[CONF_DAYS]): _number(1, 365, "d"),
+        vol.Optional(
+            CONF_INCLUDE_ALL_DAY, default=values[CONF_INCLUDE_ALL_DAY]
+        ): cv.boolean,
+        vol.Optional(CONF_READ_ONLY, default=values[CONF_READ_ONLY]): cv.boolean,
+    }
 
 
 def _selected_keys(options: Mapping[str, Any], choices: dict[str, str]) -> list[str]:
@@ -574,17 +525,14 @@ def _test_connection(
         )
         try:
             client.principal()
-        except AuthorizationError as err:
-            if err.reason == "Unauthorized":
-                # Remembered, not returned: a bare host may sit behind another
-                # auth realm while the bootstrap candidate works.
-                candidate_error = "invalid_auth"
-            else:
-                _LOGGER.debug("CalDAV authorization error: %s", err)
         except requests.exceptions.SSLError as err:
             _LOGGER.debug("CalDAV TLS error: %s", err)
             candidate_error = "certificate_failed"
         except NETWORK_ERRORS as err:
+            if rejected(err):
+                # Remembered, not returned: a bare host may sit behind another
+                # auth realm while the bootstrap candidate works.
+                candidate_error = "invalid_auth"
             _LOGGER.debug("CalDAV connection error: %s", err)
         except Exception:
             _LOGGER.exception("Unexpected error connecting to the CalDAV server")

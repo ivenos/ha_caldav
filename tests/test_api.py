@@ -1,5 +1,3 @@
-"""Tests for the CalDAV write operations that services drive."""
-
 from datetime import UTC, date, datetime
 from typing import Any
 from unittest.mock import Mock, patch
@@ -45,7 +43,6 @@ EVENT = (
 
 
 def _missing_calendar() -> Mock:
-    """Return a calendar whose uid lookups all come back empty."""
     calendar = dav_calendar()
     calendar.event_by_uid.side_effect = NotFoundError("nope")
     calendar.todo_by_uid.side_effect = NotFoundError("nope")
@@ -54,7 +51,6 @@ def _missing_calendar() -> Mock:
 
 
 def _written(calendar: Mock) -> list[str]:
-    """Return the documents that reached the wire, in order."""
     return calendar.client.bodies
 
 
@@ -76,7 +72,6 @@ def test_create_event_sends_one_complete_document() -> None:
         },
     )
 
-    # One PUT: a second one could fail and leave a half-built event behind.
     assert calendar.save_event.call_count == 1
     assert calendar.add_event.call_count == 0
     body = calendar.save_event.call_args.args[0].to_ical().decode("utf-8")
@@ -97,12 +92,12 @@ def test_create_todo_marked_done_carries_the_completion_properties() -> None:
 
 
 def test_import_refuses_a_document_that_would_overwrite() -> None:
-    calendar = Mock()
+    calendar = dav_calendar()
 
     with pytest.raises(Refused, match="uid_clash"):
         import_ics(calendar, EVENT)
 
-    assert calendar.save_event.call_count == 0
+    assert calendar.client.puts == []
 
 
 def test_import_keeps_relations_and_carries_one_timezone() -> None:
@@ -111,9 +106,7 @@ def test_import_keeps_relations_and_carries_one_timezone() -> None:
     assert import_ics(calendar, EVENT) == ["uid-1"]
 
     body = _written(calendar)[0]
-    # Only Calendar.save_object follows RELATED-TO and rewrites what it names;
-    # this path saves the resource itself, so a task hierarchy survives the
-    # round trip through export and import.
+    # caldav's Calendar.save_object follows RELATED-TO and rewrites what it names.
     assert "RELATED-TO:parent-uid" in body
     assert body.count("BEGIN:VTIMEZONE") == 1
     assert "TZID=Europe/Berlin" in body
@@ -172,11 +165,8 @@ ORPHAN_OVERRIDE = (
 
 
 def test_import_stores_an_object_whose_first_component_is_an_exception() -> None:
-    """caldav reads its recurrence handling off the first component that is not
-    a timezone, and on finding a RECURRENCE-ID there it goes looking on the
-    target for a uid the target does not carry yet. It dies on the None that
-    comes back, so an invitation to a single occurrence could not be imported
-    at all, nor an object a server returned exception-first."""
+    """caldav reads its recurrence handling off the first non-timezone component,
+    and on a RECURRENCE-ID there looks up a uid the target does not hold yet."""
     calendar = _missing_calendar()
 
     assert import_ics(calendar, ORPHAN_OVERRIDE) == ["uid-1"]
@@ -216,10 +206,7 @@ def test_import_refuses_a_document_it_cannot_address(document, key) -> None:
 
 
 def test_export_of_one_object_returns_it_verbatim() -> None:
-    """Through a real resource, not a double handing the document back: caldav
-    normalizes the line endings of what it read, and RFC 5545 3.1 has them as
-    CRLF, so the export of a single object went out as something a strict
-    importer refuses while the whole-calendar export beside it was correct."""
+    """caldav normalizes the line endings it read, which RFC 5545 3.1 has as CRLF."""
     calendar = dav_calendar()
     calendar.event_by_uid.return_value = CaldavEvent(calendar.client, data=EVENT)
 
@@ -230,8 +217,6 @@ def test_export_of_one_object_returns_it_verbatim() -> None:
 
 
 def test_export_of_one_object_finds_a_todo_too() -> None:
-    """The whole-calendar export carries to-dos, so a uid that names one must
-    not come back as missing from the single-object mode."""
     body = (
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
         "BEGIN:VTODO\r\nUID:t-1\r\nDTSTAMP:20260101T000000Z\r\nSUMMARY:Task\r\n"
@@ -245,7 +230,6 @@ def test_export_of_one_object_finds_a_todo_too() -> None:
 
 
 def _export_item(uid: str) -> Mock:
-    """One stored resource, at a url of its own as a real one has."""
     return Mock(
         url=f"https://dav.test/cal/{uid}.ics",
         icalendar_instance=ICalCalendar.from_ical(EVENT.replace("uid-1", uid)),
@@ -265,9 +249,6 @@ def test_export_of_the_calendar_carries_each_timezone_once() -> None:
 
 
 def test_export_writes_a_resource_both_searches_match_only_once() -> None:
-    """A resource holding a VEVENT and a VTODO under one uid comes back from
-    the event filter and from the to-do filter alike, and re-importing the
-    export would then produce two of everything."""
     both = Mock(
         url="https://dav.test/cal/mixed.ics",
         icalendar_instance=ICalCalendar.from_ical(
@@ -288,7 +269,6 @@ def test_export_writes_a_resource_both_searches_match_only_once() -> None:
 
 
 def _move_pair() -> tuple[Mock, Mock, Mock]:
-    """A source holding uid-1 and a target holding nothing."""
     event = Mock(data=EVENT)
     source, target = Mock(), dav_calendar()
     source.event_by_uid.return_value = event
@@ -316,18 +296,15 @@ def test_move_can_keep_the_original() -> None:
 
 
 def test_moving_onto_the_calendar_the_event_is_already_on_is_refused() -> None:
-    """caldav names the resource after the uid, so the write would land on it.
-
-    The delete that follows a move would then take the only copy left.
-    """
+    """caldav names the resource after the uid."""
     event = Mock(data=EVENT)
-    calendar = Mock()
+    calendar = dav_calendar()
     calendar.event_by_uid.return_value = event
 
     with pytest.raises(Refused, match="uid_clash"):
         move_event(calendar, calendar, "uid-1", keep_original=False)
 
-    calendar.save_event.assert_not_called()
+    assert calendar.client.puts == []
     event.delete.assert_not_called()
 
 
@@ -345,12 +322,7 @@ def test_moving_onto_a_calendar_that_holds_the_uid_is_refused() -> None:
 
 
 class _Resource:
-    """A resource whose text follows the document written onto it.
-
-    As caldav's does: the write path hands over the object rather than its
-    text, because a string is put through vcal.fix on the way in. A double
-    keeping the two apart would report the document the poll read.
-    """
+    """A resource whose text follows the document written onto it, as caldav's does."""
 
     def __init__(self, ics: str) -> None:
         self.data = ics
@@ -359,12 +331,8 @@ class _Resource:
         self.delete = Mock()
 
     def _bump(self, **kwargs: Any) -> None:
-        """Move a SEQUENCE the way caldav 2.1.0 does on the way out.
-
-        It bumps the first component that is not a timezone whatever
-        increase_seqno says, so a double that skipped it would let a write hold
-        the wrong one back and never show it.
-        """
+        """caldav 2.1.0 bumps the SEQUENCE of the first non-timezone component on the
+        way out, whatever increase_seqno says."""
         if (component := self.icalendar_component) is not None and (
             "SEQUENCE" in component
         ):
@@ -406,7 +374,7 @@ def test_responding_matches_the_address_however_it_is_spelled(attendee) -> None:
     respond_to_invitation(calendar, "uid-1", "ACCEPTED", ["mailto:iven@example.com"])
 
     assert "PARTSTAT=ACCEPTED" in event.data
-    # An orphan-override object would have caldav recurse until it gave up.
+    # With only_this_recurrence, caldav recurses on an orphan-override object.
     assert event.save.call_args.kwargs["only_this_recurrence"] is False
 
 
@@ -466,16 +434,13 @@ def _todo(body: str) -> Mock:
         "END:VTODO\r\nEND:VCALENDAR\r\n"
     )
     todo = Mock()
-    # Both, as a caldav resource carries both: the component is a subcomponent
-    # of the instance, and code that has to pick a kind out of the resource
-    # reads the instance.
+    # A caldav resource carries both, the component a subcomponent of the instance.
     todo.icalendar_instance = instance
     todo.icalendar_component = next(iter(instance.walk("VTODO")))
 
     def save(**_kwargs: object) -> None:
-        # caldav 2.1.0 bumps SEQUENCE on the way out whatever increase_seqno
-        # says, and only when the property is already there. Modeled, or the
-        # double bump this fake used to hide stays invisible.
+        # caldav 2.1.0 bumps SEQUENCE on the way out whatever increase_seqno says,
+        # and only when the property is already there.
         component = todo.icalendar_component
         if "SEQUENCE" in component:
             seqno = component.pop("SEQUENCE")
@@ -510,14 +475,12 @@ def test_a_todo_edit_records_the_change() -> None:
 
 
 def _ordered_todo(uid: str, body: str) -> Mock:
-    """A search result carrying its own uid, the way a collection read gives them."""
     todo = _todo(body)
     todo.icalendar_component["UID"] = uid
     return todo
 
 
 def test_reorder_compares_positions_numerically() -> None:
-    """A server-written "00" is the same position as 0, so nothing moved."""
     calendar = Mock()
     todos = {
         "a": _ordered_todo("a", "SUMMARY:a\r\nX-APPLE-SORT-ORDER:00"),
@@ -532,7 +495,6 @@ def test_reorder_compares_positions_numerically() -> None:
 
 
 def test_reorder_writes_only_the_item_that_moved() -> None:
-    """Renumbering the rest would be a PUT per item on every single drag."""
     calendar = Mock()
     todos = {
         letter: _ordered_todo(letter, f"SUMMARY:{letter}\r\nX-APPLE-SORT-ORDER:{n}")
@@ -556,14 +518,10 @@ def test_reorder_numbers_a_list_that_was_never_ordered() -> None:
     reorder_todos(calendar, ["c", "a", "b"])
 
     assert _order(todos) == ["c", "a", "b"]
-    # Room between them, or the next drag would have to renumber everyone.
     positions = [
         int(str(todo.icalendar_component["X-APPLE-SORT-ORDER"]))
         for todo in todos.values()
     ]
-    # Room for many future drags, not merely for one: at a gap of two, nearly
-    # every drag falls through to the full renumber this exists to avoid, and
-    # that is a PUT per item on the list.
     assert min(abs(a - b) for a in positions for b in positions if a != b) >= _SORT_GAP
 
 
@@ -575,7 +533,6 @@ def test_reorder_renumbers_when_the_neighbors_leave_no_room() -> None:
     }
     calendar.search.return_value = list(todos.values())
 
-    # Between 0 and 1 there is no whole number to take.
     reorder_todos(calendar, ["a", "c", "b"])
 
     assert _order(todos) == ["a", "c", "b"]
@@ -599,7 +556,6 @@ def test_reorder_ends_up_in_the_requested_order(target: int) -> None:
 
 
 def _order(todos: dict[str, Mock]) -> list[str]:
-    """Return the uids in the order the written positions put them."""
     return sorted(
         todos,
         key=lambda uid: float(
@@ -610,8 +566,6 @@ def _order(todos: dict[str, Mock]) -> list[str]:
 
 @pytest.mark.parametrize("written", ["nonsense", "", "3.5.1"])
 def test_reorder_survives_a_sort_order_the_server_wrote_by_hand(written: str) -> None:
-    # Another client is free to put anything in there, and it must not take
-    # the whole reorder down.
     calendar = Mock()
     todo = _ordered_todo("a", f"SUMMARY:a\r\nX-APPLE-SORT-ORDER:{written}")
     calendar.search.return_value = [todo]
@@ -622,8 +576,7 @@ def test_reorder_survives_a_sort_order_the_server_wrote_by_hand(written: str) ->
 
 
 def test_reorder_reads_the_collection_once_for_the_whole_ordering() -> None:
-    # Home Assistant sends the entire ordering for a single drag; a lookup per
-    # item is a request per item, and a whole download per item on iCloud.
+    # Home Assistant sends the entire ordering for a single drag.
     calendar = Mock()
     calendar.search.return_value = [
         _ordered_todo(str(n), f"SUMMARY:{n}\r\nX-APPLE-SORT-ORDER:{99 - n}")
@@ -660,7 +613,7 @@ def test_a_missing_item_is_reported_as_user_error_not_a_crash() -> None:
     assert reported.translation_key == "not_found"
 
 
-def test_a_refusal_of_ours_keeps_its_own_wording() -> None:
+def test_a_library_valueerror_keeps_its_own_wording() -> None:
     from homeassistant.exceptions import ServiceValidationError
 
     from custom_components.ha_caldav.errors import as_reported
@@ -724,16 +677,12 @@ def test_a_refusal_of_ours_reaches_the_user_by_its_own_key() -> None:
 
     reported = as_reported(Refused("etag_conflict"), "update")
 
-    # Refused is a ValueError, so it has to be recognized before the arm that
-    # forwards a library message verbatim.
     assert reported.translation_key == "etag_conflict"
 
 
 def test_a_library_error_that_is_also_a_valueerror_keeps_the_url_out() -> None:
-    # Through caldav's own alias, which is what errors.py catches: caldav binds
-    # requests to niquests where that is importable and to requests where it is
-    # not, and naming either directly tests whichever happens to be installed
-    # rather than the one the integration will actually meet.
+    # caldav binds requests to niquests where that is importable, so only its own
+    # alias names the exceptions it raises.
     from caldav.davclient import requests
 
     from custom_components.ha_caldav.errors import as_reported
@@ -762,12 +711,8 @@ INVITE_WITH_SEQUENCE = (
 
 
 def test_a_reply_keeps_the_sequence_the_organizer_issued() -> None:
-    """RFC 5546: only the organizer moves SEQUENCE.
-
-    Written against a real caldav.Event rather than a stub, because the value
-    that matters is the one on the wire: caldav 2.1.0 accepts increase_seqno
-    and bumps regardless, so this fails loudly if that behavior ever changes.
-    """
+    """RFC 5546: only the organizer moves SEQUENCE. caldav 2.1.0 accepts
+    increase_seqno and bumps regardless."""
     import caldav
 
     put: dict = {}
@@ -838,7 +783,7 @@ def test_a_created_todo_defines_the_timezone_it_references() -> None:
 
 
 def test_import_refuses_a_uid_the_server_holds_as_the_other_kind() -> None:
-    """One uid is one resource, so an event would overwrite a to-do."""
+    """RFC 4791 gives one uid one resource."""
     calendar = _missing_calendar()
     calendar.todo_by_uid.side_effect = None
     calendar.todo_by_uid.return_value = Mock()
@@ -846,7 +791,7 @@ def test_import_refuses_a_uid_the_server_holds_as_the_other_kind() -> None:
     with pytest.raises(Refused, match="uid_clash"):
         import_ics(calendar, EVENT)
 
-    assert calendar.save_event.call_count == 0
+    assert calendar.client.puts == []
 
 
 def test_a_large_import_sees_a_clash_of_either_kind() -> None:
@@ -868,8 +813,7 @@ def test_a_large_import_sees_a_clash_of_either_kind() -> None:
             "END:VCALENDAR\r\n",
         )
 
-    # One read per component type, not one per uid, and never the filter-less
-    # query that a good few servers answer with nothing at all.
+    # A good few servers answer a query without a component filter with nothing.
     assert [call.kwargs for call in calendar.search.call_args_list] == [
         {"event": True},
         {"todo": True, "include_completed": True},
@@ -877,8 +821,6 @@ def test_a_large_import_sees_a_clash_of_either_kind() -> None:
 
 
 def test_a_created_event_writes_no_property_named_after_an_attribute() -> None:
-    """The extras have their own writer; passing one through as a core field
-    would put a Python repr on the wire under an invented property name."""
     calendar = Mock()
 
     create_event(
@@ -894,8 +836,8 @@ def test_a_created_event_writes_no_property_named_after_an_attribute() -> None:
     )
 
     written = calendar.save_event.call_args.args[0].to_ical().decode("utf-8")
-    # The names the extras go by are not all iCalendar properties; handing one
-    # to create_ical writes it verbatim with a Python repr for a value.
+    # Not every extra is an iCalendar property, and caldav's create_ical writes
+    # whatever it is handed verbatim, with a Python repr for a value.
     real = {
         "URL",
         "STATUS",
@@ -948,7 +890,6 @@ def test_a_due_date_of_another_value_type_than_the_start_is_refused() -> None:
 
 
 def test_a_floating_start_is_compared_with_a_zoned_due_in_local_time() -> None:
-    """Both name the same instant under Europe/Berlin, so nothing is refused."""
     from homeassistant.util import dt as dt_util
 
     previous = dt_util.get_default_time_zone()
@@ -971,7 +912,7 @@ def test_a_floating_start_is_compared_with_a_zoned_due_in_local_time() -> None:
 
 
 def test_a_todo_edit_refreshes_the_dtstamp() -> None:
-    """RFC 5545 3.8.7.2: without a METHOD it is when the object was revised."""
+    """RFC 5545 3.8.7.2: without a METHOD, DTSTAMP is when the object was revised."""
     todo = _todo("SUMMARY:Buy milk")
     calendar = Mock()
     calendar.todo_by_uid.return_value = todo
@@ -982,7 +923,6 @@ def test_a_todo_edit_refreshes_the_dtstamp() -> None:
 
 
 def test_a_bulk_delete_checks_every_etag_before_deleting_anything() -> None:
-    """A conflict on the second must not leave the first already gone."""
     from custom_components.ha_caldav.api import delete_todos
 
     items = {}
@@ -1005,7 +945,6 @@ def test_a_bulk_delete_checks_every_etag_before_deleting_anything() -> None:
 
 
 def test_a_zone_named_only_by_an_alarm_is_still_collected() -> None:
-    """Otherwise the document references a TZID it never defines."""
     from custom_components.ha_caldav.api import _tzids
 
     document = ICalCalendar.from_ical(
@@ -1021,8 +960,8 @@ def test_a_zone_named_only_by_an_alarm_is_still_collected() -> None:
 
 
 def test_renaming_an_in_process_todo_leaves_its_progress_alone() -> None:
-    """Home Assistant has two states for CalDAV's four and echoes the folded
-    one back on any edit, so writing it would undo work nobody touched."""
+    """Home Assistant has two states for CalDAV's four and echoes the folded one
+    back on any edit."""
     todo = _todo("SUMMARY:Paint\r\nSTATUS:IN-PROCESS\r\nPERCENT-COMPLETE:60")
     calendar = Mock()
     calendar.todo_by_uid.return_value = todo
@@ -1060,8 +999,6 @@ def test_completing_an_outstanding_todo_still_records_it() -> None:
 
 
 def test_a_failed_import_takes_back_what_it_already_wrote() -> None:
-    """Left behind, those objects make the retry fail as uid clashes with
-    itself, and the user has no way to tell which are theirs."""
     calendar = _missing_calendar()
     calendar.client.fail_from = 1
     document = "".join(
@@ -1077,10 +1014,9 @@ def test_a_failed_import_takes_back_what_it_already_wrote() -> None:
             "END:VCALENDAR\r\n",
         )
 
-    # The one that did land is taken back off the server, by url.
     assert calendar.client.deletes == [f"{calendar.url}u0.ics"]
     # caldav answers a refusal by reserializing through vobject and putting the
-    # same resource a second time, so the failing uid costs two writes.
+    # same resource a second time.
     assert [url for url, _ in calendar.client.puts] == [
         f"{calendar.url}u0.ics",
         f"{calendar.url}u1.ics",
@@ -1089,9 +1025,6 @@ def test_a_failed_import_takes_back_what_it_already_wrote() -> None:
 
 
 def test_an_import_says_so_when_it_cannot_take_back_what_it_wrote() -> None:
-    """Whatever will not go is named in the log, not raised: replacing the
-    PutError that got us here with a DeleteError would leave the user chasing
-    the wrong failure, and the rollback of the objects after it undone."""
     calendar = _missing_calendar()
     calendar.client.fail_from = 2
     calendar.client.delete_status = 423
@@ -1112,8 +1045,6 @@ def test_an_import_says_so_when_it_cannot_take_back_what_it_wrote() -> None:
 
 
 def test_a_todo_reorder_renumbers_when_two_items_share_a_position() -> None:
-    """The displayed order is then the server's own, which no tie-break here
-    reproduces, so a drag would look like no change and spring back."""
     items = [
         _ordered_todo("a", f"SUMMARY:A\r\n{SORT_ORDER_PROPERTY}:5"),
         _ordered_todo("b", f"SUMMARY:B\r\n{SORT_ORDER_PROPERTY}:5"),
@@ -1127,11 +1058,8 @@ def test_a_todo_reorder_renumbers_when_two_items_share_a_position() -> None:
 
 
 def test_a_scan_reads_the_uid_of_an_object_icalendar_refuses() -> None:
-    """icalendar is strict where the vobject of the read path is not, so an
-    object another client wrote PRIORITY:high into parses on screen and raises
-    here. Dropped, it reports no clash for the uid it holds and an import
-    overwrites it; the whole scan raising takes down every write that uses it,
-    which on a server refusing the uid filter is all of them."""
+    """icalendar raises on an object with PRIORITY:high, which vobject on the read
+    path parses."""
     from custom_components.ha_caldav.api import _scan
 
     broken = Mock()
@@ -1149,10 +1077,8 @@ def test_a_scan_reads_the_uid_of_an_object_icalendar_refuses() -> None:
 
 
 def test_ticking_a_todo_does_not_write_into_the_event_beside_it() -> None:
-    """caldav's icalendar_component hands back whichever subcomponent is not a
-    timezone, and RFC 4791 does not stop one resource from holding a VEVENT
-    ahead of a VTODO. The meeting was renamed, given COMPLETED and
-    PERCENT-COMPLETE, and the item the user ticked stayed open."""
+    """caldav's icalendar_component is the first subcomponent that is not a
+    timezone, and a resource may hold a VEVENT ahead of the VTODO."""
     instance = ICalCalendar.from_ical(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
         "BEGIN:VEVENT\r\nUID:u\r\nDTSTAMP:20260101T000000Z\r\n"
@@ -1177,10 +1103,8 @@ def test_ticking_a_todo_does_not_write_into_the_event_beside_it() -> None:
 
 
 def test_a_recurring_todo_with_a_zero_interval_can_still_be_completed() -> None:
-    """RFC 5545 wants a positive INTERVAL and icalendar takes a zero without
-    complaint. dateutil then re-yields the start forever, so .after() never
-    returns: a thread out of the executor pool spins until Home Assistant is
-    restarted, and no timeout or except reaches it."""
+    """RFC 5545 wants a positive INTERVAL, but icalendar takes a zero, and dateutil
+    then re-yields the start forever."""
     instance = ICalCalendar.from_ical(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
         "BEGIN:VTODO\r\nUID:t\r\nDTSTAMP:20260101T000000Z\r\n"
@@ -1195,14 +1119,12 @@ def test_a_recurring_todo_with_a_zero_interval_can_still_be_completed() -> None:
 
     update_todo(calendar, "t", {"summary": "Water plants", "status": "COMPLETED"})
 
-    # Closed outright rather than rolled: there is no next occurrence to roll to.
     assert str(next(iter(instance.walk("VTODO")))["STATUS"]) == "COMPLETED"
 
 
 def test_a_todo_is_saved_without_the_single_recurrence_path() -> None:
-    """Left at caldav's default, a to-do holding nothing but a detached
-    instance sends it refetching and splicing back the first component, one
-    server lookup per turn, until the stack runs out."""
+    """At caldav's default, a to-do holding only a detached instance has it refetch
+    and splice back the first component until the stack runs out."""
     todo = _todo("SUMMARY:Task")
     calendar = Mock()
     calendar.todo_by_uid.return_value = todo
@@ -1213,9 +1135,6 @@ def test_a_todo_is_saved_without_the_single_recurrence_path() -> None:
 
 
 def test_the_export_leaves_out_an_object_it_cannot_parse() -> None:
-    """One object another client wrote a non-numeric PRIORITY into would
-    otherwise cost the user the export of the whole calendar, with a message
-    naming neither the object nor the calendar."""
     broken = Mock(url="https://dav.test/cal/broken.ics")
     type(broken).icalendar_instance = property(
         lambda _self: (_ for _ in ()).throw(ValueError("Expected int, got: high"))
@@ -1232,11 +1151,8 @@ def test_the_export_leaves_out_an_object_it_cannot_parse() -> None:
 
 
 def test_a_folded_uid_is_read_whole() -> None:
-    """RFC 5545 3.1 breaks a line past 75 octets and continues it with a space,
-    and the uid Outlook and Exchange write is 112 characters. Read line by line
-    it comes back cut in half, and a cut uid matches nothing: an import reports
-    no clash and overwrites the object, and every edit of a visible event
-    reports it missing from the server."""
+    """RFC 5545 3.1 breaks a line past 75 octets and continues it with a space, and
+    the uid Outlook and Exchange write is 112 characters."""
     from custom_components.ha_caldav.api import _raw_uid
 
     uid = "040000008200E00074C5B7101A82E00800000000B0C1D2E3F4A5DB01" + "AF1E2D3C" * 7
@@ -1252,10 +1168,8 @@ def test_a_folded_uid_is_read_whole() -> None:
 
 
 def test_the_sequence_hold_lands_where_caldav_bumps() -> None:
-    """caldav raises the SEQUENCE of the first component that is not a
-    timezone, whichever it is. Held on the to-do instead, the untouched meeting
-    beside it announced a new revision to its attendees and the item the user
-    actually edited announced none."""
+    """caldav raises the SEQUENCE of the first component that is not a timezone,
+    whichever it is."""
     instance = ICalCalendar.from_ical(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
         "BEGIN:VEVENT\r\nUID:u\r\nDTSTAMP:20260101T000000Z\r\n"
@@ -1286,8 +1200,7 @@ def test_the_sequence_hold_lands_where_caldav_bumps() -> None:
 
 def test_a_rewrite_keeps_the_properties_the_server_put_on_the_document() -> None:
     """X-CALENDARSERVER-ACCESS is how Apple marks an event confidential, and it
-    sits at the VCALENDAR level. Rebuilding the document from its components
-    alone dropped the privacy marker on every rename."""
+    sits at the VCALENDAR level."""
     from custom_components.ha_caldav.api import zoned_document
 
     document = ICalCalendar.from_ical(
@@ -1307,11 +1220,8 @@ def test_a_rewrite_keeps_the_properties_the_server_put_on_the_document() -> None
 
 
 def test_a_generated_timezone_survives_being_read_back() -> None:
-    """icalendar writes one RDATE per observance carrying every transition as a
-    list, and vobject - which the read path parses with - keeps only the first
-    value of such a line. An event this integration had just written at 09:00
-    Berlin read back an hour out for the whole daylight-saving half of the year,
-    on its own calendar."""
+    """icalendar writes one RDATE per observance carrying every transition, and
+    vobject keeps only the first value of such a line."""
     from icalendar import Event as ICalEvent
     import vobject
 
@@ -1331,8 +1241,6 @@ def test_a_generated_timezone_survives_being_read_back() -> None:
 
 
 def test_moving_a_resource_that_holds_no_event_is_refused() -> None:
-    # Written to the target as an event and deleted from the source, the to-do
-    # it actually held would come back as neither.
     body = (
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
         "BEGIN:VTODO\r\nUID:uid-1\r\nDTSTAMP:20260101T000000Z\r\n"
@@ -1354,10 +1262,8 @@ def test_moving_a_resource_that_holds_no_event_is_refused() -> None:
     [('W/"abc"', '"abc"'), ('"abc"', 'W/"abc"'), ('W/"abc"', 'W/"abc"')],
 )
 def test_the_weak_marker_does_not_make_an_etag_a_conflict(stored, expected) -> None:
-    """RFC 7232 2.3.2 wants weak comparison here. A proxy is free to add or drop
-    the W/ between the read that recorded the tag and the one that checks it,
-    and compared literally that account could never write anything and was told
-    each time that somebody else had."""
+    """RFC 7232 2.3.2 wants weak comparison here, and a proxy may add or drop the
+    W/ between two reads."""
     from caldav.elements import dav
 
     from custom_components.ha_caldav.api import check_etag
@@ -1369,9 +1275,8 @@ def test_the_weak_marker_does_not_make_an_etag_a_conflict(stored, expected) -> N
 
 
 def test_a_rule_naming_a_day_no_month_has_is_refused() -> None:
-    """Such a rule yields nothing, so the guard that counts yielded occurrences
-    never fires and dateutil walks to the year 9999 - minute by minute for a
-    sub-daily frequency, with the collection's write lock held throughout."""
+    """A rule yielding nothing has dateutil walk to the year 9999, minute by minute
+    for a sub-daily frequency."""
     instance = ICalCalendar.from_ical(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
         "BEGIN:VTODO\r\nUID:t\r\nDTSTAMP:20260101T000000Z\r\n"
@@ -1386,7 +1291,6 @@ def test_a_rule_naming_a_day_no_month_has_is_refused() -> None:
 
     update_todo(calendar, "t", {"summary": "Water plants", "status": "COMPLETED"})
 
-    # Closed outright rather than rolled: the rule reaches no next occurrence.
     assert str(next(iter(instance.walk("VTODO")))["STATUS"]) == "COMPLETED"
 
 
@@ -1401,9 +1305,7 @@ EVENT_BESIDE_TODO = (
 
 
 def test_a_due_date_lands_on_the_todo_and_not_on_the_event_beside_it() -> None:
-    """caldav's set_due writes onto whichever component is not a timezone
-    first, which is the very split vtodo_of exists for: the meeting lost its
-    DURATION and gained a DUE, and the item the user dated kept the old one."""
+    """caldav's set_due writes onto the first component that is not a timezone."""
     instance = ICalCalendar.from_ical(EVENT_BESIDE_TODO)
     todo = Mock()
     todo.icalendar_instance = instance
@@ -1446,9 +1348,8 @@ def test_a_zoned_due_date_carries_its_timezone_definition() -> None:
 
 
 def test_a_uid_written_twice_is_still_found_by_the_clash_check() -> None:
-    """RFC 2445 let a client repeat it, and the list icalendar hands back for
-    that stringifies to its own repr, which matches no uid at all. The import
-    then reported the collection empty of it and overwrote the stored object."""
+    """RFC 2445 let a client repeat UID, and the list icalendar hands back for that
+    stringifies to its own repr."""
     stored = CaldavEvent(
         client=None,
         url="https://dav.test/cal/legacy-1.ics",
@@ -1477,7 +1378,6 @@ def test_a_uid_written_twice_is_still_found_by_the_clash_check() -> None:
 
 
 def test_importing_a_rule_nothing_can_expand_writes_nothing() -> None:
-    """Every poll of the collection would then hang on expanding it."""
     calendar = _missing_calendar()
 
     with pytest.raises(Refused) as refusal:
@@ -1512,9 +1412,6 @@ def test_creating_an_event_with_a_rule_nothing_can_expand_is_refused() -> None:
 
 
 def test_a_move_keeps_the_original_when_the_copy_will_not_land() -> None:
-    """Written first and deleted second. The other order costs the user the
-    only copy of the event whenever the target refuses the write: a full quota,
-    a collection they may only read, a connection that drops."""
     source, target = dav_calendar(), _missing_calendar()
     target.client.fail_from = 0
     stored = CaldavEvent(source.client, data=EVENT, url=f"{source.url}uid-1.ics")
@@ -1527,8 +1424,6 @@ def test_a_move_keeps_the_original_when_the_copy_will_not_land() -> None:
 
 
 def test_an_edit_meant_for_a_todo_refuses_a_resource_holding_none() -> None:
-    """Falling back to the first component instead wrote the item's summary,
-    its COMPLETED and its PERCENT-COMPLETE onto the meeting standing there."""
     calendar = Mock()
     calendar.todo_by_uid.return_value = Mock(
         icalendar_instance=ICalCalendar.from_ical(EVENT)
@@ -1539,9 +1434,8 @@ def test_an_edit_meant_for_a_todo_refuses_a_resource_holding_none() -> None:
 
 
 def test_a_drag_over_a_position_no_float_can_hold_still_lands() -> None:
-    """A value past what a float holds parses as inf, and int(inf) raises an
-    OverflowError, which is not one of the write errors: the drag springs back
-    with an untranslated "Unknown error" over a number the server only stored."""
+    """A value past what a float holds parses as inf, and int(inf) raises
+    OverflowError, which is not a ValueError."""
     todos = {
         "a": _ordered_todo("a", f"SUMMARY:a\r\n{SORT_ORDER_PROPERTY}:0"),
         "b": _ordered_todo("b", f"SUMMARY:b\r\n{SORT_ORDER_PROPERTY}:1024"),
@@ -1571,17 +1465,13 @@ def test_an_object_no_read_can_reach_is_skipped_by_a_scan_without_failing() -> N
         export_ics(calendar, "uid-1")
 
 
-# Text a caldav rewrite rule matches. RFC 5545 escapes none of it, so it
-# travels to the server exactly as the user typed it - or does not.
+# Text a caldav rewrite rule matches; RFC 5545 escapes none of it.
 _TRAP = "Deal COMPLETED:20260101 - archive the file"
 
 
 def test_an_import_puts_the_text_it_was_given_and_not_a_rewrite_of_it() -> None:
     """caldav puts every string assigned to a resource through vcal.fix, whose
-    COMPLETED rule is not anchored to the start of a line. A description
-    carrying that shape went on the wire rewritten, the space behind it eaten,
-    and the write reported success. Handed the document instead of its text,
-    caldav serializes it and leaves it alone."""
+    COMPLETED rule is not anchored to the start of a line."""
     calendar = _missing_calendar()
 
     import_ics(
@@ -1597,7 +1487,6 @@ def test_an_import_puts_the_text_it_was_given_and_not_a_rewrite_of_it() -> None:
 
 
 def test_a_move_carries_the_text_of_the_event_across_unaltered() -> None:
-    """The same rewrite reaches every path that hands caldav a string."""
     source, target = _missing_calendar(), _missing_calendar()
     source.event_by_uid.side_effect = None
     source.event_by_uid.return_value = Mock(
@@ -1620,11 +1509,8 @@ MIXED_RESOURCE = (
 
 
 def test_ticking_off_a_todo_leaves_the_event_sharing_its_resource() -> None:
-    """RFC 4791 gives a resource one component type, but one holding both under
-    a single uid does occur, and then the calendar shows the event while the
-    list shows the item. Answered with a DELETE on the resource, clearing the
-    item took the meeting with it: gone from the calendar, out of the recorder
-    history, with nothing said and no way back."""
+    """RFC 4791 gives a resource one component type, but one holding both under a
+    single uid does occur."""
     calendar = Mock()
     resource = _Resource(MIXED_RESOURCE)
     calendar.todo_by_uid.return_value = resource
@@ -1635,13 +1521,11 @@ def test_ticking_off_a_todo_leaves_the_event_sharing_its_resource() -> None:
     document = ICalCalendar.from_ical(resource.data)
     assert not document.walk("VTODO")
     assert str(_component(resource.data)["SUMMARY"]) == "Contract review"
-    # Nothing here revises the meeting, and caldav moves a SEQUENCE on the way
-    # out whatever it is told, so it is held back to where the server had it.
+    # caldav moves a SEQUENCE on the way out whatever it is told.
     assert int(_component(resource.data)["SEQUENCE"]) == 4
 
 
 def test_deleting_the_event_leaves_the_todo_sharing_its_resource() -> None:
-    """The same resource, taken from the other side."""
     calendar = Mock()
     resource = _Resource(MIXED_RESOURCE)
     calendar.event_by_uid.return_value = resource
@@ -1655,8 +1539,6 @@ def test_deleting_the_event_leaves_the_todo_sharing_its_resource() -> None:
 
 
 def test_deleting_the_last_component_removes_the_resource_itself() -> None:
-    """A document left holding nothing is one the next poll drops and no edit
-    can reach, which is a delete that never says so."""
     calendar = Mock()
     resource = _Resource(EVENT)
     calendar.event_by_uid.return_value = resource
@@ -1668,9 +1550,6 @@ def test_deleting_the_last_component_removes_the_resource_itself() -> None:
 
 
 def test_clearing_a_selection_says_which_item_was_gone_rather_than_scanning() -> None:
-    """A server answering the uid filter and reporting nothing is answering.
-    Falling back to a whole-collection scan on that would cost one download per
-    missing item on exactly the lists a bulk delete is used on."""
     calendar = Mock()
     calendar.todo_by_uid.side_effect = NotFoundError("gone")
 
@@ -1682,8 +1561,7 @@ def test_clearing_a_selection_says_which_item_was_gone_rather_than_scanning() ->
 
 def test_a_recurring_todo_with_no_date_at_all_is_simply_closed() -> None:
     """RFC 5545 leaves both DTSTART and DUE optional, and a rule has nothing to
-    step from without one. Read as a roll, the completion would raise on the
-    missing anchor and the item could never be ticked off."""
+    step from without one."""
     calendar = FakeTodoCalendar(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VTODO\r\n"
         "UID:t1\r\nDTSTAMP:20260101T000000Z\r\nSUMMARY:Water plants\r\n"
@@ -1798,3 +1676,118 @@ def test_setting_alarms_keeps_the_email_ones_it_cannot_write() -> None:
 
     actions = sorted(str(alarm["ACTION"]) for alarm in component.walk("VALARM"))
     assert actions == ["DISPLAY", "EMAIL"]
+
+
+def test_a_move_whose_delete_fails_takes_its_copy_back() -> None:
+    event, source, target = _move_pair()
+    event.delete.side_effect = requests.Timeout("slow")
+
+    with pytest.raises(requests.Timeout):
+        move_event(source, target, "uid-1", keep_original=False)
+
+    assert target.client.deletes == [f"{target.url}uid-1.ics"]
+
+
+def test_a_move_whose_delete_landed_before_the_timeout_keeps_its_copy() -> None:
+    event, source, target = _move_pair()
+    event.delete.side_effect = requests.Timeout("slow")
+    source.event_by_uid.side_effect = [event, NotFoundError("uid-1 is gone")]
+
+    with pytest.raises(requests.Timeout):
+        move_event(source, target, "uid-1", keep_original=False)
+
+    assert target.client.deletes == []
+
+
+UNREADABLE_RULE = (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VEVENT\r\n"
+    "UID:uid-1\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:20260706T090000Z\r\n"
+    "RRULE:FREQ=WEEKLY;UNTIL=2026-12-31\r\nSUMMARY:Standup\r\n"
+    "END:VEVENT\r\nEND:VCALENDAR\r\n"
+)
+
+
+def test_an_import_refuses_a_line_it_cannot_read() -> None:
+    calendar = _missing_calendar()
+
+    with pytest.raises(Refused, match="unreadable_lines") as raised:
+        import_ics(calendar, UNREADABLE_RULE)
+
+    assert raised.value.placeholders == {"lines": "RRULE"}
+    assert _written(calendar) == []
+
+
+def test_an_import_refuses_an_event_and_a_todo_under_one_uid() -> None:
+    calendar = _missing_calendar()
+    document = EVENT.replace(
+        "END:VCALENDAR",
+        "BEGIN:VTODO\r\nUID:uid-1\r\nDTSTAMP:20260101T000000Z\r\n"
+        "SUMMARY:Slides\r\nEND:VTODO\r\nEND:VCALENDAR",
+    )
+
+    with pytest.raises(Refused, match="duplicate_uid"):
+        import_ics(calendar, document)
+
+    assert _written(calendar) == []
+
+
+def test_the_export_names_the_lines_it_could_not_carry(caplog) -> None:
+    item = Mock(url="https://dav.test/cal/uid-1.ics")
+    item.icalendar_instance = ICalCalendar.from_ical(UNREADABLE_RULE)
+    calendar = Mock()
+    calendar.search.side_effect = [[item], []]
+
+    export_ics(calendar, None)
+
+    assert "RRULE" in caplog.text
+
+
+def test_swapping_two_neighbors_writes_the_one_that_moved_up() -> None:
+    calendar = Mock()
+    todos = {
+        letter: _ordered_todo(
+            letter, f"SUMMARY:{letter}\r\nX-APPLE-SORT-ORDER:{n * _SORT_GAP}"
+        )
+        for n, letter in enumerate("abcd")
+    }
+    calendar.search.return_value = list(todos.values())
+
+    reorder_todos(calendar, ["a", "c", "b", "d"])
+
+    assert [letter for letter, todo in todos.items() if todo.save.called] == ["c"]
+    assert _order(todos) == ["a", "c", "b", "d"]
+
+
+@pytest.mark.parametrize("frequency", ["SECONDLY", "MINUTELY"])
+def test_a_new_event_denser_than_hourly_is_refused(frequency: str) -> None:
+    calendar = Mock()
+
+    with pytest.raises(Refused, match="rrule_too_dense"):
+        create_event(
+            calendar,
+            {
+                "summary": "Tick",
+                "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+                "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+                "rrule": f"FREQ={frequency}",
+            },
+        )
+
+    calendar.save_event.assert_not_called()
+
+
+def test_an_all_day_series_takes_its_end_as_a_date() -> None:
+    calendar = Mock()
+
+    create_event(
+        calendar,
+        {
+            "summary": "Trip",
+            "dtstart": date(2026, 7, 6),
+            "dtend": date(2026, 7, 7),
+            "rrule": "FREQ=DAILY;UNTIL=20260710T000000Z",
+        },
+    )
+
+    body = calendar.save_event.call_args.args[0].to_ical().decode("utf-8")
+    assert _component(body)["RRULE"]["UNTIL"] == [date(2026, 7, 10)]

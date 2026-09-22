@@ -1,11 +1,10 @@
-"""Tests for the account setup, the shared poller and the repair issues."""
-
 from datetime import timedelta
 from unittest.mock import Mock, patch
 
 from caldav.davclient import requests
 from caldav.elements import dav
 from caldav.lib.error import AuthorizationError
+from conftest import propfind_answer
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import (
     CONF_PASSWORD,
@@ -87,8 +86,7 @@ async def test_calendar_and_todo_share_one_poller(hass: HomeAssistant) -> None:
     calendar = _entity(hass, "calendar", "calendar.personal")
     todo = _entity(hass, "todo", "todo.personal")
 
-    # Both live in the same collection under one sync token; polling twice
-    # would double the work for nothing.
+    # Both live in the same collection under one sync token.
     assert calendar.coordinator is todo.coordinator
 
 
@@ -146,7 +144,6 @@ async def test_the_issue_clears_once_the_server_can_report_again(
         await hass.config_entries.async_reload(entry.entry_id)
         await hass.async_block_till_done()
 
-    # A warning nobody can act on any more has to go away by itself.
     assert registry.async_get_issue(DOMAIN, issue_id) is None
 
 
@@ -159,7 +156,6 @@ async def test_entities_for_a_component_the_calendar_lost_are_removed(
     registry = er.async_get(hass)
     assert registry.async_get("todo.personal") is not None
 
-    # The server now says the calendar only holds events.
     with (
         patch("custom_components.ha_caldav.caldav.DAVClient") as client,
         patch(
@@ -240,8 +236,8 @@ async def test_a_reload_keeps_a_dismissed_issue(hass: HomeAssistant) -> None:
         await hass.config_entries.async_reload(entry.entry_id)
         await hass.async_block_till_done()
 
-    # Deleting the issue would drop the record of the dismissal, and changing
-    # any option reloads the entry.
+    # Deleting an issue drops the record of its dismissal, and changing any option
+    # reloads the entry.
     issue = registry.async_get_issue(DOMAIN, issue_id)
     assert issue is not None
     assert issue.dismissed_version is not None
@@ -281,7 +277,6 @@ async def test_upcoming_event_attributes_come_from_the_snapshot(
 
 
 async def _connect_with(hass: HomeAssistant, error, url: str | None = None):
-    """Set up an entry whose calendar listing raises, and return the entry."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="iven",
@@ -315,7 +310,6 @@ async def test_a_403_is_retried_rather_than_sent_to_reauth(hass: HomeAssistant) 
 
     assert entry.state is ConfigEntryState.SETUP_RETRY
     assert not hass.config_entries.flow.async_progress()
-    # Both candidate urls were tried, and each session handed back.
     assert client.return_value.close.call_count == 2
 
 
@@ -323,6 +317,7 @@ async def test_an_unreachable_server_is_retried(hass: HomeAssistant) -> None:
     entry, _ = await _connect_with(hass, requests.ConnectionError("boom"))
 
     assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert entry.error_reason_translation_key == "cannot_connect"
 
 
 async def test_the_well_known_url_is_tried_after_the_entered_one(
@@ -344,9 +339,7 @@ async def test_the_session_is_handed_back_when_setup_gives_up(
 ) -> None:
     _, client = await _connect_with(hass, requests.ConnectionError("boom"))
 
-    # Once per candidate url, or the pooled sockets leak on every retry. That
-    # it happens in the executor is not observable here: the test harness runs
-    # a Mock handed to async_add_executor_job on the loop anyway.
+    # The test harness runs a Mock handed to async_add_executor_job on the loop.
     assert client.return_value.close.call_count == 2
 
 
@@ -363,7 +356,6 @@ async def test_an_account_whose_calendars_all_fail_is_not_ready(
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-    # Setting up "successfully" here would leave dead entities behind.
     assert entry.state is ConfigEntryState.SETUP_RETRY
 
 
@@ -379,8 +371,7 @@ async def test_a_server_answering_with_nonsense_is_retried_not_given_up_on(
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-        # SETUP_ERROR would never be retried, so the entry would stay dead
-        # until someone reloaded it by hand.
+        # Home Assistant never retries SETUP_ERROR.
         assert entry.state is ConfigEntryState.SETUP_RETRY
         assert client.return_value.close.called
 
@@ -425,14 +416,12 @@ async def test_a_selection_stored_by_name_still_loads_its_calendar(
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-    # Written before the selection keyed on the url.
     assert [item.name for item in entry.runtime_data.calendars] == ["Personal"]
 
 
 async def _setup_with(
     hass: HomeAssistant, calendars: list, options: dict | None = None
 ):
-    """Set an entry up against a given calendar list and options."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="iven",
@@ -449,9 +438,6 @@ async def _setup_with(
 
 
 async def test_an_account_with_no_calendars_still_sets_up(hass: HomeAssistant) -> None:
-    # A brand-new account has none yet. Treating that as "nothing could be
-    # read" would leave the entry retrying forever instead of showing an
-    # account waiting for its first calendar.
     entry = await _setup_with(hass, [])
 
     assert entry.state is ConfigEntryState.LOADED
@@ -460,9 +446,6 @@ async def test_an_account_with_no_calendars_still_sets_up(hass: HomeAssistant) -
 async def test_an_entry_with_an_empty_selection_falls_back_to_every_calendar(
     hass: HomeAssistant,
 ) -> None:
-    # The options form refuses an empty selection, so this shape only reaches
-    # setup from a hand-edited entry. Loading nothing there would look like a
-    # broken integration; the form is where the choice is made.
     await _setup_with(hass, [_calendar("Personal")], options={CONF_CALENDARS: []})
 
     assert hass.states.get("calendar.personal") is not None
@@ -471,8 +454,6 @@ async def test_an_entry_with_an_empty_selection_falls_back_to_every_calendar(
 async def test_an_entry_keyed_before_normalization_is_rekeyed(
     hass: HomeAssistant,
 ) -> None:
-    """It could otherwise be set up a second time under its other spelling,
-    doubling every calendar and to-do list on the account."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -491,7 +472,6 @@ async def test_an_entry_keyed_before_normalization_is_rekeyed(
 
 
 async def _reload_with(hass: HomeAssistant, entry, calendars: list) -> None:
-    """Reload an entry against a different answer from the account."""
     with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
         client.return_value.principal.return_value.calendars.return_value = calendars
         await hass.config_entries.async_reload(entry.entry_id)
@@ -501,11 +481,6 @@ async def _reload_with(hass: HomeAssistant, entry, calendars: list) -> None:
 async def test_a_calendar_missing_from_one_answer_keeps_its_entities(
     hass: HomeAssistant,
 ) -> None:
-    """A server having a bad minute is not a decision to stop tracking a
-    calendar, and answering it by deleting the registry record takes the
-    recorder history, the automations, the dashboard cards and the name
-    overrides that point at the entity with it, irreversibly and while setup
-    still reports success."""
     personal, work = _calendar("Personal"), _calendar("Work")
     entry = await _setup_with(
         hass,
@@ -529,9 +504,6 @@ async def test_a_calendar_missing_from_one_answer_keeps_its_entities(
 async def test_a_calendar_the_user_unticked_loses_its_entities(
     hass: HomeAssistant,
 ) -> None:
-    # The account still lists it, so the selection is the only thing leaving it
-    # out: that is a decision, and the entities would otherwise stay in the
-    # registry as permanently unavailable.
     personal, work = _calendar("Personal"), _calendar("Work")
     entry = await _setup_with(
         hass,
@@ -552,10 +524,8 @@ async def test_a_calendar_the_user_unticked_loses_its_entities(
 
 
 async def test_the_migration_is_reachable_at_all(hass: HomeAssistant) -> None:
-    """Home Assistant compares the stored version against the handler's and
-    returns before loading the component when they agree, so a migration
-    written for entries that already carry the current number never runs and
-    the account it was written for is set up twice."""
+    """Home Assistant runs a migration only when the stored version differs from
+    the handler's."""
     from custom_components.ha_caldav.config_flow import HaCaldavConfigFlow
 
     entry = MockConfigEntry(
@@ -579,8 +549,6 @@ async def test_the_migration_is_reachable_at_all(hass: HomeAssistant) -> None:
 async def test_the_migration_rekeys_entities_off_the_bare_url(
     hass: HomeAssistant,
 ) -> None:
-    # Keyed on the url as it stood, the reconfigure step renamed every entity
-    # to _2 the first time the account moved from http to https.
     entry = MockConfigEntry(
         domain=DOMAIN, data=ENTRY_DATA, unique_id="stale", minor_version=1
     )
@@ -603,9 +571,6 @@ async def test_the_migration_rekeys_entities_off_the_bare_url(
 async def test_a_password_revoked_before_the_first_poll_asks_for_reauth(
     hass: HomeAssistant,
 ) -> None:
-    """It belongs in reauth, not in the retry loop: the principal lookup went
-    through, so nothing else will notice, and the entry would retry forever
-    without ever prompting for the new password."""
     calendar = _calendar("Personal")
     calendar.search.side_effect = AuthorizationError(reason="Unauthorized")
     entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
@@ -626,9 +591,6 @@ async def test_a_password_revoked_before_the_first_poll_asks_for_reauth(
 async def test_the_builtin_conflict_is_found_through_another_spelling(
     hass: HomeAssistant,
 ) -> None:
-    """The built-in integration is set up on its own, so the one spelling that
-    would not warn is the one where the two were typed differently - which is
-    most of them, and the user sees every calendar and to-do list twice."""
     builtin = MockConfigEntry(
         domain="caldav",
         data={
@@ -638,8 +600,6 @@ async def test_the_builtin_conflict_is_found_through_another_spelling(
         },
     )
     builtin.add_to_hass(hass)
-    # Ours needs normalizing too, or the comparison would come out right
-    # without it and prove nothing.
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="iven",
@@ -659,9 +619,6 @@ async def test_the_builtin_conflict_is_found_through_another_spelling(
 async def test_a_calendar_the_account_stopped_listing_is_not_pruned(
     hass: HomeAssistant,
 ) -> None:
-    """Decided against what the account listed, not against what was loaded out
-    of it: those differ exactly when a selected calendar is missing from one
-    answer, and deleting its record then is irreversible."""
     from custom_components.ha_caldav import _async_prune_deselected
 
     personal, work = _calendar("Personal"), _calendar("Work")
@@ -676,7 +633,6 @@ async def test_a_calendar_the_account_stopped_listing_is_not_pruned(
         for record in er.async_entries_for_config_entry(registry, entry.entry_id)
     }
 
-    # The server answers with Personal alone this time.
     _async_prune_deselected(hass, entry, [personal], registry)
 
     after = {
@@ -689,11 +645,7 @@ async def test_a_calendar_the_account_stopped_listing_is_not_pruned(
 async def test_the_migration_tells_the_two_halves_apart_by_platform(
     hass: HomeAssistant,
 ) -> None:
-    """A collection url may itself end in "-todo", and calendar_key drops a
-    trailing slash and a query string, so reading the suffix off the key cannot
-    tell the two entities apart. Where both mapped onto one key the second
-    re-key was refused and that entity stayed unavailable for good, with
-    minor_version already bumped so nothing would try again."""
+    """A collection url may itself end in "-todo"."""
     entry = MockConfigEntry(
         domain=DOMAIN, data=ENTRY_DATA, unique_id="stale", minor_version=1
     )
@@ -717,9 +669,7 @@ async def test_the_migration_tells_the_two_halves_apart_by_platform(
 async def test_the_migration_leaves_a_key_that_is_not_ours_alone(
     hass: HomeAssistant,
 ) -> None:
-    """An entity registered under this entry need not be one of ours: a helper
-    or a template built on the account carries a key of its own shape, and
-    rebuilding one would point it at a calendar."""
+    """An entity registered under this entry need not be one of ours."""
     entry = MockConfigEntry(
         domain=DOMAIN, data=ENTRY_DATA, unique_id="stale", minor_version=1
     )
@@ -737,9 +687,6 @@ async def test_the_migration_leaves_a_key_that_is_not_ours_alone(
 async def test_the_migration_keeps_a_duplicate_visible_rather_than_failing(
     hass: HomeAssistant,
 ) -> None:
-    """Two urls differing only in what the normalization drops land on one key.
-    Raising there would fail the whole setup for an account whose other
-    calendars are fine, and every entity on it would go with them."""
     entry = MockConfigEntry(
         domain=DOMAIN, data=ENTRY_DATA, unique_id="stale", minor_version=1
     )
@@ -757,7 +704,6 @@ async def test_the_migration_keeps_a_duplicate_visible_rather_than_failing(
 
     normalized = f"{entry.entry_id}-/remote.php/dav/personal"
     assert registry.async_get(first.entity_id).unique_id == normalized
-    # Left where it was, and still in the registry for the user to see.
     assert registry.async_get(second.entity_id).unique_id == f"{entry.entry_id}-{url}/"
 
 
@@ -809,7 +755,6 @@ async def test_an_entity_carries_the_calendar_name_alone(hass: HomeAssistant) ->
 
 
 def _older_install(hass: HomeAssistant, **entity: object) -> MockConfigEntry:
-    """Register the account device earlier versions made, one entity under it."""
     entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
     entry.add_to_hass(hass)
     device = dr.async_get(hass).async_get_or_create(
@@ -870,19 +815,16 @@ async def test_an_entity_disabled_with_the_account_device_stays_disabled(
 
 
 def _home_set(principal: Mock) -> None:
-    """Answer the color poll with the home set, its inbox and what is listed."""
     found: dict[str, dict] = {"/remote.php/dav/": {}, "/remote.php/dav/inbox/": {}}
     for calendar in principal.calendars.return_value:
         found[f"{calendar_key(calendar.url)}/"] = {
             dav.DisplayName.tag: Mock(text=calendar.name)
         }
-    answer = principal.calendar_home_set.get_properties.return_value
-    answer.find_objects_and_props.return_value = found
+    principal.calendar_home_set.get_properties.return_value = propfind_answer(found)
 
 
 @pytest.fixture
 def principal():
-    """An account holding Personal, which a test may add calendars to."""
     with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
         principal = client.return_value.principal.return_value
         principal.calendars.return_value = [_calendar("Personal")]
@@ -976,7 +918,6 @@ async def test_a_calendar_renamed_on_the_server_is_renamed_at_the_next_poll(
 
 
 def _renamed_by_the_server(principal: Mock) -> Mock:
-    """Return the calendar, answering a rename the way a server would."""
     calendar = principal.calendars.return_value[0]
     calendar.set_properties.side_effect = lambda props: setattr(
         calendar, "name", props[0].value
@@ -996,7 +937,6 @@ async def test_a_rename_in_home_assistant_renames_the_calendar_on_the_server(
 
     calendar.set_properties.assert_called_once()
     assert calendar.set_properties.call_args.args[0][0].value == "Private"
-    # The server holds the name now, so a later rename there comes through.
     assert er.async_get(hass).async_get(entity_id).name is None
     assert hass.states.get("calendar.personal").name == "Private"
     assert hass.states.get("todo.personal").name == "Private"
@@ -1053,7 +993,6 @@ async def test_a_name_given_before_the_update_is_not_written_to_the_server(
 async def test_a_selection_stored_by_name_survives_a_rename_on_the_server(
     hass: HomeAssistant, principal: Mock
 ) -> None:
-    # Entries written before v1.2.0 selected by display name.
     entry = await _setup_on_account(hass, {CONF_CALENDARS: ["Personal"]})
     assert entry.options[CONF_CALENDARS] == ["/remote.php/dav/Personal"]
 
@@ -1139,3 +1078,55 @@ async def test_a_rename_saved_with_a_new_entity_id_reaches_the_server(
 
     calendar.set_properties.assert_called_once()
     assert calendar.set_properties.call_args.args[0][0].value == "Private"
+
+
+async def test_a_401_on_the_entered_url_still_tries_the_bootstrap(
+    hass: HomeAssistant,
+) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    listed = Mock()
+    listed.calendars.return_value = [_calendar("Personal")]
+    refusals = iter([AuthorizationError(reason="Unauthorized")])
+
+    def principal() -> Mock:
+        if (refusal := next(refusals, None)) is not None:
+            raise refusal
+        return listed
+
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.side_effect = principal
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+
+
+async def test_a_color_poll_turned_away_asks_for_a_new_password(
+    hass: HomeAssistant,
+) -> None:
+    entry = await _setup(hass)
+    colors = entry.runtime_data.colors
+    colors.client.principal.side_effect = AuthorizationError(reason="Unauthorized")
+
+    await colors.async_refresh()
+    await hass.async_block_till_done()
+
+    assert any(
+        flow["context"]["source"] == "reauth"
+        for flow in hass.config_entries.flow.async_progress()
+    )
+
+
+async def test_an_entry_left_by_a_later_minor_version_is_not_migrated_back(
+    hass: HomeAssistant,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN, data=ENTRY_DATA, unique_id="kept", minor_version=3
+    )
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry)
+
+    assert entry.unique_id == "kept"
+    assert entry.minor_version == 3

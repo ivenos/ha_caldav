@@ -60,12 +60,18 @@ _BY_RANGES = {
 }
 
 
+_TOO_DENSE = frozenset({"SECONDLY", "MINUTELY"})
+
+
 def check_rule(recur: Any, dtstart: datetime | date) -> None:
     """Refuse a rule before it is stored rather than after.
 
     A rule producing nothing has dateutil search to the year 9999 on every
-    poll, and an object stored with one cannot be deleted from here.
+    poll, and an object stored with one cannot be deleted from here. caldav
+    expands each poll window in memory, a week of a minutely rule to 10,080.
     """
+    if str((recur.get("FREQ") or [""])[0]).upper() in _TOO_DENSE:
+        raise Refused("rrule_too_dense")
     if next(iter(rule_from(recur, dtstart)), None) is None:
         raise Refused("invalid_rrule", reason=recur.to_ical().decode("utf-8"))
 
@@ -150,7 +156,7 @@ def hold_sequence(component: Any) -> None:
     """Set SEQUENCE one low so caldav's bump lands back on the current value.
 
     caldav 2.1.0 bumps regardless of increase_seqno, and RFC 5546 lets only
-    the organizer move SEQUENCE. A test pins the number on the wire.
+    the organizer move SEQUENCE.
     """
     try:
         current = int(component.get("SEQUENCE"))
@@ -180,7 +186,7 @@ def shifted(value: Any, delta: timedelta, zone: Any) -> Any:
     return wall.replace(tzinfo=anchor).astimezone(value.tzinfo)
 
 
-def _dts(entry: Any) -> list[Any]:
+def holders(entry: Any) -> list[Any]:
     """Return the value holders of an EXDATE/RDATE entry.
 
     A parsed line is a vDDDLists exposing .dts; a single value added at
@@ -196,7 +202,7 @@ def date_values(component: Any, key: str) -> list[Any]:
     entries = component[key]
     if not isinstance(entries, list):
         entries = [entries]
-    return [item.dt for entry in entries for item in _dts(entry)]
+    return [item.dt for entry in entries for item in holders(entry)]
 
 
 def start_of(value: Any) -> datetime | date:

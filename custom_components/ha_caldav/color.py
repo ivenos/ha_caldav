@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 from typing import NamedTuple
-from urllib.parse import urlparse
 
 import caldav
 from caldav.elements import dav, ical
 from homeassistant.util.color import color_name_to_rgb
+
+from .capability import objects_and_props
 
 _HEX = re.compile(r"[0-9a-fA-F]+")
 _EXPANDABLE = (3, 4)
@@ -54,13 +55,10 @@ def fetch_collections(client: caldav.DAVClient) -> dict[str, Collection]:
         [ical.CalendarColor(), dav.DisplayName()], depth=1, parse_response_xml=False
     )
     collections: dict[str, Collection] = {}
-    # The element itself: caldav's expansion logs an error for an unknown
-    # attribute, and Apple sends one. The href is already unquoted.
-    for href, props in response.find_objects_and_props().items():
+    for key, props in objects_and_props(response, home.url).items():
         color = props.get(ical.CalendarColor.tag)
         name = props.get(dav.DisplayName.tag)
-        path = urlparse(href).path if "://" in href else href
-        collections[path.rstrip("/")] = Collection(
+        collections[key] = Collection(
             None if color is None else normalize_color(color.text),
             None if name is None else name.text or None,
         )

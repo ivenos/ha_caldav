@@ -1,5 +1,3 @@
-"""Tests for urls and for turning connection details into client arguments."""
-
 from unittest.mock import Mock, patch
 
 from caldav.davclient import requests
@@ -12,6 +10,7 @@ from custom_components.ha_caldav.connection import (
     build_client,
     calendar_key,
     connection_kwargs,
+    size_pool,
     url_candidates,
     without_userinfo,
 )
@@ -56,7 +55,6 @@ def test_a_certificate_and_key_are_passed_as_a_pair() -> None:
 
 
 def _probe(resolved: str | None = None, hops: list[str] | None = None):
-    """Stub the unauthenticated bootstrap lookup with where it ended up."""
     response = Mock()
     response.url = resolved
     response.history = [Mock(url=hop) for hop in hops or []]
@@ -77,9 +75,6 @@ SAME_ACCOUNT = [
 
 @pytest.mark.parametrize("url", SAME_ACCOUNT)
 def test_one_account_keys_the_same_however_it_was_typed(url: str) -> None:
-    """The key is the config entry unique_id. Keyed on the text as entered, the
-    same account is set up a second time and every calendar and to-do list of
-    it appears twice."""
     assert account_key(url, "iven") == account_key(SAME_ACCOUNT[0], "iven")
 
 
@@ -93,8 +88,6 @@ def test_one_account_keys_the_same_however_it_was_typed(url: str) -> None:
     ],
 )
 def test_a_different_account_keys_differently(url: str) -> None:
-    # A non-default port, another scheme, another host and another path each
-    # name a server this one has no claim on.
     assert account_key(url, "iven") != account_key(SAME_ACCOUNT[0], "iven")
 
 
@@ -116,15 +109,11 @@ def test_an_ipv6_host_keys_without_losing_its_brackets() -> None:
 
 
 def test_a_url_urlparse_refuses_still_keys() -> None:
-    # A key is what the entry is stored under; raising here would leave the
-    # account impossible to set up rather than merely oddly keyed.
     assert account_key("https://dav.example.com:notaport/dav", "iven").endswith("#iven")
 
 
 def test_a_bootstrap_that_steps_out_of_https_is_ignored() -> None:
-    """A proxy terminating TLS without X-Forwarded-Proto writes its redirects
-    as http. Following one puts the account password on the wire in clear, and
-    stores that url for every poll after it."""
+    """A proxy terminating TLS without X-Forwarded-Proto redirects to http."""
     with _probe(
         resolved="https://dav.example.com/dav/",
         hops=["https://dav.example.com/.well-known/caldav", "http://dav.example.com/"],
@@ -135,7 +124,6 @@ def test_a_bootstrap_that_steps_out_of_https_is_ignored() -> None:
 
 
 def test_a_bootstrap_landing_on_plain_http_is_ignored() -> None:
-    # The last hop counts too, not only the ones in between.
     with _probe(resolved="http://dav.example.com/dav/"):
         candidates = list(url_candidates("https://dav.example.com", {}))
 
@@ -143,8 +131,6 @@ def test_a_bootstrap_landing_on_plain_http_is_ignored() -> None:
 
 
 def test_a_bootstrap_entered_as_http_may_stay_on_http() -> None:
-    # Nothing was promised, so nothing is broken; refusing here would leave a
-    # plain-http server unreachable rather than more secure.
     with _probe(resolved="http://dav.example.com/dav/"):
         candidates = list(url_candidates("http://dav.example.com", {}))
 
@@ -152,13 +138,27 @@ def test_a_bootstrap_entered_as_http_may_stay_on_http() -> None:
 
 
 def test_the_bootstrap_result_is_stripped_of_userinfo() -> None:
-    """caldav prefers userinfo in the url over the account handed to it, so a
-    redirect naming its own would authenticate as whoever it likes."""
+    """caldav prefers userinfo in the url over the account handed to it."""
     with _probe(resolved="https://intruder:secret@dav.example.com/dav/"):
         candidates = list(url_candidates("https://dav.example.com", {}))
 
     assert candidates == ["https://dav.example.com", "https://dav.example.com/dav/"]
     assert not any("intruder" in candidate for candidate in candidates)
+
+
+def test_a_bootstrap_pointing_back_at_the_entered_url_is_not_tried_twice() -> None:
+    with _probe(resolved="https://dav.example.com/dav/"):
+        candidates = list(url_candidates("https://dav.example.com/dav", {}))
+
+    assert candidates == ["https://dav.example.com/dav"]
+
+
+def test_the_pool_holds_a_connection_for_every_calendar_and_the_colors() -> None:
+    client = Mock(session=HostLockedSession())
+
+    size_pool(client, 14)
+
+    assert client.session.get_adapter("https://dav.example.com")._pool_maxsize == 15
 
 
 def _candidates(url: str, resolved: str | None = None) -> list[str]:
@@ -202,8 +202,6 @@ def test_the_scheme_of_the_entered_url_is_kept() -> None:
 
 
 def test_the_entered_url_is_yielded_without_asking_the_server() -> None:
-    # The lookup costs a request; a server that answers the entered url
-    # directly must not pay for it.
     with patch("custom_components.ha_caldav.connection.requests.request") as request:
         candidates = url_candidates("https://cloud.example.com", {})
         assert next(candidates) == "https://cloud.example.com"
@@ -211,9 +209,7 @@ def test_the_entered_url_is_yielded_without_asking_the_server() -> None:
 
 
 def test_the_bootstrap_is_followed_to_where_it_lands() -> None:
-    # RFC 6764 exists so the host you type need not be the one holding the
-    # account. Authenticating against the settled url rather than following the
-    # redirect later is what keeps the handshake off the intermediate hops.
+    # RFC 6764 lets the host you type differ from the one holding the account.
     assert _candidates("https://example.com", "https://dav.example.net/dav/") == [
         "https://example.com",
         "https://dav.example.net/dav/",
@@ -238,8 +234,6 @@ def test_the_bootstrap_lookup_carries_no_credentials() -> None:
 
 
 def test_the_bootstrap_lookup_keeps_the_accounts_tls_settings() -> None:
-    # A self-signed or client-certificate account would otherwise lose its
-    # bootstrap candidate to a verification error it already answered for.
     kwargs = {
         "ssl_verify_cert": "/etc/ca.pem",
         "ssl_cert": ("/etc/client.pem", "/etc/client.key"),
@@ -265,7 +259,6 @@ def test_defaults_apply_when_nothing_was_configured() -> None:
 
 
 def _redirected(source: str, target: str):
-    """Return the pair a session sees when a request is redirected."""
     response = Mock()
     response.request.url = source
     prepared = Mock()
@@ -284,8 +277,8 @@ def _redirected(source: str, target: str):
     ],
 )
 def test_a_redirect_off_the_host_takes_the_digest_hook_with_it(target: str) -> None:
-    # The header alone is not enough: digest answers its challenge from a hook
-    # on the request, which survives the hop and re-signs for whoever answers.
+    # requests' digest auth answers its challenge from a hook on the request, which
+    # survives the hop.
     prepared, response = _redirected("https://cloud.example.com/dav/", target)
 
     HostLockedSession().rebuild_auth(prepared, response)
@@ -329,8 +322,7 @@ def test_calendar_key_matches_both_spellings(url, expected) -> None:
 
 
 def test_credentials_in_the_url_are_dropped() -> None:
-    # caldav logs the url it was handed twice before stripping those itself,
-    # and the form has its own fields for both.
+    # caldav logs the url it was handed twice before stripping those itself.
     assert (
         without_userinfo("https://alice:hunter2@cloud.example.com/remote.php/dav")
         == "https://cloud.example.com/remote.php/dav"
@@ -356,7 +348,6 @@ def test_stripping_userinfo_keeps_an_ipv6_literal_bracketed() -> None:
 
 
 def test_a_url_too_malformed_to_parse_does_not_escape_the_flow() -> None:
-    """It reaches the connection attempt, which fails into an ordinary error."""
     from custom_components.ha_caldav.connection import url_candidates, without_userinfo
 
     broken = "https://[cloud.example.com/dav"
@@ -376,9 +367,7 @@ def test_a_password_comes_off_a_url_too_malformed_to_parse() -> None:
 
 
 def test_stored_connection_details_carry_no_userinfo() -> None:
-    """caldav prefers userinfo in the url over the account handed to it, so a
-    url pasted with credentials in it would authenticate as whoever it names -
-    and the entry would keep that password in a second place forever."""
+    """caldav prefers userinfo in the url over the account handed to it."""
     from custom_components.ha_caldav.config_flow import _cleaned
 
     cleaned = _cleaned(
@@ -403,51 +392,72 @@ def test_a_password_holding_an_at_sign_comes_off_a_malformed_url() -> None:
     assert stripped == "https://cloud.example.com:80o/dav"
 
 
-def _answer(status: int, url: str, *, moved: int | None = None) -> Mock:
+def _answer(status: int, url: str, *, location: str | None = None) -> Mock:
     return Mock(
         status_code=status,
         url=url,
         reason="",
-        history=[] if moved is None else [Mock(status_code=moved)],
+        headers={} if location is None else {"Location": location},
     )
 
 
-def test_a_body_a_redirect_on_the_same_host_dropped_is_sent_again() -> None:
-    # requests drops the body on a 301, and a PROPFIND without one is allprop.
+@pytest.mark.parametrize("status", [301, 302, 307, 308])
+@pytest.mark.parametrize("method", ["PROPFIND", "DELETE"])
+def test_a_write_redirected_on_the_same_host_goes_on_as_it_was_sent(
+    method: str, status: int
+) -> None:
     session = HostLockedSession()
-    moved = _answer(207, "https://cloud.example.com/dav/", moved=301)
-    again = _answer(207, "https://cloud.example.com/dav/")
+    moved = _answer(status, "https://cloud.example.com/dav", location="/dav/")
+    answer = _answer(207, "https://cloud.example.com/dav/")
 
-    with patch.object(requests.Session, "request", side_effect=[moved, again]) as sent:
-        response = session.request(
-            "PROPFIND", "https://cloud.example.com/dav", data="<propfind/>"
-        )
+    with patch.object(requests.Session, "request", side_effect=[moved, answer]) as sent:
+        response = session.request(method, "https://cloud.example.com/dav", data="<x/>")
 
-    assert response is again
-    assert sent.call_args.args == ("PROPFIND", "https://cloud.example.com/dav/")
-    assert sent.call_args.kwargs["data"] == "<propfind/>"
-    assert session.moved_to == "https://cloud.example.com/dav/"
+    assert response is answer
+    assert [call.args for call in sent.call_args_list] == [
+        (method, "https://cloud.example.com/dav"),
+        (method, "https://cloud.example.com/dav/"),
+    ]
+    for call in sent.call_args_list:
+        assert call.kwargs["data"] == "<x/>"
+        assert call.kwargs["allow_redirects"] is False
+    assert session.moved_to == (
+        None if status == 307 else "https://cloud.example.com/dav/"
+    )
 
 
 @pytest.mark.parametrize(
-    ("target", "moved"),
+    ("location", "moved"),
     [
         ("https://elsewhere.example/dav/", 301),
         ("https://cloud.example.com/dav/", 303),
     ],
     ids=["another_host", "see_other"],
 )
-def test_a_redirect_the_body_does_not_follow_is_left_alone(
-    target: str, moved: int
+def test_a_redirect_the_write_does_not_follow_is_answered_as_it_came(
+    location: str, moved: int
 ) -> None:
     session = HostLockedSession()
-    answer = _answer(207, target, moved=moved)
+    answer = _answer(moved, "https://cloud.example.com/dav", location=location)
 
     with patch.object(requests.Session, "request", return_value=answer) as sent:
-        session.request("PROPFIND", "https://cloud.example.com/dav", data="<x/>")
+        response = session.request(
+            "PROPFIND", "https://cloud.example.com/dav", data="<x/>"
+        )
 
+    assert response is answer
     assert sent.call_count == 1
     assert session.moved_to is None
+
+
+def test_a_read_leaves_its_redirects_to_requests() -> None:
+    session = HostLockedSession()
+    answer = _answer(200, "https://cloud.example.com/dav/")
+
+    with patch.object(requests.Session, "request", return_value=answer) as sent:
+        session.request("GET", "https://cloud.example.com/dav")
+
+    assert "allow_redirects" not in sent.call_args.kwargs
 
 
 @pytest.mark.parametrize(

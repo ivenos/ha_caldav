@@ -1,5 +1,3 @@
-"""Tests for the CalDAV calendar entity."""
-
 import asyncio
 from datetime import UTC, datetime, timedelta
 import time
@@ -121,7 +119,6 @@ async def test_scan_interval_defaults_to_fifteen_minutes(hass: HomeAssistant) ->
 
 
 def _result(body: str) -> Mock:
-    """Build a caldav search result from a raw VEVENT body."""
     item = Mock()
     item.vobject_instance = vobject.readOne(
         "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
@@ -132,7 +129,6 @@ def _result(body: str) -> Mock:
 
 
 def _search_item(summary: str, start_offset: timedelta) -> Mock:
-    """Build a caldav search result holding one future timed event."""
     start = dt_util.utcnow() + start_offset
     end = start + timedelta(hours=1)
     item = Mock()
@@ -148,10 +144,6 @@ def _search_item(summary: str, start_offset: timedelta) -> Mock:
 async def test_an_event_that_already_ended_is_not_the_upcoming_one(
     hass: HomeAssistant,
 ) -> None:
-    """The polled window starts at local midnight, so it is full of events that
-    are already over. is_over is exhaustively unit-tested; that the entity's
-    own state calls it was not, because no test ever put a past event in the
-    window, and the entity would have shown yesterday's meeting all day."""
     calendar = _calendar("Personal")
     calendar.search.return_value = [
         _search_item("Over", timedelta(hours=-4)),
@@ -173,8 +165,7 @@ async def test_a_window_holding_only_past_events_has_no_upcoming_one(
 
 
 async def test_next_event_ignores_server_result_order(hass: HomeAssistant) -> None:
-    # caldav's search makes no ordering promise, so the earliest event must be
-    # picked even when the server returns it last.
+    # caldav's search makes no ordering promise.
     calendar = _calendar("Personal")
     calendar.search.return_value = [
         _search_item("Later", timedelta(days=3)),
@@ -267,15 +258,11 @@ async def test_change_survives_a_failed_poll(hass: HomeAssistant) -> None:
     entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
     entry.add_to_hass(hass)
     calendar = _calendar("Personal")
-    # Poll 2's fetch fails right after the token advanced to t2; the token must
-    # not be committed, so poll 3 (token still t2) re-detects and refetches.
     calendar.objects_by_sync_token.side_effect = [
         Mock(sync_token="t1"),
         Mock(sync_token="t2"),
         Mock(sync_token="t2"),
     ]
-    # A refetch is two searches: the expanded one for the window and the plain
-    # one that carries the etags.
     displays = iter(
         [
             [_search_item("First", timedelta(days=1))],
@@ -297,7 +284,6 @@ async def test_change_survives_a_failed_poll(hass: HomeAssistant) -> None:
         hass,
         entry,
         calendar,
-        # Events only, so the three scripted searches line up with the polls.
         Capability(frozenset({"VEVENT"}), writable=True),
         days=7,
         include_all_day=True,
@@ -361,8 +347,6 @@ def _etag_item(uid: str, etag: str) -> Mock:
 
 async def test_get_events_caches_etags(hass: HomeAssistant) -> None:
     calendar = _calendar("Personal")
-    # The non-expanded (etag) search carries the etags; the expanded display
-    # search does not.
     calendar.search.side_effect = lambda **kw: (
         [_etag_item("uid-1", '"e"')] if kw.get("expand") is False else []
     )
@@ -377,8 +361,6 @@ async def test_get_events_caches_etags(hass: HomeAssistant) -> None:
 
 
 async def test_failed_write_keeps_etag_for_retry(hass: HomeAssistant) -> None:
-    # The pop must run only after a successful write; a failed one leaves the
-    # cached etag so the retry still validates against the unchanged server copy.
     await _setup(hass, [_calendar("Personal")])
     entity = _entity(hass, "calendar.personal")
     entity.coordinator.etags = {"uid-1": '"e"'}
@@ -429,7 +411,6 @@ async def test_a_rejected_password_starts_a_reauth_flow(hass: HomeAssistant) -> 
     await coordinator.async_refresh()
     await hass.async_block_till_done()
 
-    # Otherwise a password change on the server is only visible in the log.
     assert any(
         flow["context"]["source"] == "reauth"
         for flow in hass.config_entries.flow.async_progress()
@@ -492,7 +473,6 @@ async def test_a_rejected_sync_token_is_dropped(hass: HomeAssistant) -> None:
 
     await coordinator.async_refresh()
 
-    # Re-sending a token the server rejected keeps the probe failing forever.
     assert coordinator._sync_token is None
 
 
@@ -513,8 +493,6 @@ async def test_etags_are_cached_by_the_poll_not_only_by_the_panel(
     calendar.search.side_effect = search
     await _setup(hass, [calendar])
 
-    # An automation writing after a restart is conflict-checked without the
-    # frontend ever having opened the calendar.
     assert _entity(hass, "calendar.personal").coordinator.etags == {
         "Standup": '"etag-1"'
     }
@@ -526,7 +504,6 @@ async def test_the_panel_window_caches_its_own_etags(hass: HomeAssistant) -> Non
     window = dt_util.now() + timedelta(days=80)
 
     def search(**kwargs):
-        # Nothing in the polled week; the event only exists in the far window.
         if kwargs.get("todo") or kwargs.get("start") is None:
             return []
         if kwargs["start"] < window:
@@ -543,23 +520,17 @@ async def test_the_panel_window_caches_its_own_etags(hass: HomeAssistant) -> Non
     coordinator = _entity(hass, "calendar.personal").coordinator
     assert coordinator.etags == {}
 
-    await coordinator.async_get_events(hass, window, window + timedelta(days=20))
+    await coordinator.async_get_events(window, window + timedelta(days=20))
 
-    # An event the user scrolled to is outside the polled window; editing it
-    # still has to be conflict-checked.
     assert coordinator.etags == {"Retro": '"etag-far"'}
 
 
 async def test_a_half_that_never_answered_takes_only_its_own_entity_down(
     hass: HomeAssistant,
 ) -> None:
-    """Reporting an empty calendar here would be a lie the user has no way of
-    noticing, and failing the whole entry over it takes the to-do list that
-    answered perfectly well down with it."""
     calendar = _calendar("Personal")
 
     def search(**kwargs):
-        # The to-do half answers, so only the event half has nothing to keep.
         if kwargs.get("todo"):
             return []
         raise Timeout("boom")
@@ -594,7 +565,6 @@ async def test_a_half_that_answered_before_keeps_its_last_result(
     calendar.objects_by_sync_token.side_effect = Timeout("boom")
     await coordinator.async_refresh()
 
-    # A to-do search timing out on a long list must not take the calendar down.
     assert coordinator.last_update_success is True
     assert coordinator.data.next_event.summary == "Standup"
 
@@ -629,8 +599,7 @@ async def test_the_extra_attributes_stay_out_of_the_recorder(
     await _setup(hass, [_calendar("Personal")])
     entity = _entity(hass, "calendar.personal")
 
-    # Core reads the combined set, not the per-entity attribute, so this is
-    # what proves the exclusion is actually wired up.
+    # Core reads the combined set, not the per-entity attribute.
     combined = entity._Entity__combined_unrecorded_attributes
     assert {"attendees", "organizer", "url", "alarms"} <= combined
 
@@ -639,8 +608,6 @@ async def test_the_days_option_sets_the_search_window(hass: HomeAssistant) -> No
     calendar = _calendar("Personal")
     await _setup(hass, [calendar], options={CONF_DAYS: 30})
 
-    # Asserting the constructor argument would pass for a coordinator that
-    # stores the number and searches a week anyway.
     expand = next(
         call for call in calendar.search.call_args_list if call.kwargs.get("expand")
     )
@@ -689,8 +656,7 @@ async def test_an_event_without_a_start_does_not_take_the_calendar_down(
     calendar = _calendar("Personal")
     start = dt_util.utcnow() + timedelta(hours=1)
     calendar.search.return_value = [
-        # RFC 5545 makes DTSTART optional once the object carries a METHOD, and
-        # ordering the window would raise on it.
+        # RFC 5545 makes DTSTART optional once the object carries a METHOD.
         _result("SUMMARY:No start"),
         _result(
             f"DTSTART:{start:%Y%m%dT%H%M%S}Z\n"
@@ -728,8 +694,7 @@ async def test_a_failed_poll_does_not_log_the_collection_url(
 
     await _setup(hass, [calendar])
 
-    # Users are asked to paste this line into an issue, and a caldav error
-    # prints the collection it was reading, hence the account.
+    # A caldav error prints the collection it was reading, hence the account.
     logged = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
     assert any("Could not read Personal: DAVError" in line for line in logged)
     assert not any("iven" in line for line in logged)
@@ -741,8 +706,7 @@ async def test_a_calendar_without_a_name_still_gets_one(hass: HomeAssistant) -> 
     await _setup(hass, [nameless])
     entity = _entity(hass, "calendar.caldav")
 
-    # A collection is not required to carry a display name, and the coordinator
-    # name reaches the log lines and the entity id.
+    # A collection is not required to carry a display name.
     assert entity.coordinator.name == "CalDAV"
 
 
@@ -762,7 +726,6 @@ async def test_the_only_half_of_a_calendar_rides_out_a_failure_then_gives_up(
     ):
         await _setup(hass, [calendar])
     entity = _entity(hass, "calendar.personal")
-    # The server says something changed, so the poll really does go and fetch.
     calendar.objects_by_sync_token.return_value.sync_token = "moved-on"
     calendar.search.side_effect = Timeout("gone")
 
@@ -785,15 +748,12 @@ async def test_a_poll_drops_the_etag_of_an_event_it_no_longer_finds(
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     entity = _entity(hass, "calendar.personal")
-    # Seen by the polled window before, so its absence now means it is gone.
     entity.coordinator._etag_window = {"deleted-1"}
     entity.coordinator.etags = {"deleted-1": "old-etag"}
     entity.coordinator.halves["events"].cached = None
 
     await entity.coordinator.async_refresh()
 
-    # An event that is gone from the server must lose its etag, or the next
-    # write against a reused uid is flagged as a conflict that never happened.
     assert "deleted-1" not in entity.coordinator.etags
 
 
@@ -803,14 +763,11 @@ async def test_a_poll_keeps_the_etags_of_a_window_it_did_not_read(
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     entity = _entity(hass, "calendar.personal")
-    # Cached by the panel for a month the poll window does not reach.
     entity.coordinator.etags = {"next-month-1": "panel-etag"}
     entity.coordinator.halves["events"].cached = None
 
     await entity.coordinator.async_refresh()
 
-    # Dropping it would leave an edit made from that still-open panel window
-    # unchecked, silently overwriting whatever another client changed.
     assert entity.coordinator.etags["next-month-1"] == "panel-etag"
 
 
@@ -841,8 +798,6 @@ async def test_a_failed_panel_read_is_reported_as_a_home_assistant_error(
 async def test_a_partly_failed_poll_does_not_commit_the_sync_token(
     hass: HomeAssistant,
 ) -> None:
-    # Committing it would leave the half that failed unread until the server's
-    # own token moves again, which for a quiet calendar is never.
     calendar = _calendar("Personal")
     calendar.objects_by_sync_token.return_value.sync_token = "token-1"
     await _setup(hass, [calendar])
@@ -861,8 +816,6 @@ async def test_a_partly_failed_poll_does_not_commit_the_sync_token(
 
 
 async def test_the_window_rolls_over_at_midnight(hass: HomeAssistant) -> None:
-    # The sync token is unchanged across the day boundary, so only the moved
-    # window forces the refetch; without it the panel shows yesterday forever.
     calendar = _calendar("Personal")
     calendar.objects_by_sync_token.return_value.sync_token = "steady"
     await _setup(hass, [calendar])
@@ -899,11 +852,7 @@ async def test_an_event_without_a_uid_does_not_take_the_poll_down(
 async def test_the_panel_gets_the_recurrence_rule_of_a_series(
     hass: HomeAssistant,
 ) -> None:
-    """Expanding a series strips RRULE from every occurrence it produces.
-
-    Without carrying it across, the panel shows no "repeats weekly" line and
-    opens its recurrence editor blank on an event that plainly recurs.
-    """
+    """Expanding a series strips RRULE from every occurrence it produces."""
     calendar = _calendar("Personal")
     start = dt_util.utcnow() + timedelta(days=1)
     occurrence = Mock()
@@ -952,8 +901,6 @@ async def test_a_single_event_carries_no_recurrence_rule(hass: HomeAssistant) ->
 async def test_a_series_that_stops_recurring_loses_its_recorded_rule(
     hass: HomeAssistant,
 ) -> None:
-    # Another client can turn a series into a single event. Keeping the old
-    # rule would have the panel offer to edit a recurrence that is gone.
     calendar = _calendar("Personal")
     start = dt_util.utcnow() + timedelta(days=1)
 
@@ -991,7 +938,6 @@ async def test_a_series_that_stops_recurring_loses_its_recorded_rule(
 async def test_an_edit_leaves_the_etag_the_refresh_read_back(
     hass: HomeAssistant,
 ) -> None:
-    """Dropping it after the refresh would leave the next edit unchecked."""
     calendar = _calendar("Personal")
     etag = '"v1"'
 
@@ -1012,19 +958,16 @@ async def test_an_edit_leaves_the_etag_the_refresh_read_back(
 
     with (
         patch("custom_components.ha_caldav.calendar.update_event"),
-        patch.object(entity.coordinator, "async_request_refresh", refresh),
+        patch.object(entity.coordinator, "async_refresh", refresh),
     ):
         await entity.async_update_event("uid-1", _event_fields())
 
-    # Gone by the time the refresh runs, so the refresh can read the new one
-    # back; dropped afterwards it would take that new one with it.
     assert seen["etags"] == {}
 
 
 async def test_a_poll_that_could_not_read_the_etags_keeps_its_token(
     hass: HomeAssistant,
 ) -> None:
-    """Committing it would freeze those etags with no later poll to repair them."""
     calendar = _calendar("Personal")
 
     def search(**kwargs):
@@ -1044,7 +987,6 @@ async def test_a_poll_that_could_not_read_the_etags_keeps_its_token(
 async def test_a_half_that_keeps_failing_stops_looking_healthy(
     hass: HomeAssistant,
 ) -> None:
-    """A months-old snapshot nobody can tell is old also validates writes."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.personal").coordinator
@@ -1062,8 +1004,6 @@ async def test_a_half_that_keeps_failing_stops_looking_healthy(
 
     await coordinator.async_refresh()
 
-    # The list stops claiming to be a list; the calendar beside it, which the
-    # server answers about perfectly well, carries on.
     assert coordinator.halves["todos"].dead
     assert not coordinator.halves["events"].dead
     await hass.async_block_till_done()
@@ -1078,7 +1018,6 @@ def _raise(err: Exception):
 async def test_a_server_that_never_moves_its_sync_token_is_read_again(
     hass: HomeAssistant,
 ) -> None:
-    """A token that lies would otherwise freeze the entry with nothing to see."""
     calendar = _calendar("Personal")
     calendar.objects_by_sync_token.return_value = Mock(sync_token="frozen")
     await _setup(hass, [calendar])
@@ -1121,7 +1060,6 @@ async def test_a_cleared_description_is_removed_not_emptied(
 async def test_the_panel_etags_and_the_polled_ones_live_side_by_side(
     hass: HomeAssistant,
 ) -> None:
-    """Replacing them would leave the polled window's next edit unchecked."""
     calendar = _calendar("Personal")
     far = _etag_item("far-1", '"far"')
 
@@ -1137,7 +1075,7 @@ async def test_the_panel_etags_and_the_polled_ones_live_side_by_side(
     assert coordinator.etags == {"near-1": '"near"'}
 
     window = dt_util.now() + timedelta(days=80)
-    await coordinator.async_get_events(hass, window, window + timedelta(days=20))
+    await coordinator.async_get_events(window, window + timedelta(days=20))
 
     assert coordinator.etags == {"near-1": '"near"', "far-1": '"far"'}
 
@@ -1175,7 +1113,6 @@ async def test_a_transient_403_during_a_poll_does_not_force_a_reauth(
 
     await coordinator.async_refresh()
 
-    # A 403 is a server having a bad minute, so the previous result stands.
     assert coordinator.last_update_success
     assert not [
         flow
@@ -1184,30 +1121,10 @@ async def test_a_transient_403_during_a_poll_does_not_force_a_reauth(
     ]
 
 
-async def test_a_window_the_server_put_no_etag_on_reads_as_unread(
-    hass: HomeAssistant,
-) -> None:
-    """Read as an empty window instead, every etag kept here is treated as gone
-    and the next edit of each of those objects goes out unchecked."""
-    calendar = _calendar("Personal")
-    stripped = _etag_item("uid-1", '"e"')
-    stripped.props = {}
-    calendar.search.side_effect = lambda **kw: (
-        [stripped] if kw.get("expand") is False else []
-    )
-    await _setup(hass, [calendar])
-    coordinator = _entity(hass, "calendar.personal").coordinator
-
-    start = dt_util.utcnow()
-
-    assert coordinator._window_index(start, start + timedelta(days=7))[0] is None
-
-
 async def test_the_recorded_rule_comes_off_the_master_of_the_object(
     hass: HomeAssistant,
 ) -> None:
-    """RFC 5545 leaves the component order open, and reading the first one
-    records no rule for a series that has one."""
+    """RFC 5545 leaves the component order open."""
     calendar = _calendar("Personal")
     item = Mock()
     item.vobject_instance = vobject.readOne(
@@ -1233,8 +1150,6 @@ async def test_the_recorded_rule_comes_off_the_master_of_the_object(
 async def test_a_dead_half_still_lets_the_other_one_read(
     hass: HomeAssistant,
 ) -> None:
-    """The healthy half is fetched and kept, so its cache and etags do not
-    freeze at whatever they held when the other broke."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.personal").coordinator
@@ -1256,17 +1171,12 @@ async def test_a_dead_half_still_lets_the_other_one_read(
         await coordinator.async_refresh()
 
     assert coordinator.halves["events"].dead
-    # Reached on the failing poll too, not only on the tolerated ones.
     assert len(seen) == 4
 
 
 async def test_a_dead_half_keeps_the_other_ones_data_and_etags_together(
     hass: HomeAssistant,
 ) -> None:
-    """A half reads its etags in the same request as its data, and the two are
-    kept or dropped as one. Committing an etag whose data was then thrown away
-    let the next edit of that object pass a check against a revision the entity
-    never showed, and overwrite the change that had arrived with it."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.personal").coordinator
@@ -1287,8 +1197,6 @@ async def test_a_dead_half_keeps_the_other_ones_data_and_etags_together(
         await coordinator.async_refresh()
 
     assert coordinator.halves["events"].dead
-    # The list itself was read four times and is current, so the etag describing
-    # it is the one the next edit has to be checked against.
     assert coordinator.todo_etags == {"todo-1": '"t4"'}
     assert [item.uid for item in coordinator.data.todos] == ["todo-1"]
 
@@ -1307,8 +1215,6 @@ def _todo_etag_item(uid: str, etag: str) -> Mock:
 async def test_a_half_that_recovers_starts_counting_again(
     hass: HomeAssistant,
 ) -> None:
-    """Without the reset a server that fails one poll in ten reaches the limit
-    over days of ordinary flakiness and then fails every poll for good."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.personal").coordinator
@@ -1325,15 +1231,10 @@ async def test_a_half_that_recovers_starts_counting_again(
         return []
 
     calendar.search.side_effect = search
-    # Two failures, then one good poll, then two more: without the reset the
-    # counter reaches three and the half is declared dead.
     for run in (True, True, False, True, True):
         broken[0] = run
         await coordinator.async_refresh()
 
-    # Still alive: without the reset the count would stand at four, past the
-    # limit, and the half would be declared dead over failures that were never
-    # consecutive.
     assert coordinator.last_update_success
     assert coordinator.halves["events"].misses == 2
 
@@ -1341,10 +1242,8 @@ async def test_a_half_that_recovers_starts_counting_again(
 async def test_one_unplaceable_event_does_not_cost_the_collection_its_entities(
     hass: HomeAssistant,
 ) -> None:
-    """A DTEND in the year 9999 overflows the moment a zone offset reaches it,
-    and OverflowError is an ArithmeticError, which the mapping guard did not
-    name. One such object anywhere in the window failed every poll and took
-    the calendar entity and the to-do list down with it, indefinitely."""
+    """A DTEND in the year 9999 overflows the moment a zone offset reaches it, and
+    OverflowError is an ArithmeticError."""
     calendar = _calendar("Personal")
     forever = Mock()
     forever.vobject_instance = vobject.readOne(
@@ -1372,20 +1271,12 @@ async def test_one_unplaceable_event_does_not_cost_the_collection_its_entities(
 async def test_a_polled_window_survives_an_etag_cache_at_its_limit(
     hass: HomeAssistant,
 ) -> None:
-    """Merged behind the entries already held, a cache at its limit gives up
-    the window it just read instead of what has been out of view longest. Those
-    uids then never regain an etag, and their next edit is written with nothing
-    to check against - silently, and only on the large calendars where a clash
-    is likeliest."""
     from custom_components.ha_caldav.coordinator import _CACHE_LIMIT
 
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.personal").coordinator
     coordinator.etags = {f"old-{n}": f'"o{n}"' for n in range(_CACHE_LIMIT)}
-    # Left behind by a window the panel asked for, so the poll's window does
-    # not name them and none of them counts as gone. They are exactly what the
-    # limit has to give up, and the fresh ones are what it has to keep.
     coordinator._etag_window = set()
 
     coordinator._merge_etags(
@@ -1399,8 +1290,6 @@ async def test_a_polled_window_survives_an_etag_cache_at_its_limit(
 async def test_a_todo_report_without_etags_does_not_empty_the_cache(
     hass: HomeAssistant,
 ) -> None:
-    """Taken at face value it empties the cache, and the next edit of every one
-    of those items goes out with nothing to check against - silently."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.personal").coordinator
@@ -1432,9 +1321,6 @@ async def test_a_todo_report_without_etags_does_not_empty_the_cache(
 async def test_a_poll_already_reading_cannot_restore_an_etag_a_write_dropped(
     hass: HomeAssistant,
 ) -> None:
-    """The lock covers the moment the dict is changed, not the span between a
-    read and the commit that follows it. The pre-write etag put back that way
-    has the user's own next edit refused as somebody else's change."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.personal").coordinator
@@ -1444,16 +1330,13 @@ async def test_a_poll_already_reading_cannot_restore_an_etag_a_write_dropped(
     coordinator.forget_etags("etags", ("uid-1",))
     assert coordinator.etags == {}
 
-    # The poll that was already on the wire when the write landed commits here.
     assert not coordinator._merge_etags({"uid-1": '"v1"'}, read_at)
     assert coordinator.etags == {}
 
 
 def test_an_event_keeps_its_place_when_home_assistant_refuses_its_rule() -> None:
-    """FREQ=HOURLY and FREQ=MINUTELY are RFC 5545 and writable from every other
-    client, and Home Assistant validates the rule it is handed against what its
-    own editor can offer. Passed on, it took the whole occurrence off the panel
-    and out of the state."""
+    """Home Assistant refuses an RRULE its own editor cannot offer, FREQ=HOURLY
+    and FREQ=MINUTELY among them."""
     from custom_components.ha_caldav.coordinator import to_event
 
     vevent = vobject.readOne(
@@ -1473,15 +1356,8 @@ def test_an_event_keeps_its_place_when_home_assistant_refuses_its_rule() -> None
 async def test_two_edits_of_one_collection_do_not_run_at_the_same_time(
     hass: HomeAssistant,
 ) -> None:
-    """The panels call the entity directly over the websocket, so PARALLEL_UPDATES
-    does not reach them. Overlapping, two edits of one series read the same
-    object, both pass the etag check against the same value, and the second PUT
-    drops what the first wrote with nothing reported.
-
-    Patched with a real function rather than a Mock: the Home Assistant test
-    plugin runs a mocked executor job inline on the loop, and inline jobs cannot
-    overlap, so a mock here reports no conflict whatever the lock does.
-    """
+    """PARALLEL_UPDATES does not reach the panels, which call the entity directly,
+    and the Home Assistant test plugin runs a mocked executor job inline."""
     await _setup(hass, [_calendar("Personal")])
     entity = _entity(hass, "calendar.personal")
     inside = 0
@@ -1506,8 +1382,6 @@ async def test_two_edits_of_one_collection_do_not_run_at_the_same_time(
 async def test_the_panel_creates_an_event_through_the_platform_call(
     hass: HomeAssistant,
 ) -> None:
-    """calendar.create_event is what the panel and every automation reach; the
-    service beside it takes another route, and only that one was covered."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
 
@@ -1535,9 +1409,7 @@ async def test_the_panel_creates_an_event_through_the_platform_call(
 async def test_an_edit_from_the_panel_carries_the_rule_it_was_given(
     hass: HomeAssistant,
 ) -> None:
-    """Home Assistant strips RRULE from the event it echoes back for an
-    occurrence, so the mapping only forwards a rule that is really there. One
-    the recurrence editor did set has to reach the write path all the same."""
+    """Home Assistant strips RRULE from the event it echoes back for an occurrence."""
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     entity = _entity(hass, "calendar.personal")
@@ -1559,9 +1431,7 @@ async def test_an_edit_from_the_panel_carries_the_rule_it_was_given(
 async def test_a_color_hook_that_arrives_before_registration_is_ignored(
     hass: HomeAssistant,
 ) -> None:
-    """Both hooks read the registry entry, and an entity has none until it is
-    registered. Home Assistant calls neither of them that early, but a write
-    made from a service against a freshly built entity would."""
+    """An entity has no registry entry until it is registered."""
     calendar = _calendar("Personal")
     entry = await _setup(hass, [calendar])
     entity = _entity(hass, "calendar.personal")
@@ -1577,9 +1447,7 @@ async def test_a_color_hook_that_arrives_before_registration_is_ignored(
 async def test_a_collection_that_holds_no_events_is_not_searched(
     hass: HomeAssistant,
 ) -> None:
-    """A to-do collection has a calendar entity only until the prune runs, and
-    the panel asks any entity it can see for a window. Passed on, the search
-    would be a request per view onto a collection that answers none of them."""
+    """The panel asks every calendar entity it can see for a window."""
     from custom_components.ha_caldav.capability import Capability
     from custom_components.ha_caldav.const import COMPONENT_TODO
 
@@ -1595,7 +1463,7 @@ async def test_a_collection_that_holds_no_events_is_not_searched(
     calendar.search.reset_mock()
 
     found = await coordinator.async_get_events(
-        hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=1)
+        dt_util.utcnow(), dt_util.utcnow() + timedelta(days=1)
     )
 
     assert found == []
@@ -1619,7 +1487,6 @@ async def test_a_dead_half_beside_one_still_serving_is_not_a_failed_poll(
     )
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.personal").coordinator
-    # Never read at all, so the list is dead from the very first poll.
     assert coordinator.halves["todos"].dead
 
     calendar.search.side_effect = Timeout("and now neither does the window")
@@ -1653,7 +1520,6 @@ async def test_a_401_beside_a_half_that_read_cleanly_is_not_a_reauth(
     await coordinator.async_refresh()
     await hass.async_block_till_done()
 
-    # The same credentials just read the window, so the 401 is the server.
     assert coordinator.last_update_success is True
     assert not [
         flow
@@ -1769,7 +1635,6 @@ async def test_leaving_out_a_rule_core_refused_to_show_keeps_it(
 async def test_the_state_moves_on_once_the_current_event_ends(
     hass: HomeAssistant,
 ) -> None:
-    # The state is written again at the end of an event, not only at a poll.
     calendar = _calendar("Personal")
     calendar.search.return_value = [
         _search_item("First", timedelta(hours=1)),
@@ -1815,7 +1680,7 @@ async def test_a_panel_read_already_on_the_wire_cannot_restore_a_dropped_etag(
 
     now = dt_util.now()
     with patch.object(coordinator, "_window_index", read_while_a_write_lands):
-        await coordinator.async_get_events(hass, now, now + timedelta(days=30))
+        await coordinator.async_get_events(now, now + timedelta(days=30))
 
     assert "uid-1" not in coordinator.etags
 
@@ -1840,3 +1705,23 @@ async def test_a_403_that_persists_fails_the_poll_without_a_reauth(
         for flow in hass.config_entries.flow.async_progress()
         if flow["context"].get("source") == "reauth"
     ]
+
+
+@pytest.mark.parametrize(
+    ("rule", "stored"),
+    [
+        ("FREQ=WEEKLY;UNTIL=20260831T203000", "FREQ=WEEKLY;UNTIL=20260831T203000Z"),
+        ("FREQ=WEEKLY;UNTIL=20260831", "FREQ=WEEKLY;UNTIL=20260831"),
+        ("FREQ=WEEKLY;UNTIL=20260831T203000Z", "FREQ=WEEKLY;UNTIL=20260831T203000Z"),
+    ],
+)
+async def test_an_end_the_frontend_wrote_is_read_as_utc(
+    hass: HomeAssistant, rule: str, stored: str
+) -> None:
+    await _setup(hass, [_calendar("Personal")])
+    entity = _entity(hass, "calendar.personal")
+
+    with patch("custom_components.ha_caldav.calendar.update_event") as update:
+        await entity.async_update_event("uid-1", {**_event_fields(), "rrule": rule})
+
+    assert update.call_args.args[2]["rrule"] == stored

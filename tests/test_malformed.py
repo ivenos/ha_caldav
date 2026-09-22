@@ -1,30 +1,12 @@
-"""A corpus of objects another client may have left on the server.
-
-Nothing here is invented for its own sake. Every case is something a real
-CalDAV client, importer or server has been known to store: a property written
-twice, a value type RFC 5545 does not allow there, a rule that names no day
-that exists, text that carries the line ending the format is built out of. The
-integration reads all of it, and none of it is under its control.
-
-The rule the whole module is built on: **one object must never cost the user
-the collection**. A poll that meets something it cannot place skips it and goes
-on; a write that cannot be made on data this shape refuses in so many words. A
-raise out of a read path fails every poll for as long as the object sits in the
-window and takes both entities of the collection with it, and a write that
-proceeds on a misread object silently damages the one beside it. Four defects of
-exactly that shape have already been found and fixed, so the cases are table
-driven: a new one is an entry, not a test.
-
-What is asserted is therefore the refusal, not the absence of an exception.
-``Refused`` and a logged skip are both correct; ``AttributeError`` out of a
-library is not, and neither is a call that never comes back.
-"""
+"""A corpus of objects real CalDAV clients, importers and servers have stored."""
 
 from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+import json
+from pathlib import Path
 import threading
 from typing import Any
 from unittest.mock import Mock
@@ -57,10 +39,10 @@ from custom_components.ha_caldav.capability import (
     UNKNOWN,
     Capability,
     _components,
-    _objects_and_props,
     _privileges,
     capability_for,
     fetch_capabilities,
+    objects_and_props,
 )
 from custom_components.ha_caldav.connection import calendar_key
 from custom_components.ha_caldav.const import DOMAIN
@@ -89,13 +71,10 @@ ENTRY_DATA = {
     CONF_VERIFY_SSL: True,
 }
 
-# Long enough that no ordinary call comes near it, short enough that a rule
-# which yields nothing fails the suite in seconds rather than pinning a runner.
 _BUDGET = 5.0
 
 
 def document(*parts: str) -> str:
-    """Wrap components in a VCALENDAR, the way one resource arrives."""
     return (
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//other-client//EN\r\n"
         + "".join(parts)
@@ -119,8 +98,6 @@ def vtodo(body: str, uid: str = "todo-1") -> str:
 
 @dataclass(frozen=True)
 class Case:
-    """One stored object, with what makes it worth keeping."""
-
     name: str
     ics: str
     why: str
@@ -130,18 +107,12 @@ class Case:
 
 
 def cases(*entries: Case) -> Any:
-    """Return the pytest parameter set for a corpus, named by case."""
     return pytest.mark.parametrize("case", entries, ids=str)
 
 
 def within(seconds: float, call: Any) -> Any:
-    """Run a blocking call on a throwaway thread, failing if it does not return.
-
-    A stored rule that produces no occurrence at all leaves dateutil iterating
-    rather than raising, and nothing upstream can interrupt it: asserting on the
-    result directly would hang the suite instead of failing it. The thread is a
-    daemon because a hung one cannot be joined at exit either.
-    """
+    """Run a blocking call on a daemon thread, failing if it does not return.
+    dateutil iterates on a rule that yields nothing, and nothing can interrupt it."""
     box: dict[str, Any] = {}
 
     def run() -> None:
@@ -161,12 +132,8 @@ def within(seconds: float, call: Any) -> Any:
 
 
 class StoredObject:
-    """A search result whose body is only parsed when something reads it.
-
-    caldav parses lazily and raises out of the property, which is what makes a
-    single unreadable object able to fail a whole poll; a fake that parsed in
-    its constructor would never reach the code that has to survive it.
-    """
+    """A search result parsed on access: caldav parses lazily and raises out of the
+    property."""
 
     def __init__(self, ics: str, url: str = "https://dav.test/cal/a.ics") -> None:
         self._ics = ics
@@ -194,14 +161,8 @@ class StoredObject:
 
 
 class WriteTarget:
-    """A resource a write path reads, mutates and saves back.
-
-    Parsed on first access and then kept, as caldav's is. A write reaches the
-    component through ``icalendar_instance`` and the checks around it through
-    ``icalendar_component``, and handing back two separate parses would hide a
-    write that landed on the wrong one. Lazily, so a document icalendar refuses
-    outright fails inside the call under test rather than in the fixture.
-    """
+    """A resource a write path reads, mutates and saves back, parsed on first access
+    and then kept, as caldav's is."""
 
     def __init__(self, ics: str, url: str = "https://dav.test/cal/a.ics") -> None:
         self._ics = ics
@@ -230,9 +191,8 @@ class WriteTarget:
 
     @icalendar_instance.setter
     def icalendar_instance(self, value: Any) -> None:
-        # caldav keeps the document handed to it and serializes it only on the
-        # way out. Writes go through here rather than through data because a
-        # string is put through vcal.fix, which rewrites the object.
+        # caldav keeps the document handed to it and serializes it only on the way
+        # out; a string is put through vcal.fix, which rewrites the object.
         self._instance = value
         self._ics = value.to_ical().decode("utf-8")
 
@@ -255,18 +215,11 @@ class WriteTarget:
 
     def load(self) -> None:
         self.loads += 1
-        # caldav replaces the document from the GET before it records the etag,
-        # so a load is where a stale parse would be thrown away.
+        # caldav replaces the document from the GET before it records the etag.
         self.data = self._server_ics
 
 
 def dav_calendar() -> Mock:
-    """Return a calendar that answers every uid lookup with nothing.
-
-    On the shared client rather than a second one: a local double that could
-    only accept a PUT left the write paths untestable against a server that
-    refuses one, which is where the order of a write and a delete shows.
-    """
     calendar = shared_dav_calendar()
     calendar.name = "Personal"
     calendar.event_by_uid.side_effect = NotFoundError("nope")
@@ -291,7 +244,6 @@ def dated(ics: str) -> str:
 SPAN = "DTSTART:{soon}\r\nDTEND:{soon_end}\r\n"
 
 EVENTS = (
-    # -- structure ---------------------------------------------------------
     Case(
         "no_uid",
         document(
@@ -418,7 +370,6 @@ EVENTS = (
         document(vevent(SPAN + "SUMMARY:Trailing")) + "garbage\r\n",
         "A truncated or doubled transfer.",
     ),
-    # -- values ------------------------------------------------------------
     Case(
         "an_end_before_its_start",
         document(
@@ -581,7 +532,6 @@ EVENTS = (
         "RFC 5545 has both ends share a value type; a date cannot be compared"
         " against an instant.",
     ),
-    # -- text --------------------------------------------------------------
     Case(
         "a_line_far_past_the_folding_limit",
         document(vevent(SPAN + "SUMMARY:" + "z" * 20000)),
@@ -757,7 +707,6 @@ def poll_calendar(items: list[StoredObject]) -> Mock:
     calendar.name = "Personal"
     calendar.url = "https://cloud.example.com/remote.php/dav/personal"
     calendar.search.side_effect = lambda **_kwargs: items
-    # A server without sync-collection, so every poll is a full read.
     calendar.objects_by_sync_token.side_effect = NotFoundError("no sync token")
     return calendar
 
@@ -797,14 +746,6 @@ SENTINEL = StoredObject(
 async def test_one_bad_object_does_not_cost_the_collection_its_poll(
     hass: HomeAssistant, case: Case
 ) -> None:
-    """The good event beside it still reaches the entity.
-
-    This is the whole point of the module. A raise anywhere in the read path
-    fails the poll, and a failed poll takes the calendar entity and the to-do
-    list of the same collection unavailable for as long as the object sits in
-    the window - which, for an object nobody in the household knows is there,
-    is indefinitely.
-    """
     coordinator = await poll(hass, [StoredObject(dated(case.ics)), SENTINEL])
 
     assert coordinator.last_update_success, repr(coordinator.last_exception)
@@ -816,8 +757,6 @@ async def test_one_bad_object_does_not_cost_the_collection_its_poll(
 async def test_a_bad_object_alone_in_the_window_still_polls(
     hass: HomeAssistant, case: Case
 ) -> None:
-    """With nothing beside it, the object is what _next_event and read_extras
-    are asked about, which is the only way those two are reached at all."""
     coordinator = await poll(hass, [StoredObject(dated(case.ics))])
 
     assert coordinator.last_update_success, repr(coordinator.last_exception)
@@ -828,36 +767,24 @@ async def test_a_bad_object_alone_in_the_window_still_polls(
 async def test_the_panel_window_survives_a_bad_object(
     hass: HomeAssistant, case: Case
 ) -> None:
-    """The window the frontend asks for is not the polled one, and it is read
-    through a separate path that raises at the user rather than at a poll."""
     coordinator = await poll(hass, [StoredObject(dated(case.ics)), SENTINEL])
     start = dt_util.utcnow()
 
-    events = await coordinator.async_get_events(
-        hass, start, start + timedelta(days=400)
-    )
+    events = await coordinator.async_get_events(start, start + timedelta(days=400))
 
     assert any(event.summary == "Sentinel" for event in events)
 
 
 @cases(*EVENTS)
 def test_reading_one_component_never_raises(case: Case) -> None:
-    """Every mapper the poll and the panel go through, on every case.
-
-    Driven one component at a time rather than through the coordinator, so a
-    case that the poll happens to filter out before it reaches the mapper is
-    still put through it: the filter is not the guarantee, the mapper is.
-    """
     item = StoredObject(dated(case.ics))
     found = components_of(item, "vevent")
-    # The body is reparsed per access, as caldav's is, so what is compared is
-    # what came back rather than which object it happens to be.
+    # The body is reparsed per access, as caldav's is.
     assert (component_of(item, "vevent") is None) is (not found)
     master = master_of(item)
     assert (master is None) is (not found)
     if master is not None and len(found) > 1:
-        # A detached instance may come first, and reading a series off it
-        # records no rule for a series that has one.
+        # A detached instance may come first, and it carries no rule.
         assert not hasattr(master, "recurrence_id") or all(
             hasattr(component, "recurrence_id") for component in found
         )
@@ -866,16 +793,9 @@ def test_reading_one_component_never_raises(case: Case) -> None:
             continue
         assert isinstance(sort_key(component), datetime)
         assert isinstance(is_all_day(component), bool)
-        # These two are called outside the mapping guard and caught by name at
-        # the call site, so what they raise has to stay inside the set that
-        # guard covers. An OverflowError that was not in it is how a single
-        # far-future end used to fail every poll.
         for placing in (get_end_date, is_over):
             with suppress(*_UNMAPPABLE):
                 placing(component)
-        # These two are reached with nothing around them, so they may not raise
-        # at all: the first is what the entity state is built from and the
-        # second is what its attributes are.
         event = to_event(component, "FREQ=WEEKLY")
         assert event is None or isinstance(event.summary, str)
         assert isinstance(read_extras(component), dict)
@@ -907,8 +827,6 @@ def test_reading_one_todo_never_raises(case: Case) -> None:
 async def test_a_window_whose_objects_carry_no_etag_keeps_the_ones_it_has(
     hass: HomeAssistant,
 ) -> None:
-    """An etagless window read as an empty one would drop every etag held here
-    and leave the next edit of each of those objects written unchecked."""
     item = StoredObject(document(vevent("DTSTART:20990101T090000Z\r\nSUMMARY:x")))
     item.props = {}
     coordinator = await poll(hass, [item])
@@ -920,6 +838,8 @@ async def test_a_window_whose_objects_carry_no_etag_keeps_the_ones_it_has(
 
     assert etags is None
     assert rules == {"uid-1": None}
+    await coordinator.async_refresh()
+    assert coordinator.etags == {"kept": '"e0"'}
 
 
 async def test_the_rule_is_read_off_the_master_however_the_server_ordered_it(
@@ -1178,21 +1098,8 @@ WRITES = {
 def test_a_write_onto_a_malformed_series_refuses_rather_than_breaks(
     case: Case, mode: str
 ) -> None:
-    """Either the write is made or it is refused by name.
-
-    An AttributeError out of icalendar reaches the user as "the server had a
-    problem", which is both untrue and unactionable: the object is theirs, it
-    is on their server, and nothing in the message says which one it is.
-
-    What a write that does go ahead has to leave behind is a resource that is
-    still readable: a document with no VEVENT left in it is one the next poll
-    drops and no later edit can reach, which is the same as having deleted the
-    event without saying so.
-
-    A delete is the exception, and only in what it may take away. It clears the
-    events by design, but a resource may hold a to-do beside them, and going
-    back empty would take that to-do off a list nobody asked about.
-    """
+    """A delete clears the events by design, and a resource may hold a to-do beside
+    them."""
     calendar = dav_calendar()
     stored = WriteTarget(case.ics)
     calendar.event_by_uid.side_effect = None
@@ -1204,15 +1111,32 @@ def test_a_write_onto_a_malformed_series_refuses_rather_than_breaks(
     try:
         within(_BUDGET, write)
     except Refused as err:
-        assert err.key
+        assert err.key in EXCEPTION_KEYS
         return
-    except NotFoundError:
-        return
+    if mode in IN_PLACE:
+        assert stored.saves
+        assert stored.deletes == 0
     if stored.saves:
         document = ICalCalendar.from_ical(stored.data)
         assert [item for item in document.subcomponents if item.name != "VTIMEZONE"]
         if not mode.startswith("delete_"):
             assert document.walk("VEVENT")
+
+
+EXCEPTION_KEYS = frozenset(
+    json.loads(
+        (
+            Path(__file__).parents[1] / "custom_components/ha_caldav/strings.json"
+        ).read_text(encoding="utf-8")
+    )["exceptions"]
+)
+
+IN_PLACE = (
+    "rename_the_series",
+    "move_the_series",
+    "clear_the_rule",
+    "edit_one_occurrence",
+)
 
 
 DOCUMENTS = (
@@ -1357,21 +1281,14 @@ def test_importing_a_malformed_document_refuses_or_writes_it_whole(case: Case) -
         assert calendar.client.puts == []
         return
     except ValueError:
-        # A parse failure from icalendar. It carries no key of its own, and the
-        # service layer reports it as a refusal with the library's own reason.
+        # icalendar raises ValueError on a document it cannot parse.
         assert calendar.client.puts == []
         return
-    # Whatever was reported as imported is what actually reached the wire; a
-    # half-written import is taken back rather than reported as done.
     assert len(calendar.client.puts) == len(written)
     for _url, body in calendar.client.puts:
         assert ICalCalendar.from_ical(body).walk("VEVENT") or ICalCalendar.from_ical(
             body
         ).walk("VTODO")
-    # What was imported is named by a uid the document actually carries. The
-    # uid is what the clash check asks the server about and what names the
-    # resource; one that came from anywhere else is checked against nothing and
-    # stored where nothing can find it again.
     assert set(written) <= {
         line.removeprefix("UID:")
         for line in case.ics.splitlines()
@@ -1380,11 +1297,7 @@ def test_importing_a_malformed_document_refuses_or_writes_it_whole(case: Case) -
 
 
 def as_stored(ics: str) -> list[StoredObject]:
-    """Return the document as the collection would hold it: a resource per uid.
-
-    Read back by the clash check, which reads the uid off each resource of the
-    collection when the server will not filter on them.
-    """
+    """Return the document as the collection would hold it: a resource per uid."""
     try:
         parsed = ICalCalendar.from_ical(ics)
     except ValueError:
@@ -1404,11 +1317,8 @@ def as_stored(ics: str) -> list[StoredObject]:
 def test_an_import_never_writes_over_a_uid_the_collection_already_holds(
     case: Case,
 ) -> None:
-    """RFC 4791 gives one uid one resource and caldav names that resource after
-    the uid, so a uid already on the calendar is not a second event but the
-    same one, overwritten with no way back. The check is the whole reason the
-    import reads before it writes, and it has to hold for every shape the uid
-    can be written in."""
+    """RFC 4791 gives one uid one resource, and caldav names that resource after
+    the uid."""
     calendar = dav_calendar()
     calendar.event_by_uid.side_effect = None
     calendar.event_by_uid.return_value = Mock()
@@ -1420,26 +1330,26 @@ def test_an_import_never_writes_over_a_uid_the_collection_already_holds(
     with pytest.raises((Refused, ValueError)) as raised:
         within(_BUDGET, imported)
     if isinstance(raised.value, Refused):
-        assert raised.value.key in ("uid_clash", "document_no_uid", "document_empty")
+        assert raised.value.key in (
+            "uid_clash",
+            "document_no_uid",
+            "document_empty",
+            "duplicate_uid",
+            "unreadable_lines",
+        )
     assert calendar.client.puts == []
 
 
-# Short enough that RFC 5545's 75-octet fold does not reach them, which is
-# what the text search behind this can read.
+# Short enough that RFC 5545's 75-octet fold does not reach them.
 UNREADABLE_UIDS = ("uid-1", "uid-ü-\U0001f600", "   ", "a" * 60)
 
 
 @pytest.mark.parametrize("uid", UNREADABLE_UIDS)
 def test_the_uid_of_an_object_icalendar_will_not_parse_is_still_found(uid: str) -> None:
-    """Dropping such an object would report no clash for the uid it holds and
-    let an import overwrite it, so the uid is taken out of the text instead.
-
-    The object here carries a component icalendar does not know, which is what
-    a client writing its own extension without the X- prefix produces.
-    """
+    """A client writing its own extension without the X- prefix leaves a component
+    icalendar does not know."""
     calendar = dav_calendar()
-    # Refused rather than answered: the uid filter is what iCloud declines, and
-    # declining it is what sends the check through the scan this is about.
+    # iCloud declines the uid filter.
     calendar.event_by_uid.side_effect = Exception("uid filters unsupported")
     calendar.search.return_value = [
         StoredObject(
@@ -1463,8 +1373,6 @@ def test_the_uid_of_an_object_icalendar_will_not_parse_is_still_found(uid: str) 
 
 @cases(*DOCUMENTS)
 def test_exporting_a_calendar_never_stops_at_one_bad_object(case: Case) -> None:
-    """One object another client wrote a non-numeric PRIORITY into must not
-    cost the user the export of everything else in the collection."""
     good = StoredObject(
         document(vevent("DTSTART:20260101T090000Z\r\nSUMMARY:Keeper", uid="keeper")),
         url="https://dav.test/cal/keeper.ics",
@@ -1485,8 +1393,6 @@ MOVABLE = tuple(case for case in DOCUMENTS if "BEGIN:VEVENT" in case.ics)
 
 @cases(*MOVABLE)
 def test_moving_a_malformed_object_refuses_or_keeps_the_original(case: Case) -> None:
-    """The original is deleted after the copy; a copy that did not happen must
-    not take the only remaining version with it."""
     source, target = dav_calendar(), dav_calendar()
     stored = WriteTarget(case.ics)
     source.event_by_uid.side_effect = None
@@ -1504,9 +1410,6 @@ def test_moving_a_malformed_object_refuses_or_keeps_the_original(case: Case) -> 
     assert stored.deletes == 1
     assert len(target.client.puts) == 1
 
-    # Again onto a target that refuses the write, which is the only way the
-    # order of the two shows: a copy that landed and one that never happened
-    # look alike on the source unless the PUT can fail.
     refusing, keeper = dav_calendar(), WriteTarget(case.ics)
     refusing.client.fail_from = 0
     source.event_by_uid.return_value = keeper
@@ -1519,20 +1422,13 @@ def test_moving_a_malformed_object_refuses_or_keeps_the_original(case: Case) -> 
 
 @cases(*TODOS)
 def test_editing_a_malformed_todo_refuses_or_writes_to_the_todo(case: Case) -> None:
-    """The edit lands on a VTODO or on nothing.
-
-    A resource may hold a VEVENT ahead of the VTODO under one uid, and ticking
-    the item off then renamed the meeting beside it, wrote COMPLETED onto it,
-    and left the item the user actually ticked open for the next attempt.
-    """
+    """A resource may hold a VEVENT ahead of the VTODO under one uid."""
     calendar = dav_calendar()
     stored = WriteTarget(case.ics)
     calendar.todo_by_uid.side_effect = None
     calendar.todo_by_uid.return_value = stored
 
     def edit() -> list[bytes]:
-        # Read through the same lazily parsed resource the call uses, so a
-        # document icalendar refuses raises where the code meets it.
         before = [item.to_ical() for item in stored.icalendar_instance.walk("VEVENT")]
         update_todo(calendar, "todo-1", {"summary": "Ticked", "status": "COMPLETED"})
         return before
@@ -1543,17 +1439,13 @@ def test_editing_a_malformed_todo_refuses_or_writes_to_the_todo(case: Case) -> N
         assert err.key
         return
     except ValueError:
-        # icalendar declining the whole document. It carries no key of its own
-        # and the service layer reports it as a refusal with its own reason;
-        # what matters is that nothing was written on the strength of it.
+        # icalendar declines the whole document with a ValueError.
         assert stored.saves == []
         return
     after = [item.to_ical() for item in stored.icalendar_instance.walk("VEVENT")]
     assert after == before
 
 
-# The X-APPLE-SORT-ORDER a server may have on the middle item of a list of
-# three, and why each is worth a drag.
 POSITIONS = (
     pytest.param("", id="no_position_at_all"),
     pytest.param("top", id="a_position_that_is_not_a_number"),
@@ -1567,12 +1459,6 @@ POSITIONS = (
 
 @pytest.mark.parametrize("position", POSITIONS)
 def test_reordering_over_positions_the_server_wrote(position: str) -> None:
-    """The drag lands, or it is refused by name.
-
-    A drag that raises leaves the list in whatever order the server had and
-    tells the user their server had a problem; the item springs back on the
-    next poll and nothing says why.
-    """
     calendar = dav_calendar()
     stored = []
     for index in range(3):
@@ -1695,8 +1581,6 @@ def test_responding_to_a_malformed_invitation(case: Case) -> None:
 def test_the_etag_check_over_what_a_server_may_answer_with(
     stored: str | None, expected: str, written: bool
 ) -> None:
-    """An etag the server did not put on the object is nothing to compare, and
-    refusing on that would leave the whole account unable to write."""
     resource = Mock()
     resource.props = {} if stored is None else {"{DAV:}getetag": stored}
 
@@ -1720,8 +1604,6 @@ HOSTILE_TEXT = (
 
 @pytest.mark.parametrize("text", HOSTILE_TEXT, ids=range(len(HOSTILE_TEXT)))
 def test_creating_from_hostile_text_writes_exactly_one_component(text: str) -> None:
-    """Text carrying the line ending the format is built out of must not be
-    able to end the component it is inside and start another."""
     calendar = Mock()
 
     create_event(
@@ -1781,8 +1663,6 @@ MALFORMED_RULES = (
 
 @pytest.mark.parametrize("rule", MALFORMED_RULES)
 def test_building_a_rule_from_what_a_server_stored(rule: str) -> None:
-    """A rule that cannot be built refuses; one that can must produce its first
-    occurrence rather than searching for one that is not there."""
     start = datetime(2026, 1, 1, 9, tzinfo=UTC)
 
     try:
@@ -1909,8 +1789,6 @@ def multistatus(entries: str) -> DAVResponse:
 
 @cases(*MULTISTATUS)
 def test_parsing_a_multistatus_a_server_may_send(case: Case) -> None:
-    """Whatever comes back, it is keyed the way capability_for looks it up and
-    nothing is asserted about a calendar the response did not name."""
     client = Mock()
     client.principal.return_value.calendar_home_set.get_properties.return_value = (
         multistatus(case.ics)
@@ -1919,12 +1797,7 @@ def test_parsing_a_multistatus_a_server_may_send(case: Case) -> None:
     capabilities = fetch_capabilities(client)
 
     for key, capability in capabilities.items():
-        # Keyed the way capability_for looks one up. A key that does not match
-        # is not an error anywhere; the calendar simply keeps the permissive
-        # default, and the user is told nothing about what it lost.
         assert key == calendar_key(key)
-        # Never "no components": that reads as a calendar holding neither kind,
-        # which is what the pruning step deletes entities on.
         assert capability.components
     named = Mock(url=f"https://cloud.example.com{HOME}/a/")
     unnamed = Mock(url=f"https://cloud.example.com{HOME}/never-mentioned/")
@@ -1934,7 +1807,7 @@ def test_parsing_a_multistatus_a_server_may_send(case: Case) -> None:
 
 @cases(*MULTISTATUS)
 def test_the_parts_of_the_parser_tolerate_what_is_not_there(case: Case) -> None:
-    found = _objects_and_props(multistatus(case.ics))
+    found = objects_and_props(multistatus(case.ics))
 
     for props in found.values():
         components = _components(
@@ -1952,10 +1825,8 @@ FUZZ = settings(
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
 )
 
-# Anything a server can actually deliver. Surrogates are excluded because a
-# UTF-8 body cannot carry one; the line endings are, because they end the
-# property rather than sitting inside it, and putting one there tests vobject
-# rather than this integration.
+# A UTF-8 body cannot carry a surrogate, and a line ending ends the property
+# rather than sitting inside it.
 PROPERTY_TEXT = st.text(
     alphabet=st.characters(blacklist_categories=("Cs",), blacklist_characters="\r\n"),
     max_size=40,
@@ -2021,8 +1892,6 @@ def test_no_text_a_server_can_store_breaks_the_todo_read_path(
         assert item is None or isinstance(item, TodoItem)
 
 
-# The whole range a stored date can take, both value types, and the ends where
-# adding a zone offset is the thing that overflows.
 STORED_DATES = st.one_of(
     st.dates(min_value=date(1, 1, 2), max_value=date(9999, 12, 30)),
     st.datetimes(min_value=datetime(1, 1, 2), max_value=datetime(9999, 12, 30)).map(
@@ -2050,15 +1919,10 @@ def _line(key: str, value: date | datetime) -> str:
 def test_no_pair_of_stored_dates_breaks_the_event_read_path(
     start: date | datetime, end: date | datetime
 ) -> None:
-    """Every combination, ends and value-type mismatches included. An end no
-    datetime can hold once a zone offset reaches it is the shape that used to
-    fail every poll for as long as the object sat in the window."""
     ics = document(vevent(_line("DTSTART", start) + _line("DTEND", end) + "SUMMARY:x"))
     for component in components_of(StoredObject(ics), "vevent"):
         assert isinstance(sort_key(component), datetime)
         assert isinstance(is_all_day(component), bool)
-        # Raising is allowed here and skipping is what the caller does with it;
-        # raising something the caller does not name is the defect.
         for placing in (get_end_date, is_over):
             with suppress(*_UNMAPPABLE):
                 placing(component)

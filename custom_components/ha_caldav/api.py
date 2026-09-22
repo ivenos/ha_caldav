@@ -25,7 +25,7 @@ from icalendar import (
 )
 
 from .const import EVENT_ATTRIBUTES, SORT_ORDER_PROPERTY
-from .errors import Refused, rejected
+from .errors import NETWORK_ERRORS, Refused, rejected
 from .event import (
     apply_extras,
     as_datetime,
@@ -158,7 +158,7 @@ def create_event(
     core = {
         key: value
         for key, value in data.items()
-        if key not in EXTRA_KEYS and value is not None
+        if key not in EXTRA_KEYS and value is not None and value != ""
     }
     extras = {key: value for key, value in data.items() if key in EXTRA_KEYS}
     instance = ICalCalendar.from_ical(
@@ -393,12 +393,12 @@ def _stored_order(
 
 def _single_move(now: list[str], wanted: list[str]) -> str | None:
     """Return the one uid whose move turns the stored order into this one."""
-    candidates = {
+    candidates = dict.fromkeys(
         side[index]
         for index in range(len(now))
-        for side in (now, wanted)
+        for side in (wanted, now)
         if now[index] != wanted[index]
-    }
+    )
     for candidate in candidates:
         if [uid for uid in now if uid != candidate] == [
             uid for uid in wanted if uid != candidate
@@ -464,15 +464,6 @@ def delete_components(resource: Any, kind: str) -> None:
     resource.save(increase_seqno=False, only_this_recurrence=False)
 
 
-def delete_todo(
-    calendar: caldav.Calendar, uid: str, expected_etag: str | None = None
-) -> None:
-    """Delete a to-do item."""
-    todo = object_by_uid(calendar, uid, todo=True)
-    check_etag(todo, expected_etag)
-    delete_components(todo, "VTODO")
-
-
 def delete_todos(
     calendar: caldav.Calendar, uids: list[str], etags: dict[str, str]
 ) -> None:
@@ -485,20 +476,25 @@ def delete_todos(
 
 
 def _todos_by_uid(calendar: caldav.Calendar, uids: list[str]) -> dict[str, Any]:
-    """Return a resource per uid, sharing one collection read once refused."""
+    """Return a resource per uid, read in one go past a few or once refused."""
     found: dict[str, Any] = {}
-    for index, uid in enumerate(uids):
-        try:
-            found[uid] = _filtered(calendar, uid, todo=True)
-        except Exception as err:
-            if not _uid_search_refused(err):
-                raise
-            scanned = {stored: item for item, stored in _scan(calendar, todo=True)}
-            for rest in uids[index:]:
-                if rest not in scanned:
-                    raise NotFoundError(f"{rest} not found on server") from err
-                found[rest] = scanned[rest]
+    if len(uids) <= _SCAN_THRESHOLD:
+        for uid in uids:
+            try:
+                found[uid] = _filtered(calendar, uid, todo=True)
+            except Exception as err:
+                if not _uid_search_refused(err):
+                    raise
+                break
+        else:
             return found
+    scanned = {stored: item for item, stored in _scan(calendar, todo=True)}
+    for uid in uids:
+        if uid in found:
+            continue
+        if uid not in scanned:
+            raise NotFoundError(f"{uid} not found on server")
+        found[uid] = scanned[uid]
     return found
 
 
@@ -507,8 +503,7 @@ def _comparable_etag(value: Any) -> str:
 
     A proxy may add or drop the W/ between the read and the check.
     """
-    text = str(value).strip()
-    return text.removeprefix("W/") if text.startswith("W/") else text
+    return str(value).strip().removeprefix("W/")
 
 
 def check_etag(resource: Any, expected_etag: str | None) -> None:
@@ -570,9 +565,33 @@ def move_event(
     # RFC 4791 gives one uid one resource, and caldav names it after the uid.
     if _already_there(target, {uid}):
         raise Refused("uid_clash", uids=uid)
-    save_document(target, instance, as_todo=False)
-    if not keep_original:
+    copy = save_document(target, instance, as_todo=False)
+    if keep_original:
+        return
+    try:
         event.delete()
+    except NETWORK_ERRORS:
+        # The server may have deleted it before the timeout.
+        if _still_there(source, uid):
+            _undo(copy)
+        raise
+
+
+def _still_there(calendar: caldav.Calendar, uid: str) -> bool:
+    """Return whether the uid is certainly still on the calendar."""
+    try:
+        object_by_uid(calendar, uid)
+    except NETWORK_ERRORS:
+        return False
+    return True
+
+
+def _undo(resource: Any) -> None:
+    """Remove a resource this call wrote before failing further on."""
+    try:
+        resource.delete()
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Could not undo a half-finished write: %s", err)
 
 
 def save_document(
@@ -682,6 +701,8 @@ def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
     the calendar aborts the whole import.
     """
     document = ICalCalendar.from_ical(ics)
+    if unreadable := _unreadable(document):
+        raise Refused("unreadable_lines", lines=", ".join(unreadable))
     zones = {str(zone.get("TZID", "")): zone for zone in document.walk("VTIMEZONE")}
     groups: dict[str, list[Any]] = {}
     for component in document.walk():
@@ -696,15 +717,12 @@ def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
     if not groups:
         raise Refused("document_empty")
     for uid, components in groups.items():
-        # RFC 5545 3.8.4.4: one uid, one component of a kind without RECURRENCE-ID.
-        masters = [item.name for item in components if "RECURRENCE-ID" not in item]
-        if len(masters) != len(set(masters)):
+        # RFC 5545 3.8.4.4 allows one component without RECURRENCE-ID per uid,
+        # and RFC 4791 4.1 one kind of component per resource.
+        masters = [item for item in components if "RECURRENCE-ID" not in item]
+        if len(masters) > 1 or len({item.name for item in components}) > 1:
             raise Refused("duplicate_uid", uid=uid)
-    # A group holding any VTODO is stored as one.
-    as_todo = {
-        uid: any(item.name == "VTODO" for item in components)
-        for uid, components in groups.items()
-    }
+    as_todo = {uid: components[0].name == "VTODO" for uid, components in groups.items()}
     if clashing := sorted(_already_there(calendar, set(as_todo))):
         raise Refused("uid_clash", uids=", ".join(clashing[:5]))
     written: list[Any] = []
@@ -720,12 +738,19 @@ def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
     except Exception:
         # Objects left behind would be refused as clashes on the retry.
         for stored in written:
-            try:
-                stored.delete()
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.warning("Could not undo a half-finished import: %s", err)
+            _undo(stored)
         raise
     return list(groups)
+
+
+def _unreadable(document: ICalCalendar) -> list[str]:
+    """Return the properties icalendar could not parse and left out.
+
+    It records them on the component rather than raising.
+    """
+    return sorted(
+        {name for component in document.walk() for name, _ in component.errors}
+    )
 
 
 def _already_there(calendar: caldav.Calendar, wanted: set[str]) -> set[str]:
@@ -775,10 +800,13 @@ def export_ics(calendar: caldav.Calendar, uid: str | None) -> str:
             continue
         seen.add(url)
         try:
-            subcomponents = item.icalendar_instance.subcomponents
+            instance = item.icalendar_instance
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("Leaving an object out of the export: %s", err)
             continue
+        if unreadable := _unreadable(instance):
+            _LOGGER.warning("Exporting %s without its %s lines", url, unreadable)
+        subcomponents = instance.subcomponents
         for component in subcomponents:
             if component.name == "VTIMEZONE":
                 zones.setdefault(str(component.get("TZID", "")), component)

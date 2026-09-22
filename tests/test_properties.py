@@ -1,13 +1,5 @@
-"""Property-based tests for the recurring-series write path.
-
-The example suites pin the cases somebody thought of. These state what has to
-hold for every rule, every zone and every occurrence, and let hypothesis look
-for the combination nobody wrote down.
-
-Occurrences are expanded here with dateutil straight off the stored document,
-not with the integration's own helpers, so an expansion and a write that are
-wrong in the same way still fail.
-"""
+"""Occurrences are expanded with dateutil straight off the stored document, not
+with the integration's own helpers."""
 
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
@@ -29,8 +21,7 @@ from custom_components.ha_caldav.recurrence import delete_event, update_event
 
 UID = "prop-1"
 
-# Expansion horizon. Small enough to stay fast, wide enough that a weekly rule
-# reaches over a DST change from every start below.
+# Expansion horizon: a weekly rule reaches over a DST change from every start below.
 LIMIT = 44
 
 PROPERTY = settings(
@@ -48,9 +39,7 @@ ZONES = (
     "Pacific/Kiritimati",
 )
 
-# The zones Home Assistant itself is put in. A half-hour offset, one across the
-# day line and one that changes over, because a UTC comparison leaking the local
-# zone shows up in those and not in an even offset an hour off UTC.
+# Local zones: a half-hour offset, one across the day line, one with DST.
 LOCAL_ZONES = ("UTC", "America/New_York", "Asia/Kolkata", "Pacific/Kiritimati")
 
 # Starts that put a weekly or daily series across a DST change: Berlin turns
@@ -75,7 +64,6 @@ VOLATILE = ("DTSTAMP", "LAST-MODIFIED", "CREATED")
 
 @contextmanager
 def local_zone(name):
-    """Pin Home Assistant's local zone for the duration of one edit."""
     previous = dt_util.get_default_time_zone()
     dt_util.set_default_time_zone(ZoneInfo(name))
     try:
@@ -86,12 +74,8 @@ def local_zone(name):
 
 @st.composite
 def rules(draw, day, kind, moment, zone):
-    """Return an RRULE whose DTSTART is one of its own occurrences.
-
-    RFC 5545 3.8.5.3 has a start that the rule does not itself produce, and the
-    module refuses to move such a series at all; a generator that produced them
-    would spend every example on that one refusal.
-    """
+    """Return an RRULE whose DTSTART is one of its own occurrences, which RFC 5545
+    3.8.5.3 does not require."""
     freq = draw(st.sampled_from(("DAILY", "WEEKLY", "MONTHLY", "YEARLY")))
     parts = [f"FREQ={freq}"]
     if (interval := draw(st.integers(1, 4))) > 1:
@@ -134,7 +118,6 @@ def _until(day, kind, moment, zone):
 
 @st.composite
 def series(draw, kinds=("utc", "zoned", "floating", "allday"), extras=True):
-    """Return a one-component VCALENDAR holding a recurring event."""
     kind = draw(st.sampled_from(kinds))
     day = draw(st.sampled_from(DAYS))
     moment = draw(st.sampled_from(TIMES))
@@ -168,7 +151,6 @@ def series(draw, kinds=("utc", "zoned", "floating", "allday"), extras=True):
 
 
 def _slots(start, rule):
-    """Return the first occurrences of a rule, for hanging extras off."""
     anchor = start if isinstance(start, datetime) else datetime.combine(start, time.min)
     found = []
     for index, produced in enumerate(rrulestr(rule, dtstart=anchor)):
@@ -179,7 +161,6 @@ def _slots(start, rule):
 
 
 def document(start, end, rule, exdates=(), rdates=(), overrides=()):
-    """Return the ICS text for a series and its extra, canceled and moved days."""
     calendar = ICalendar()
     calendar.add("prodid", "-//ha_caldav//properties//EN")
     calendar.add("version", "2.0")
@@ -215,7 +196,6 @@ def master_of(ical):
 
 
 def key(value):
-    """Return the comparable form of an occurrence, free of the local zone."""
     if not isinstance(value, datetime):
         return value.isoformat()
     if value.tzinfo is None:
@@ -237,7 +217,6 @@ def _values(component, name):
 
 
 def occurrences(source):
-    """Expand a stored document into the occurrences a server would report."""
     ical = ICalendar.from_ical(source) if isinstance(source, str) else source
     master = master_of(ical)
     if master is None or "DTSTART" not in master:
@@ -271,7 +250,6 @@ def occurrences(source):
 
 
 def rule_slots(source):
-    """Return the occurrences the stored rule makes on its own, extras aside."""
     ical = ICalendar.from_ical(source) if isinstance(source, str) else source
     master = master_of(ical)
     if master is None or (recur := master.get("RRULE")) is None:
@@ -292,12 +270,8 @@ def overrides_of(ical):
 
 
 def orphans(source):
-    """Return the exceptions naming a slot the stored series no longer has.
-
-    RFC 5545 3.8.4.4 attaches an exception by its RECURRENCE-ID alone. One that
-    names a moment the master no longer produces is not an exception any more:
-    every client shows it as a second event beside the series.
-    """
+    """RFC 5545 3.8.4.4 attaches an exception by its RECURRENCE-ID alone, and every
+    client shows one naming no slot of the series as a second event."""
     ical = ICalendar.from_ical(source) if isinstance(source, str) else source
     slots = {key(value) for value in occurrences(ical)}
     return [
@@ -308,7 +282,6 @@ def orphans(source):
 
 
 def horizon_of(values):
-    """Return the cutoff past which a truncated expansion says nothing."""
     return key(values[LIMIT - 4]) if len(values) >= LIMIT - 3 else None
 
 
@@ -319,11 +292,8 @@ def clipped(values, horizon):
 
 
 def recurrence_id(occurrence):
-    """Return the id Home Assistant echoes back for an occurrence.
-
-    Aware throughout, including for a floating series: the frontend has a zone
-    and puts one on, which is the reading recurrence._align is written for.
-    """
+    """Return the id Home Assistant echoes back for an occurrence, aware even for
+    a floating series: the frontend puts a zone on."""
     if not isinstance(occurrence, datetime):
         return occurrence.isoformat()
     if occurrence.tzinfo is None:
@@ -332,12 +302,8 @@ def recurrence_id(occurrence):
 
 
 def stable(source, *, versioned=True):
-    """Return the stored document with the properties every write rewrites gone.
-
-    SEQUENCE stays in by default: two edits made from different zones are the
-    same edit and owe the same version. Only a comparison of one edit against
-    itself repeated drops it, because RFC 5545 3.8.7.4 has a second write count.
-    """
+    """Return the document without what every write rewrites. RFC 5545 3.8.7.4
+    counts a second write in SEQUENCE."""
     ical = ICalendar.from_ical(source) if isinstance(source, str) else source
     for component in ical.walk():
         for name in VOLATILE if versioned else (*VOLATILE, "SEQUENCE"):
@@ -346,7 +312,6 @@ def stable(source, *, versioned=True):
 
 
 def stored_of(calendar):
-    """Return what a calendar holds after an edit: the object, or nothing."""
     if calendar.event.deleted:
         return None
     return calendar.event.data
@@ -355,7 +320,6 @@ def stored_of(calendar):
 @settings(PROPERTY, max_examples=160)
 @given(ics=series(), index=st.integers(0, LIMIT - 1), zone=st.sampled_from(LOCAL_ZONES))
 def test_deleting_one_occurrence_removes_exactly_that_one(ics, index, zone) -> None:
-    """Delete an occurrence, list the series: the set less that one, no more."""
     with local_zone(zone):
         before = occurrences(ics)
         assume(index < len(before))
@@ -376,7 +340,6 @@ def test_deleting_one_occurrence_removes_exactly_that_one(ics, index, zone) -> N
 def test_deleting_from_an_occurrence_keeps_exactly_the_earlier_ones(
     ics, index, zone
 ) -> None:
-    """A this-and-following delete is a cut, not a reshape of what stays."""
     with local_zone(zone):
         before = occurrences(ics)
         assume(index < len(before))
@@ -397,13 +360,10 @@ def test_deleting_from_an_occurrence_keeps_exactly_the_earlier_ones(
 @settings(PROPERTY, max_examples=160)
 @given(ics=series(), index=st.integers(1, LIMIT - 1), zone=st.sampled_from(LOCAL_ZONES))
 def test_a_split_conserves_the_occurrence_set(ics, index, zone) -> None:
-    """Head and tail together are the series, and share no occurrence."""
     with local_zone(zone):
         before = occurrences(ics)
         assume(index < len(before))
         target = before[index]
-        # An RDATE inside the rule's span re-anchors the tail, and the module
-        # refuses that split outright; test_recurrence covers the refusal.
         assume(key(target) in {key(value) for value in rule_slots(ics)})
         horizon = horizon_of(before)
         calendar = FakeCalendar(ics)
@@ -435,7 +395,6 @@ def test_a_split_conserves_the_occurrence_set(ics, index, zone) -> None:
 def test_a_split_hands_the_tail_the_summary_and_the_head_the_old_one(
     ics, index, zone
 ) -> None:
-    """The edit reaches the half it was asked for and only that half."""
     with local_zone(zone):
         before = occurrences(ics)
         assume(index < len(before))
@@ -457,7 +416,6 @@ def test_a_split_hands_the_tail_the_summary_and_the_head_the_old_one(
 
 
 def _under_each_zone(edit, ics):
-    """Run one edit under several local zones, returning what each stored."""
     written = []
     for name in LOCAL_ZONES:
         with local_zone(name):
@@ -484,7 +442,6 @@ def _same_everywhere(written) -> None:
 @settings(PROPERTY, max_examples=80)
 @given(ics=series(kinds=("utc", "zoned", "allday")), index=st.integers(0, LIMIT - 1))
 def test_deleting_an_occurrence_does_not_depend_on_the_local_zone(ics, index) -> None:
-    """An anchored series is dated by the server, not by where the client runs."""
     with local_zone("UTC"):
         before = occurrences(ics)
     assume(index < len(before))
@@ -502,7 +459,6 @@ def test_deleting_an_occurrence_does_not_depend_on_the_local_zone(ics, index) ->
     index=st.integers(1, LIMIT - 1),
 )
 def test_splitting_does_not_depend_on_the_local_zone(ics, index) -> None:
-    """Nor does the object a split writes, nor the uid it writes it under."""
     with local_zone("UTC"):
         before = occurrences(ics)
     assume(index < len(before))
@@ -524,8 +480,6 @@ def test_splitting_does_not_depend_on_the_local_zone(ics, index) -> None:
 @settings(PROPERTY, max_examples=80)
 @given(ics=series(kinds=("utc", "zoned", "allday")))
 def test_renaming_a_series_does_not_depend_on_the_local_zone(ics) -> None:
-    """A rename must not re-anchor anything, wherever it is made from."""
-
     def edit(calendar):
         update_event(calendar, UID, {"summary": "Renamed"})
 
@@ -537,7 +491,6 @@ def test_renaming_a_series_does_not_depend_on_the_local_zone(ics) -> None:
 def test_repeating_a_split_neither_clones_the_tail_nor_moves_the_head(
     ics, index, zone
 ) -> None:
-    """The retry path rests on this: a second attempt is a no-op."""
     with local_zone(zone):
         before = occurrences(ics)
         assume(index < len(before))
@@ -566,7 +519,6 @@ def test_repeating_a_split_neither_clones_the_tail_nor_moves_the_head(
 def test_repeating_an_occurrence_delete_leaves_the_same_series(
     ics, index, zone
 ) -> None:
-    """A retried delete removes the occurrence once and nothing else after."""
     with local_zone(zone):
         before = occurrences(ics)
         assume(index < len(before))
@@ -581,16 +533,13 @@ def test_repeating_an_occurrence_delete_leaves_the_same_series(
 
         assert twice is not None
         assert occurrences(twice) == occurrences(once)
-        # By line, not by what the series produces: a second EXDATE for a slot
-        # already excluded changes no occurrence, and Home Assistant retries a
-        # failed delete, so every attempt would leave one more behind.
+        # A second EXDATE for a slot already excluded changes no occurrence.
         assert twice.count("EXDATE") == once.count("EXDATE")
 
 
 @settings(PROPERTY, max_examples=80)
 @given(ics=series(kinds=("utc", "zoned", "allday")), zone=st.sampled_from(LOCAL_ZONES))
 def test_repeating_a_rename_stores_the_same_object(ics, zone) -> None:
-    """Nothing about a rename accumulates."""
     with local_zone(zone):
         first = FakeCalendar(ics)
         update_event(first, UID, {"summary": "Renamed"})
@@ -607,7 +556,6 @@ DST_ZONES = ("Europe/Berlin", "America/New_York")
 
 
 def wall_shifted(value, days, zone):
-    """Return the value the same days later on the same clock."""
     if not isinstance(value, datetime):
         return value + timedelta(days=days)
     naive = value.astimezone(zone).replace(tzinfo=None) + timedelta(days=days)
@@ -623,11 +571,6 @@ def wall_shifted(value, days, zone):
     local=st.sampled_from(LOCAL_ZONES),
 )
 def test_moving_a_series_keeps_every_wall_clock(zone, day, moment, days, local) -> None:
-    """A series nudged by whole days keeps the hour it is held at, over DST.
-
-    The extra and the canceled dates go with it: a shift taken as an instant
-    rather than on the clock moves them by an hour on one side of the change.
-    """
     anchor = ZoneInfo(zone)
     start = datetime.combine(day, moment, tzinfo=anchor)
     moved = wall_shifted(start, days, anchor)
@@ -660,7 +603,6 @@ def test_moving_a_series_keeps_every_wall_clock(zone, day, moment, days, local) 
 def test_moving_a_series_carries_its_exceptions_on_the_same_clock(
     zone, day, moment, days, local
 ) -> None:
-    """An exception that stays attached is one whose slot the rule still makes."""
     anchor = ZoneInfo(zone)
     start = datetime.combine(day, moment, tzinfo=anchor)
     slot = start + timedelta(days=5)
@@ -690,7 +632,6 @@ def test_moving_a_series_carries_its_exceptions_on_the_same_clock(
 @settings(PROPERTY, max_examples=160)
 @given(ics=series(), index=st.integers(0, LIMIT - 1), zone=st.sampled_from(LOCAL_ZONES))
 def test_editing_one_occurrence_writes_it_and_leaves_the_rest(ics, index, zone) -> None:
-    """An occurrence edit lands on the slot it named and moves no other."""
     with local_zone(zone):
         before = occurrences(ics)
         assume(index < len(before))
@@ -718,14 +659,10 @@ def test_editing_one_occurrence_writes_it_and_leaves_the_rest(ics, index, zone) 
 def test_editing_an_occurrence_the_series_does_not_have_is_refused(
     ics, index, zone
 ) -> None:
-    """A success that stored nothing is worse than a refusal."""
     with local_zone(zone):
         before = occurrences(ics)
         assume(index < len(before))
         target = before[index]
-        # A second past an occurrence is never one itself. A day past one can
-        # be, so an all-day series is asked about a day the rule leaves free,
-        # or about the day before it starts when a daily rule leaves none.
         if isinstance(target, datetime):
             gap = target + timedelta(seconds=1)
         else:
@@ -741,11 +678,6 @@ def test_editing_an_occurrence_the_series_does_not_have_is_refused(
 
 
 def served(ics, occurrence):
-    """Return the VEVENT the read path sees for one expanded occurrence.
-
-    Through vobject, which is the library the coordinator reads with, and the
-    same document wrapper the write path uses.
-    """
     master = master_of(ICalendar.from_ical(ics))
     span = master["DTEND"].dt - master["DTSTART"].dt
     component = ICalEvent()
@@ -774,11 +706,6 @@ def served(ics, occurrence):
 def test_the_id_the_read_path_publishes_names_the_occurrence_it_came_from(
     ics, index, zone
 ) -> None:
-    """What the panel is given back is what the write path has to resolve.
-
-    Nothing normalizes the id between the two, so an occurrence the read path
-    can show and the write path cannot find is one nobody can edit.
-    """
     with local_zone(zone):
         before = occurrences(ics)
         assume(index < len(before))
@@ -786,9 +713,8 @@ def test_the_id_the_read_path_publishes_names_the_occurrence_it_came_from(
         component = served(ics, target)
         event = to_event(component)
         assert event is not None
-        # Both sides through UTC: PEP 495 has a local time that a spring-forward
-        # skipped compare unequal to its own instant in another zone, so the two
-        # never meet on ==, only on the instant each stands for.
+        # PEP 495 has a time a spring-forward skipped compare unequal to its own
+        # instant in another zone.
         assert key(sort_key(component)) == key(to_utc(target))
 
         horizon = horizon_of(before)
@@ -802,9 +728,7 @@ def test_the_id_the_read_path_publishes_names_the_occurrence_it_came_from(
         ]
 
 
-# The properties Home Assistant has no field for take a different route: they
-# are read off vobject and written through icalendar, and the two libraries
-# escape a parameter value differently.
+# vobject and icalendar escape a parameter value differently.
 
 _TEXT = st.text(
     st.one_of(
@@ -857,7 +781,6 @@ _EXTRAS = st.fixed_dictionaries(
 
 
 def _published(extras: dict) -> dict:
-    """Return the attributes an entity would show for these properties."""
     component = ICalEvent()
     component.add("UID", UID)
     component.add("SUMMARY", "x")
@@ -873,13 +796,6 @@ def _published(extras: dict) -> dict:
 @PROPERTY
 @given(extras=_EXTRAS)
 def test_the_attributes_an_event_publishes_survive_being_written_back(extras) -> None:
-    """A service call is fed the attribute set the entity showed.
-
-    Read through one library and written through the other, an attendee name
-    carrying a quote came back with the escape of the last write still in it,
-    so every run of an automation that re-sent what it had read made the name
-    longer.
-    """
     once = _published(extras)
 
     assert _published(once) == once

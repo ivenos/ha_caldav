@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.components.calendar import DOMAIN as CALENDAR_DOMAIN
+from homeassistant.components.todo import DOMAIN as TODO_DOMAIN
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import (
     HomeAssistant,
@@ -58,6 +59,7 @@ from .const import (
     ATTR_URL,
     COMPONENT_EVENT,
     COMPONENT_TODO,
+    CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
     DOMAIN,
     EVENT_CLASSIFICATIONS,
@@ -518,8 +520,14 @@ def _check_span(start: Any, end: Any) -> None:
         )
 
 
+_CLEARABLE = ("description", "location", ATTR_URL, ATTR_ORGANIZER)
+
+
 def _event_fields(data: dict[str, Any]) -> dict[str, Any]:
-    """Return the event fields present in a call, extras included."""
+    """Return the event fields present in a call, extras included.
+
+    An empty text clears its field: it is what a template renders for nothing.
+    """
     fields: dict[str, Any] = {}
     for key in ("summary", "description", "location", "rrule"):
         if key in data:
@@ -528,6 +536,9 @@ def _event_fields(data: dict[str, Any]) -> dict[str, Any]:
         name = str(key)
         if name in data:
             fields[name] = data[name]
+    for name in _CLEARABLE:
+        if fields.get(name) == "":
+            fields[name] = None
     return fields
 
 
@@ -545,8 +556,7 @@ async def _async_move_event(entity: HaCaldavCalendarEntity, call: ServiceCall) -
             translation_key="same_calendar",
             translation_placeholders={"name": target.name},
         )
-    await _async_write(
-        entity,
+    await entity.async_write(
         partial(
             move_event,
             entity.calendar,
@@ -556,7 +566,7 @@ async def _async_move_event(entity: HaCaldavCalendarEntity, call: ServiceCall) -
         ),
         SERVICE_MOVE_EVENT,
     )
-    await target.coordinator.async_request_refresh()
+    await target.coordinator.async_refresh()
 
 
 async def _async_check_control(
@@ -616,8 +626,7 @@ def _managed_target(entity: HaCaldavCalendarEntity, entity_id: str) -> ManagedCa
 
 async def _async_import_ics(entity: HaCaldavCalendarEntity, call: ServiceCall) -> None:
     _require_writable(entity)
-    await _async_write(
-        entity,
+    await entity.async_write(
         partial(import_ics, entity.calendar, call.data[ATTR_ICS]),
         SERVICE_IMPORT_ICS,
     )
@@ -636,8 +645,7 @@ async def _async_export_ics(
 
 async def _async_set_color(entity: HaCaldavCalendarEntity, call: ServiceCall) -> None:
     _require_writable(entity)
-    await _async_write(
-        entity,
+    await entity.async_write(
         partial(set_calendar_color, entity.calendar, call.data[ATTR_COLOR]),
         SERVICE_SET_CALENDAR_COLOR,
     )
@@ -653,8 +661,7 @@ async def _async_respond(entity: HaCaldavCalendarEntity, call: ServiceCall) -> N
         raise ServiceValidationError(
             translation_domain=DOMAIN, translation_key="no_scheduling"
         )
-    await _async_write(
-        entity,
+    await entity.async_write(
         partial(
             respond_to_invitation,
             entity.calendar,
@@ -719,16 +726,20 @@ async def _async_delete_calendar(hass: HomeAssistant, call: ServiceCall) -> None
         hass, partial(delete_calendar, managed.calendar), SERVICE_DELETE_CALENDAR
     )
     _async_forget_entities(hass, entry, managed.calendar.url)
-    # Both shapes: entries written before v1.2.0 selected by name.
-    gone = {name, calendar_key(managed.calendar.url)}
-    selected = entry.options.get(CONF_CALENDARS)
-    if selected and gone & set(selected):
-        options = {**entry.options}
+    key = calendar_key(managed.calendar.url)
+    options = {**entry.options}
+    selected = options.get(CONF_CALENDARS)
+    if selected and key in selected:
         # An empty list would read as every calendar anyway.
-        if remaining := [item for item in selected if item not in gone]:
+        if remaining := [item for item in selected if item != key]:
             options[CONF_CALENDARS] = remaining
         else:
             del options[CONF_CALENDARS]
+    if key in (overrides := options.get(CONF_CALENDAR_OPTIONS, {})):
+        options[CONF_CALENDAR_OPTIONS] = {
+            item: value for item, value in overrides.items() if item != key
+        }
+    if options != entry.options:
         hass.config_entries.async_update_entry(entry, options=options)
     await hass.config_entries.async_reload(entry.entry_id)
 
@@ -738,13 +749,12 @@ def _async_forget_entities(
 ) -> None:
     """Remove the entities of a calendar that no longer exists."""
     registry = er.async_get(hass)
-    for unique_id in (
-        calendar_unique_id(entry.entry_id, url),
-        todo_unique_id(entry.entry_id, url),
+    for domain, unique_id in (
+        (CALENDAR_DOMAIN, calendar_unique_id(entry.entry_id, url)),
+        (TODO_DOMAIN, todo_unique_id(entry.entry_id, url)),
     ):
-        for domain in ("calendar", "todo"):
-            if entity_id := registry.async_get_entity_id(domain, DOMAIN, unique_id):
-                registry.async_remove(entity_id)
+        if entity_id := registry.async_get_entity_id(domain, DOMAIN, unique_id):
+            registry.async_remove(entity_id)
 
 
 def _loaded_entry(hass: HomeAssistant, entry_id: str) -> HaCaldavConfigEntry:
@@ -768,13 +778,3 @@ async def _async_account_job(hass: HomeAssistant, job: partial, action: str) -> 
     except Exception as err:
         # As broad as the entity write path, and for the same reason.
         raise as_reported(err, action) from err
-
-
-async def _async_write(
-    entity: HaCaldavCalendarEntity,
-    job: partial,
-    action: str,
-    forget: tuple[str, tuple[str, ...]] | None = None,
-) -> None:
-    """Run a write against the entity's own calendar, as the platform would."""
-    await entity.async_write(job, action, forget=forget)

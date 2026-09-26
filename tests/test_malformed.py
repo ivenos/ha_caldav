@@ -11,9 +11,10 @@ import threading
 from typing import Any
 from unittest.mock import Mock
 
+import caldav
 from caldav.davclient import DAVResponse
 from caldav.lib.error import DAVError, NotFoundError
-from conftest import dav_calendar as shared_dav_calendar
+from conftest import dav_calendar as shared_dav_calendar, written_through
 from homeassistant.components.todo import TodoItem
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
@@ -22,13 +23,12 @@ from hypothesis import HealthCheck, given, settings, strategies as st
 from icalendar import Calendar as ICalCalendar, Event as ICalEvent, vRecur
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-import vobject
 
 from custom_components.ha_caldav.api import (
-    check_etag,
     create_event,
     create_todo,
     export_ics,
+    held_etag,
     import_ics,
     move_event,
     reorder_todos,
@@ -49,7 +49,6 @@ from custom_components.ha_caldav.const import DOMAIN
 from custom_components.ha_caldav.coordinator import (
     _UNMAPPABLE,
     HaCaldavCoordinator,
-    component_of,
     components_of,
     get_end_date,
     is_all_day,
@@ -131,33 +130,12 @@ def within(seconds: float, call: Any) -> Any:
     return box["value"]
 
 
-class StoredObject:
-    """A search result parsed on access: caldav parses lazily and raises out of the
+def StoredObject(ics: str, url: str = "https://dav.test/cal/a.ics") -> caldav.Event:
+    """A search result as caldav builds it, parsed lazily and raising out of the
     property."""
-
-    def __init__(self, ics: str, url: str = "https://dav.test/cal/a.ics") -> None:
-        self._ics = ics
-        self.url = url
-        self.props: dict[str, Any] = {"{DAV:}getetag": '"e1"'}
-
-    @property
-    def vobject_instance(self) -> Any:
-        return vobject.readOne(self._ics)
-
-    @property
-    def icalendar_instance(self) -> Any:
-        return ICalCalendar.from_ical(self._ics)
-
-    @property
-    def icalendar_component(self) -> Any:
-        instance = self.icalendar_instance
-        return next(
-            (sub for sub in instance.subcomponents if sub.name != "VTIMEZONE"), None
-        )
-
-    @property
-    def data(self) -> str:
-        return self._ics
+    item = caldav.Event(data=ics, url=url)
+    item.props["{DAV:}getetag"] = '"e1"'
+    return item
 
 
 class WriteTarget:
@@ -173,6 +151,7 @@ class WriteTarget:
         self.saves: list[dict[str, Any]] = []
         self.deletes = 0
         self.loads = 0
+        written_through(self)
 
     @property
     def data(self) -> str:
@@ -515,6 +494,21 @@ EVENTS = (
         " the start forever; the shape that once pinned an executor thread.",
     ),
     Case(
+        "a_lunar_rule",
+        document(vevent(SPAN + "RRULE:RSCALE=CHINESE;FREQ=YEARLY\r\nSUMMARY:Birthday")),
+        "RFC 7529, as Apple writes a lunar birthday; dateutil refuses RSCALE.",
+    ),
+    Case(
+        "a_rule_with_an_extension_part",
+        document(vevent(SPAN + "RRULE:FREQ=WEEKLY;X-NAME=1\r\nSUMMARY:Extended")),
+        "RFC 5545 allows x-name parts in a rule, which dateutil refuses.",
+    ),
+    Case(
+        "a_secondly_rule",
+        document(vevent(SPAN + "RRULE:FREQ=SECONDLY\r\nSUMMARY:Ticking")),
+        "A week of it is 604,800 occurrences to expand in memory.",
+    ),
+    Case(
         "an_all_day_event_of_no_length",
         document(
             vevent(
@@ -706,7 +700,17 @@ def poll_calendar(items: list[StoredObject]) -> Mock:
     calendar = Mock()
     calendar.name = "Personal"
     calendar.url = "https://cloud.example.com/remote.php/dav/personal"
-    calendar.search.side_effect = lambda **_kwargs: items
+    held = [(item.data, item.url, dict(item.props)) for item in items]
+
+    def search(**_kwargs: Any) -> list[caldav.Event]:
+        # caldav builds fresh objects for every search, and expansion rewrites them.
+        found = []
+        for data, url, props in held:
+            found.append(caldav.Event(data=data, url=url))
+            found[-1].props.update(props)
+        return found
+
+    calendar.search.side_effect = search
     calendar.objects_by_sync_token.side_effect = NotFoundError("no sync token")
     return calendar
 
@@ -779,8 +783,6 @@ async def test_the_panel_window_survives_a_bad_object(
 def test_reading_one_component_never_raises(case: Case) -> None:
     item = StoredObject(dated(case.ics))
     found = components_of(item, "vevent")
-    # The body is reparsed per access, as caldav's is.
-    assert (component_of(item, "vevent") is None) is (not found)
     master = master_of(item)
     assert (master is None) is (not found)
     if master is not None and len(found) > 1:
@@ -832,12 +834,12 @@ async def test_a_window_whose_objects_carry_no_etag_keeps_the_ones_it_has(
     coordinator = await poll(hass, [item])
     coordinator.etags = {"kept": '"e0"'}
 
-    etags, rules = coordinator._window_index(
+    window = coordinator._read_window(
         dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
     )
 
-    assert etags is None
-    assert rules == {"uid-1": None}
+    assert window.etags is None
+    assert window.rules == {"uid-1": None}
     await coordinator.async_refresh()
     assert coordinator.etags == {"kept": '"e0"'}
 
@@ -856,11 +858,11 @@ async def test_the_rule_is_read_off_the_master_however_the_server_ordered_it(
     )
     coordinator = await poll(hass, [item])
 
-    _etags, rules = coordinator._window_index(
+    window = coordinator._read_window(
         dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
     )
 
-    assert rules == {"uid-1": "FREQ=WEEKLY"}
+    assert window.rules == {"uid-1": "FREQ=WEEKLY"}
 
 
 SERIES_START = (
@@ -1569,26 +1571,26 @@ def test_responding_to_a_malformed_invitation(case: Case) -> None:
 
 
 @pytest.mark.parametrize(
-    ("stored", "expected", "written"),
+    ("stored", "expected", "sent"),
     [
-        (None, '"a"', True),
-        ('"a"', '"a"', True),
-        ('"a"', '"b"', False),
-        ('W/"a"', 'W/"a"', True),
-        ("", '"a"', False),
+        (None, '"a"', '"a"'),
+        ('"a"', '"a"', '"a"'),
+        ('"a"', '"b"', Refused),
+        ('W/"a"', 'W/"a"', None),
+        ("", '"a"', Refused),
     ],
 )
 def test_the_etag_check_over_what_a_server_may_answer_with(
-    stored: str | None, expected: str, written: bool
+    stored: str | None, expected: str, sent: Any
 ) -> None:
     resource = Mock()
     resource.props = {} if stored is None else {"{DAV:}getetag": stored}
 
-    if written:
-        check_etag(resource, expected)
-    else:
+    if sent is Refused:
         with pytest.raises(Refused, match="etag_conflict"):
-            check_etag(resource, expected)
+            held_etag(resource, expected)
+    else:
+        assert held_etag(resource, expected) == sent
 
 
 HOSTILE_TEXT = (
@@ -1604,7 +1606,7 @@ HOSTILE_TEXT = (
 
 @pytest.mark.parametrize("text", HOSTILE_TEXT, ids=range(len(HOSTILE_TEXT)))
 def test_creating_from_hostile_text_writes_exactly_one_component(text: str) -> None:
-    calendar = Mock()
+    calendar = dav_calendar()
 
     create_event(
         calendar,
@@ -1618,8 +1620,7 @@ def test_creating_from_hostile_text_writes_exactly_one_component(text: str) -> N
     )
     create_todo(calendar, {"summary": text or "x", "description": text})
 
-    event_body = calendar.save_event.call_args.args[0]
-    todo_body = calendar.save_todo.call_args.args[0]
+    event_body, todo_body = map(ICalCalendar.from_ical, calendar.client.bodies)
     assert len(event_body.walk("VEVENT")) == 1
     assert len(todo_body.walk("VTODO")) == 1
 

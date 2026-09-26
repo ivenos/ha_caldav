@@ -24,7 +24,7 @@
               "client_key": "Ruta de la clave de cliente"
             },
             "data_description": {
-              "ca_bundle": "Opcional. Verifica el servidor con este archivo en lugar del almacén del sistema.",
+              "ca_bundle": "Opcional. Verifica el servidor con este archivo en lugar del almacén del sistema. Con un archivo, la verificación sigue activa.",
               "client_cert": "Opcional. Identifica a Home Assistant ante servidores que piden certificado.",
               "client_key": "Opcional. La clave privada de ese certificado."
             }
@@ -33,13 +33,15 @@
       },
       "reconfigure": {
         "title": "Cambiar la conexión CalDAV",
-        "description": "Actualiza la URL del servidor o los ajustes de TLS. La cuenta en sí no cambia.",
+        "description": "Actualiza la URL del servidor, la contraseña o los ajustes de TLS. La cuenta en sí no cambia.",
         "data": {
           "url": "URL del servidor",
+          "password": "Contraseña",
           "verify_ssl": "Verificar el certificado SSL"
         },
         "data_description": {
           "url": "La dirección de tu servidor CalDAV. En la mayoría de los servidores basta con el nombre del host.",
+          "password": "Déjala vacía para conservar la actual.",
           "verify_ssl": "Desactivado, cualquiera que intercepte la conexión puede hacerse pasar por el servidor y leer la contraseña."
         },
         "sections": {
@@ -52,7 +54,7 @@
               "client_key": "Ruta de la clave de cliente"
             },
             "data_description": {
-              "ca_bundle": "Opcional. Verifica el servidor con este archivo en lugar del almacén del sistema.",
+              "ca_bundle": "Opcional. Verifica el servidor con este archivo en lugar del almacén del sistema. Con un archivo, la verificación sigue activa.",
               "client_cert": "Opcional. Identifica a Home Assistant ante servidores que piden certificado.",
               "client_key": "Opcional. La clave privada de ese certificado."
             }
@@ -102,11 +104,12 @@
           "read_only": "Solo lectura"
         },
         "data_description": {
+          "calendars": "Los calendarios que reciben entidades. Con todos marcados, un calendario añadido en el servidor también las recibe.",
           "scan_interval": "Cada cuánto se buscan cambios hechos fuera de Home Assistant.",
           "timeout": "Cuánto tiempo se espera la respuesta del servidor a una sola petición.",
           "days": "Con cuánta antelación se busca el próximo evento.",
           "include_all_day": "Si un evento de todo el día puede ser el próximo evento.",
-          "read_only": "Oculta los controles de crear, editar y eliminar."
+          "read_only": "Oculta los controles de crear, editar y eliminar, y las acciones se niegan a escribir. Un cambio de nombre en Home Assistant se queda entonces ahí."
         }
       },
       "pick": {
@@ -117,7 +120,7 @@
       },
       "calendar": {
         "title": "Ajustes de {calendar}",
-        "description": "Sustituyen a los ajustes de la cuenta solo para {calendar}.",
+        "description": "Estos ajustes sustituyen a los de la cuenta solo para {calendar}.",
         "data": {
           "days": "Días de antelación",
           "include_all_day": "Incluir eventos de todo el día",
@@ -127,7 +130,7 @@
         "data_description": {
           "days": "Con cuánta antelación se busca el próximo evento.",
           "include_all_day": "Si un evento de todo el día puede ser el próximo evento.",
-          "read_only": "Oculta los controles de crear, editar y eliminar.",
+          "read_only": "Oculta los controles de crear, editar y eliminar, y las acciones se niegan a escribir. Un cambio de nombre en Home Assistant se queda entonces ahí.",
           "reset": "Descarta todo lo ajustado aquí y vuelve a seguir la cuenta."
         }
       }
@@ -176,6 +179,9 @@
     },
     "invalid_rrule": {
       "message": "La regla de recurrencia no es válida: {reason}"
+    },
+    "last_selected_calendar": {
+      "message": "{name} es el único calendario incluido en esta cuenta. Incluye primero otro en las opciones."
     },
     "mixed_time_types": {
       "message": "El inicio y el fin deben ser del mismo tipo: dos fechas para un evento de todo el día, o dos fechas con hora."

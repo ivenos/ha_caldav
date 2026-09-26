@@ -61,6 +61,7 @@ from .const import (
     COMPONENT_TODO,
     CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
+    CONF_READ_ONLY,
     DOMAIN,
     EVENT_CLASSIFICATIONS,
     EVENT_STATUSES,
@@ -85,13 +86,14 @@ from .coordinator import (
     HaCaldavConfigEntry,
     ManagedCalendar,
     calendar_unique_id,
-    components_of,
     master_of,
+    occurrences,
     to_event,
     todo_unique_id,
 )
 from .errors import as_reported
 from .event import read_extras
+from .options import account_settings
 
 if TYPE_CHECKING:
     from .calendar import HaCaldavCalendarEntity
@@ -190,9 +192,20 @@ _ONE_START = cv.has_at_most_one_key("start_date_time", "start_date")
 _ONE_END = cv.has_at_most_one_key("end_date_time", "end_date")
 
 
+def _blank_as_none(validator: Any) -> Any:
+    """Return a field that reads as left out when a template renders it empty."""
+
+    def validate(value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return validator(value)
+
+    return validate
+
+
 def _range_needs_occurrence(value: dict[str, Any]) -> dict[str, Any]:
     """Refuse a recurrence range with no occurrence for it to start at."""
-    if "recurrence_range" in value and "recurrence_id" not in value:
+    if value.get("recurrence_range") and value.get("recurrence_id") is None:
         raise vol.Invalid("recurrence_range needs recurrence_id")
     return value
 
@@ -218,8 +231,10 @@ UPDATE_EVENT_SCHEMA = vol.All(
     cv.make_entity_service_schema(
         {
             vol.Required("uid"): cv.string,
-            vol.Optional("recurrence_id"): cv.string,
-            vol.Optional("recurrence_range"): _named((RANGE_THIS_AND_FUTURE,)),
+            vol.Optional("recurrence_id"): _blank_as_none(cv.string),
+            vol.Optional("recurrence_range"): _blank_as_none(
+                _named((RANGE_THIS_AND_FUTURE,))
+            ),
             vol.Optional("summary"): cv.string,
             **SPAN_FIELDS,
             vol.Optional("description"): cv.string,
@@ -250,8 +265,10 @@ DELETE_EVENT_SCHEMA = vol.All(
     cv.make_entity_service_schema(
         {
             vol.Required("uid"): cv.string,
-            vol.Optional("recurrence_id"): cv.string,
-            vol.Optional("recurrence_range"): _named((RANGE_THIS_AND_FUTURE,)),
+            vol.Optional("recurrence_id"): _blank_as_none(cv.string),
+            vol.Optional("recurrence_range"): _blank_as_none(
+                _named((RANGE_THIS_AND_FUTURE,))
+            ),
         }
     ),
     _range_needs_occurrence,
@@ -378,10 +395,13 @@ def _found_events(calendar: Any, criteria: dict[str, Any]) -> list[dict[str, Any
     with its master.
     """
     window = "start" in criteria and "end" in criteria
-    extra = {"expand": True, "split_expanded": False} if window else {}
     events = []
-    for item in calendar.search(event=True, **criteria, **extra):
-        vevents = components_of(item, "vevent") if window else [master_of(item)]
+    for item in calendar.search(event=True, **criteria):
+        vevents = (
+            occurrences(item, criteria["start"], criteria["end"])
+            if window
+            else [master_of(item)]
+        )
         for vevent in vevents:
             if vevent is None or (event := to_event(vevent)) is None:
                 continue
@@ -677,6 +697,12 @@ async def _async_respond(entity: HaCaldavCalendarEntity, call: ServiceCall) -> N
 
 async def _async_create_calendar(hass: HomeAssistant, call: ServiceCall) -> None:
     entry = _loaded_entry(hass, call.data[ATTR_CONFIG_ENTRY_ID])
+    if account_settings(entry)[CONF_READ_ONLY]:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="read_only",
+            translation_placeholders={"name": entry.title},
+        )
     created = await _async_account_job(
         hass,
         partial(
@@ -722,19 +748,23 @@ async def _async_delete_calendar(hass: HomeAssistant, call: ServiceCall) -> None
             translation_key="read_only",
             translation_placeholders={"name": managed.name},
         )
+    key = calendar_key(managed.calendar.url)
+    selected = entry.options.get(CONF_CALENDARS)
+    remaining = [item for item in selected or [] if item != key]
+    if selected and not remaining:
+        # An empty selection reads as every calendar the account has.
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="last_selected_calendar",
+            translation_placeholders={"name": managed.name},
+        )
     await _async_account_job(
         hass, partial(delete_calendar, managed.calendar), SERVICE_DELETE_CALENDAR
     )
     _async_forget_entities(hass, entry, managed.calendar.url)
-    key = calendar_key(managed.calendar.url)
     options = {**entry.options}
-    selected = options.get(CONF_CALENDARS)
     if selected and key in selected:
-        # An empty list would read as every calendar anyway.
-        if remaining := [item for item in selected if item != key]:
-            options[CONF_CALENDARS] = remaining
-        else:
-            del options[CONF_CALENDARS]
+        options[CONF_CALENDARS] = remaining
     if key in (overrides := options.get(CONF_CALENDAR_OPTIONS, {})):
         options[CONF_CALENDAR_OPTIONS] = {
             item: value for item, value in overrides.items() if item != key

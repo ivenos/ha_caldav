@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 import caldav
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_TIMEOUT
+from homeassistant.const import CONF_SCAN_INTERVAL, CONF_TIMEOUT
 
 from .connection import calendar_key
 from .const import (
@@ -17,8 +18,16 @@ from .const import (
     DEFAULT_DAYS,
     DEFAULT_INCLUDE_ALL_DAY,
     DEFAULT_READ_ONLY,
+    DEFAULT_SCAN_INTERVAL,
     DEFAULT_TIMEOUT,
 )
+
+
+def poll_interval(entry: ConfigEntry) -> timedelta:
+    """Return how often the account is polled."""
+    return timedelta(
+        minutes=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    )
 
 
 def request_timeout(entry: ConfigEntry) -> float:
@@ -41,11 +50,7 @@ def account_settings(entry: ConfigEntry) -> dict[str, Any]:
 def calendar_settings(entry: ConfigEntry, calendar: caldav.Calendar) -> dict[str, Any]:
     """Return the effective settings for one calendar.
 
-    An override holds only the keys the user set. Entries written before
-    v1.2.0 keyed overrides on the display name rather than the url.
+    An override holds only the keys the user set.
     """
     overrides = entry.options.get(CONF_CALENDAR_OPTIONS, {})
-    override = overrides.get(calendar_key(calendar.url))
-    if override is None:
-        override = overrides.get(calendar.name or "", {})
-    return {**account_settings(entry), **override}
+    return {**account_settings(entry), **overrides.get(calendar_key(calendar.url), {})}

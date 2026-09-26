@@ -3,17 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 import logging
 
 import caldav
-from homeassistant.const import (
-    CONF_PASSWORD,
-    CONF_SCAN_INTERVAL,
-    CONF_URL,
-    CONF_USERNAME,
-    Platform,
-)
+from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, Platform
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import (
@@ -31,6 +24,7 @@ from .capability import (
     supports_sync_collection,
 )
 from .connection import (
+    UNREACHABLE,
     account_key,
     build_client,
     calendar_key,
@@ -40,12 +34,10 @@ from .connection import (
     url_candidates,
 )
 from .const import (
-    CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
     CONF_DAYS,
     CONF_INCLUDE_ALL_DAY,
     CONF_READ_ONLY,
-    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     ISSUE_BUILTIN_CALDAV,
     ISSUE_NO_SYNC_COLLECTION,
@@ -60,7 +52,7 @@ from .coordinator import (
     todo_unique_id,
 )
 from .errors import rejected
-from .options import calendar_settings, request_timeout
+from .options import calendar_settings, poll_interval, request_timeout
 from .patches import apply as apply_patches
 from .services import async_register_services
 
@@ -120,7 +112,15 @@ def _async_migrate_entity_keys(hass: HomeAssistant, entry: HaCaldavConfigEntry) 
 
 
 def _normalized_unique_id(entry_id: str, unique_id: str, domain: str) -> str | None:
-    """Return a unique id rebuilt on the calendar key, or None if it is not ours.
+    """Return a unique id rebuilt on the calendar key, or None if it is not ours."""
+    if (key := _registered_key(entry_id, unique_id, domain)) is None:
+        return None
+    suffix = "-todo" if domain == Platform.TODO else ""
+    return f"{entry_id}-{calendar_key(key)}{suffix}"
+
+
+def _registered_key(entry_id: str, unique_id: str, domain: str) -> str | None:
+    """Return the calendar part of an entity's unique id, or None if it is not ours.
 
     The half comes from the registry domain: a collection url may itself end
     in "-todo".
@@ -129,10 +129,7 @@ def _normalized_unique_id(entry_id: str, unique_id: str, domain: str) -> str | N
     if not unique_id.startswith(prefix):
         return None
     rest = unique_id.removeprefix(prefix)
-    if domain == Platform.TODO:
-        rest = rest.removesuffix("-todo")
-        return f"{prefix}{calendar_key(rest)}-todo"
-    return f"{prefix}{calendar_key(rest)}"
+    return rest.removesuffix("-todo") if domain == Platform.TODO else rest
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> bool:
@@ -161,9 +158,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
             supports_sync_collection, calendars[0]
         )
 
-    scan_interval = timedelta(
-        minutes=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-    )
+    scan_interval = poll_interval(entry)
     selected = entry.options.get(CONF_CALENDARS)
 
     colors = HaCaldavColorCoordinator(hass, entry, client, scan_interval)
@@ -215,9 +210,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
     _async_drop_account_device(hass, entry)
     _async_prune_entities(hass, entry, managed, calendars)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    loaded = {calendar_key(item.calendar.url) for item in managed}
     entry.async_on_unload(
-        _async_follow_the_server(hass, entry, colors, loaded, not selected)
+        _async_follow_the_server(
+            hass,
+            entry,
+            client,
+            colors,
+            {calendar_key(calendar.url) for calendar in calendars},
+            {calendar_key(item.calendar.url) for item in managed},
+        )
     )
     _async_check_for_issues(hass, entry)
     return True
@@ -250,6 +251,8 @@ async def _async_connect(
             # The bootstrap may sit behind another auth realm, as the flow allows.
             if rejected(err):
                 refused = err
+            if isinstance(err, UNREACHABLE):
+                break
             continue
         size_pool(client, len(calendars))
         return client, calendars
@@ -269,18 +272,15 @@ async def _async_connect(
 def _async_key_by_url(
     hass: HomeAssistant, entry: HaCaldavConfigEntry, calendars: list[caldav.Calendar]
 ) -> None:
-    """Rewrite what an entry keeps by display name onto the calendar's url.
+    """Rewrite a selection kept by display name onto the calendars' urls.
 
-    Entries written before v1.2.0 selected and overrode by name, which a
-    rename breaks. A name no calendar carries right now stays as it is.
+    Entries written before v1.2.0 selected by name, which a rename breaks. A
+    name no calendar carries right now stays as it is.
     """
     keys = {calendar_key(calendar.url) for calendar in calendars}
     shown: dict[str, list[str]] = {}
-    named: dict[str, list[str]] = {}
     for calendar in calendars:
-        key = calendar_key(calendar.url)
-        shown.setdefault(display_name(calendar), []).append(key)
-        named.setdefault(calendar.name or "", []).append(key)
+        shown.setdefault(display_name(calendar), []).append(calendar_key(calendar.url))
     options = dict(entry.options)
     if selected := options.get(CONF_CALENDARS):
         rewritten: list[str] = []
@@ -289,14 +289,6 @@ def _async_key_by_url(
                 if key not in rewritten:
                     rewritten.append(key)
         options[CONF_CALENDARS] = rewritten
-    if overrides := options.get(CONF_CALENDAR_OPTIONS):
-        rekeyed = {item: value for item, value in overrides.items() if item in keys}
-        for item, value in overrides.items():
-            if item in keys:
-                continue
-            for key in named.get(item, [item]):
-                rekeyed.setdefault(key, value)
-        options[CONF_CALENDAR_OPTIONS] = rekeyed
     if options != entry.options:
         _LOGGER.debug("Keying the calendars of %s by url", entry.title)
         hass.config_entries.async_update_entry(entry, options=options)
@@ -340,40 +332,110 @@ def _async_drop_account_device(hass: HomeAssistant, entry: HaCaldavConfigEntry) 
         devices.async_remove_device(device.id)
 
 
+_GONE_POLLS = 2
+
+
 @callback
 def _async_follow_the_server(
     hass: HomeAssistant,
     entry: HaCaldavConfigEntry,
+    client: caldav.DAVClient,
     colors: HaCaldavColorCoordinator,
+    listed: set[str],
     loaded: set[str],
-    include_new: bool,
 ) -> CALLBACK_TYPE:
-    """Reload the entry once the color poll finds a loaded calendar renamed or gone.
+    """Keep the entry in step with the calendars the color poll finds.
 
-    With include_new, also once it finds a collection it has not seen. All
-    against the previous poll, not the calendar list: the poll reads every
-    child of the home set, the inbox and outbox too.
+    It reloads once a loaded calendar is renamed or gone, and once the poll
+    finds a calendar the entry should load that the listing left out. The
+    entities of a calendar missing from _GONE_POLLS polls in a row go.
     """
+    selected = entry.options.get(CONF_CALENDARS)
     previous = colors.data
+    missing = dict.fromkeys(_unlisted_keys(hass, entry, listed), 0)
 
     @callback
     def check() -> None:
         nonlocal previous
-        if (found := colors.data) is None:
+        if (found := colors.data) is None or found is previous:
             return
-        if previous is not None and (
-            (include_new and found.keys() - previous.keys())
-            or any(
-                key in previous
-                and (key not in found or found[key].name != previous[key].name)
-                for key in loaded
-            )
-        ):
+        # The poll reads every child of the home set, the inbox and outbox too;
+        # one whose kind went unsaid counts as there but not as new.
+        calendars = {key for key, item in found.items() if item.calendar is not False}
+        changed = previous is not None and any(
+            key in previous
+            and (key not in calendars or found[key].name != previous[key].name)
+            for key in loaded
+        )
+        previous = found
+        if changed:
             _LOGGER.debug("Reloading %s for a change on the server", entry.title)
             hass.config_entries.async_schedule_reload(entry.entry_id)
-        previous = found
+            return
+        if wanted := {
+            key
+            for key, item in found.items()
+            if item.calendar and key not in listed and (not selected or key in selected)
+        }:
+            entry.async_create_task(
+                hass, _async_reload_once_listed(hass, entry, client, wanted)
+            )
+        for key in missing:
+            missing[key] = 0 if key in calendars else missing[key] + 1
+        if gone := {key for key, polls in missing.items() if polls >= _GONE_POLLS}:
+            _async_forget_calendars(hass, entry, gone)
+            for key in gone:
+                del missing[key]
 
     return colors.async_add_listener(check)
+
+
+async def _async_reload_once_listed(
+    hass: HomeAssistant,
+    entry: HaCaldavConfigEntry,
+    client: caldav.DAVClient,
+    wanted: set[str],
+) -> None:
+    """Reload once the calendar listing has one of these calendars too.
+
+    Asked again rather than trusted: two answers that keep disagreeing would
+    otherwise reload the entry on every poll.
+    """
+    try:
+        calendars = await hass.async_add_executor_job(_list_calendars, client)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Could not list the calendars again: %s", err)
+        return
+    if wanted & {calendar_key(calendar.url) for calendar in calendars}:
+        _LOGGER.debug("Reloading %s for a calendar it did not list", entry.title)
+        hass.config_entries.async_schedule_reload(entry.entry_id)
+
+
+@callback
+def _unlisted_keys(
+    hass: HomeAssistant, entry: HaCaldavConfigEntry, listed: set[str]
+) -> set[str]:
+    """Return the calendars the entry has entities for but the listing left out."""
+    registry = er.async_get(hass)
+    return {
+        key
+        for record in er.async_entries_for_config_entry(registry, entry.entry_id)
+        if (key := _registered_key(entry.entry_id, record.unique_id, record.domain))
+        is not None
+        and key not in listed
+    }
+
+
+@callback
+def _async_forget_calendars(
+    hass: HomeAssistant, entry: HaCaldavConfigEntry, keys: set[str]
+) -> None:
+    """Remove the entities of calendars gone from the server."""
+    registry = er.async_get(hass)
+    for record in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if _registered_key(entry.entry_id, record.unique_id, record.domain) in keys:
+            _LOGGER.debug("Removing %s; its calendar is gone", record.entity_id)
+            registry.async_remove(record.entity_id)
 
 
 @callback
@@ -448,7 +510,6 @@ def _async_check_for_issues(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
     _async_check_builtin_conflict(hass, entry)
     issue_id = f"{ISSUE_NO_SYNC_COLLECTION}_{entry.entry_id}"
     data = entry.runtime_data
-    # With no calendar loaded there is nothing to warn about.
     if not data.calendars or data.sync_collection:
         ir.async_delete_issue(hass, DOMAIN, issue_id)
         return
@@ -463,6 +524,7 @@ def _async_check_for_issues(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
     )
 
 
+@callback
 def _async_check_builtin_conflict(
     hass: HomeAssistant, entry: HaCaldavConfigEntry
 ) -> None:

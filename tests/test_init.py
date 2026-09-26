@@ -2,7 +2,7 @@ from datetime import timedelta
 from unittest.mock import Mock, patch
 
 from caldav.davclient import requests
-from caldav.elements import dav
+from caldav.elements import cdav, dav
 from caldav.lib.error import AuthorizationError
 from conftest import propfind_answer
 from homeassistant.config_entries import ConfigEntryState
@@ -31,7 +31,6 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.ha_caldav import async_migrate_entry
 from custom_components.ha_caldav.connection import calendar_key
 from custom_components.ha_caldav.const import (
-    CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
     CONF_READ_ONLY,
     DOMAIN,
@@ -331,6 +330,18 @@ async def test_the_well_known_url_is_tried_after_the_entered_one(
     assert tried == [
         "https://cloud.example.com",
         "https://cloud.example.com/.well-known/caldav",
+    ]
+
+
+async def test_a_host_that_never_answers_is_not_waited_on_twice(
+    hass: HomeAssistant,
+) -> None:
+    _, client = await _connect_with(
+        hass, requests.ConnectTimeout("boom"), url="https://cloud.example.com"
+    )
+
+    assert [call.args[0] for call in client.call_args_list] == [
+        "https://cloud.example.com"
     ]
 
 
@@ -815,10 +826,19 @@ async def test_an_entity_disabled_with_the_account_device_stays_disabled(
 
 
 def _home_set(principal: Mock) -> None:
-    found: dict[str, dict] = {"/remote.php/dav/": {}, "/remote.php/dav/inbox/": {}}
+    found: dict[str, dict] = {
+        "/remote.php/dav/": {dav.ResourceType.tag: (dav.Collection.tag,)},
+        "/remote.php/dav/inbox/": {
+            dav.ResourceType.tag: (
+                dav.Collection.tag,
+                "{urn:ietf:params:xml:ns:caldav}schedule-inbox",
+            )
+        },
+    }
     for calendar in principal.calendars.return_value:
         found[f"{calendar_key(calendar.url)}/"] = {
-            dav.DisplayName.tag: Mock(text=calendar.name)
+            dav.DisplayName.tag: Mock(text=calendar.name),
+            dav.ResourceType.tag: (dav.Collection.tag, cdav.Calendar.tag),
         }
     principal.calendar_home_set.get_properties.return_value = propfind_answer(found)
 
@@ -867,8 +887,9 @@ async def test_a_calendar_added_on_the_server_is_loaded_at_the_next_poll_only(
     await _next_poll(hass)
 
     assert hass.states.get("todo.shopping") is not None
+    listings = principal.calendars.call_count
     await _next_poll(hass)
-    assert principal.calendars.call_count == 2
+    assert principal.calendars.call_count == listings
 
 
 async def test_a_calendar_added_on_the_server_stays_out_of_a_selection(
@@ -1003,18 +1024,6 @@ async def test_a_selection_stored_by_name_survives_a_rename_on_the_server(
     assert hass.states.get("calendar.personal").name == "Private"
 
 
-async def test_an_override_stored_by_name_is_keyed_by_url(
-    hass: HomeAssistant, principal: Mock
-) -> None:
-    entry = await _setup_on_account(
-        hass, {CONF_CALENDAR_OPTIONS: {"Personal": {CONF_READ_ONLY: True}}}
-    )
-
-    assert entry.options[CONF_CALENDAR_OPTIONS] == {
-        "/remote.php/dav/Personal": {CONF_READ_ONLY: True}
-    }
-
-
 async def test_a_calendar_deleted_on_the_server_reloads_the_entry(
     hass: HomeAssistant, principal: Mock
 ) -> None:
@@ -1027,6 +1036,56 @@ async def test_a_calendar_deleted_on_the_server_reloads_the_entry(
     assert principal.calendars.call_count == 2
 
 
+async def test_the_entities_of_a_calendar_deleted_on_the_server_go(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    """Not on the first miss: a server having a bad minute lists a calendar short."""
+    await _setup_on_account(hass)
+    registry = er.async_get(hass)
+
+    principal.calendars.return_value = []
+    _home_set(principal)
+    await _next_poll(hass)
+    await _next_poll(hass)
+    assert registry.async_get("calendar.personal") is not None
+
+    await _next_poll(hass)
+    assert registry.async_get("calendar.personal") is None
+    assert registry.async_get("todo.personal") is None
+
+
+async def test_a_selected_calendar_the_listing_missed_is_loaded_at_the_next_poll(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    [personal] = principal.calendars.return_value
+    principal.calendars.return_value = []
+    await _setup_on_account(hass, {CONF_CALENDARS: ["/remote.php/dav/Personal"]})
+    assert hass.states.get("calendar.personal") is None
+
+    principal.calendars.return_value = [personal]
+    await _next_poll(hass)
+
+    assert hass.states.get("calendar.personal") is not None
+
+
+async def test_a_calendar_only_the_poll_reports_neither_reloads_nor_goes(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    """The listing and the poll disagreeing for good must not reload on every poll,
+    nor take the entities of a calendar the poll still sees."""
+    entry = await _setup_on_account(hass)
+    principal.calendars.return_value = []
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    with patch.object(hass.config_entries, "async_schedule_reload") as reload:
+        for _ in range(3):
+            await _next_poll(hass)
+
+    reload.assert_not_called()
+    assert er.async_get(hass).async_get("calendar.personal") is not None
+
+
 async def test_an_entry_from_a_later_major_version_is_not_migrated(
     hass: HomeAssistant,
 ) -> None:
@@ -1036,6 +1095,17 @@ async def test_an_entry_from_a_later_major_version_is_not_migrated(
     await hass.config_entries.async_setup(entry.entry_id)
 
     assert entry.state is ConfigEntryState.MIGRATION_ERROR
+
+
+async def test_the_migration_itself_refuses_a_later_major_version(
+    hass: HomeAssistant,
+) -> None:
+    """Home Assistant 2026.3 hands such an entry to the migration unchecked."""
+    entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x", version=2)
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry) is False
+    assert entry.unique_id == "x"
 
 
 async def test_a_second_spelling_of_one_account_keeps_its_own_key(

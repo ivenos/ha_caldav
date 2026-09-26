@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 import caldav
@@ -52,20 +53,33 @@ async def async_get_config_entry_diagnostics(
 def _options(entry: HaCaldavConfigEntry) -> dict[str, Any]:
     """Return the options with each collection path cut to its last segment.
 
-    The path usually spells out the account name the redaction strips.
+    The path usually spells out the account name the redaction strips, Google's
+    in the segment before the last.
     """
     options = dict(entry.options)
-    if isinstance(per_calendar := options.get(CONF_CALENDAR_OPTIONS), dict):
+    per_calendar = options.get(CONF_CALENDAR_OPTIONS)
+    per_calendar = per_calendar if isinstance(per_calendar, dict) else None
+    selected = options.get(CONF_CALENDARS)
+    selected = selected if isinstance(selected, list) else None
+    leaves = _leaves([*(selected or []), *(per_calendar or {})])
+    if per_calendar is not None:
         options[CONF_CALENDAR_OPTIONS] = {
-            _leaf(key): value for key, value in per_calendar.items()
+            leaves[key]: value for key, value in per_calendar.items()
         }
-    if isinstance(selected := options.get(CONF_CALENDARS), list):
-        options[CONF_CALENDARS] = [_leaf(key) for key in selected]
+    if selected is not None:
+        options[CONF_CALENDARS] = [leaves[key] for key in selected]
     return options
 
 
-def _leaf(key: object) -> str:
-    return str(key).rstrip("/").rsplit("/", 1)[-1]
+def _leaves(keys: list[Any]) -> dict[Any, str]:
+    """Return key -> its last path segment, numbered where two share one."""
+    seen: Counter[str] = Counter()
+    leaves: dict[Any, str] = {}
+    for key in dict.fromkeys(keys):
+        leaf = str(key).rstrip("/").rsplit("/", 1)[-1]
+        seen[leaf] += 1
+        leaves[key] = leaf if seen[leaf] == 1 else f"{leaf} ({seen[leaf]})"
+    return leaves
 
 
 def _calendars(data: HaCaldavRuntimeData) -> Any:

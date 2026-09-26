@@ -8,13 +8,14 @@ import logging
 from math import isfinite
 import re
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 import caldav
 from caldav.davclient import requests
 from caldav.elements import dav, ical
 from caldav.lib import vcal
-from caldav.lib.error import NotFoundError
+from caldav.lib.error import DeleteError, NotFoundError, PutError, errmsg
 from dateutil.rrule import rruleset
 from homeassistant.util import dt as dt_util
 from icalendar import (
@@ -25,7 +26,7 @@ from icalendar import (
 )
 
 from .const import EVENT_ATTRIBUTES, SORT_ORDER_PROPERTY
-from .errors import NETWORK_ERRORS, Refused, rejected
+from .errors import NETWORK_ERRORS, WRITE_ERRORS, Refused, rejected
 from .event import (
     apply_extras,
     as_datetime,
@@ -33,7 +34,6 @@ from .event import (
     comparable_address,
     date_values,
     framed_rule,
-    hold_sequence,
     replace,
     rule_from,
     shifted,
@@ -105,16 +105,17 @@ def _scan(calendar: caldav.Calendar, todo: bool | None) -> Iterator[tuple[Any, s
     Two filtered requests for both kinds: a filter naming only VCALENDAR is
     answered with nothing at all by a good few servers.
     """
+    tagged = {"props": [dav.GetEtag()]}
     if todo is None:
         found = [
-            *calendar.search(event=True),
-            *calendar.search(todo=True, include_completed=True),
+            *calendar.search(event=True, **tagged),
+            *calendar.search(todo=True, include_completed=True, **tagged),
         ]
     else:
         found = (
-            calendar.search(todo=True, include_completed=True)
+            calendar.search(todo=True, include_completed=True, **tagged)
             if todo
-            else calendar.search(event=True)
+            else calendar.search(event=True, **tagged)
         )
     for item in found:
         try:
@@ -171,7 +172,7 @@ def create_event(
         check_rule(vevent["RRULE"], start)
     if extras:
         apply_extras(vevent, extras, own_address)
-    calendar.save_event(_zoned(instance, vevent))
+    save_document(calendar, _zoned(instance, vevent), as_todo=False)
 
 
 def create_todo(calendar: caldav.Calendar, data: dict[str, Any]) -> None:
@@ -183,7 +184,7 @@ def create_todo(calendar: caldav.Calendar, data: dict[str, Any]) -> None:
     if status:
         # An item created as done needs the completion properties too.
         _set_status(vtodo, status)
-    calendar.save_todo(_zoned(instance, vtodo))
+    save_document(calendar, _zoned(instance, vtodo), as_todo=True)
 
 
 def _zoned(instance: ICalCalendar, component: Any) -> ICalCalendar:
@@ -202,7 +203,7 @@ def update_todo(
 ) -> None:
     """Apply changed fields to an existing to-do item."""
     todo = object_by_uid(calendar, uid, todo=True)
-    check_etag(todo, expected_etag)
+    tag = held_etag(todo, expected_etag)
     vtodo = collapse_repeated(vtodo_of(todo))
     # Only on the move to done: core sends the status along with every edit.
     settled = str(vtodo.get("STATUS", "")).upper() in _SETTLED
@@ -215,7 +216,7 @@ def update_todo(
         # The roll owns DUE and DTSTART.
         _set_text(vtodo, data)
         stamp(vtodo)
-        _save_todo(todo)
+        _save_todo(todo, tag)
         return
     _set_text(vtodo, data)
     if status := data.get("status"):
@@ -230,7 +231,7 @@ def update_todo(
         vtodo.pop("DUE", None)
     _check_todo_span(vtodo)
     stamp(vtodo)
-    _save_todo(todo)
+    _save_todo(todo, tag)
 
 
 def _set_due(vtodo: Any, due: Any) -> None:
@@ -267,11 +268,12 @@ def vtodo_of(resource: Any) -> Any:
     """Return the VTODO of a resource.
 
     caldav's icalendar_component is the first non-timezone component, and a
-    resource may hold a VEVENT ahead of the VTODO under one uid.
+    resource may hold a VEVENT or a detached instance ahead of the series.
     """
-    for component in resource.icalendar_instance.walk("VTODO"):
-        return component
-    raise Refused("no_todo_in_object")
+    found = list(resource.icalendar_instance.walk("VTODO"))
+    if not found:
+        raise Refused("no_todo_in_object")
+    return next((item for item in found if "RECURRENCE-ID" not in item), found[0])
 
 
 # RFC 5545 3.6.1 and 3.6.2 allow each of these once; RFC 2445-era clients
@@ -300,20 +302,11 @@ def collapse_repeated(component: Any) -> Any:
     return component
 
 
-def _save_todo(todo: Any) -> None:
-    """Write a to-do back to the resource it was read from.
-
-    Without no_create, which has caldav ask the server for the uid before
-    every write; that is the request iCloud refuses.
-    """
-    # stamp has moved SEQUENCE already, and caldav bumps the first component
-    # that is not a timezone on the way out, event or not.
-    hold_sequence(todo.icalendar_component)
+def _save_todo(todo: Any, tag: str | None) -> None:
+    """Write a to-do back to the resource it was read from."""
     # A due date may reference a zone the stored item never defined.
     todo.icalendar_instance = zoned_document(todo.icalendar_instance)
-    # only_this_recurrence recurses without end on an object holding nothing
-    # but a detached instance.
-    todo.save(obj_type="todo", only_this_recurrence=False)
+    put_resource(todo, tag)
 
 
 def _set_text(vtodo: Any, data: dict[str, Any]) -> None:
@@ -334,8 +327,8 @@ def _set_status(vtodo: Any, status: str) -> None:
     Only when it moves between the two states core has; a rename carries the
     folded value back.
     """
-    current = str(vtodo.get("STATUS", "")).upper()
-    if current and (current in _SETTLED) == (status in _SETTLED):
+    current = str(vtodo.get("STATUS", "NEEDS-ACTION")).upper()
+    if (current in _SETTLED) == (status in _SETTLED):
         return
     vtodo["STATUS"] = status
     if status == "COMPLETED":
@@ -423,10 +416,11 @@ def _between(
 
 
 def _write_position(todo: Any, position: int) -> None:
+    tag = held_etag(todo, None)
     vtodo = vtodo_of(todo)
     vtodo[SORT_ORDER_PROPERTY] = str(position)
     stamp(vtodo)
-    _save_todo(todo)
+    _save_todo(todo, tag)
 
 
 def _sort_position(vtodo: Any) -> float | None:
@@ -441,7 +435,7 @@ def _sort_position(vtodo: Any) -> float | None:
     return position if isfinite(position) else None
 
 
-def delete_components(resource: Any, kind: str) -> None:
+def delete_components(resource: Any, kind: str, tag: str | None = None) -> None:
     """Remove the components of one kind, and the resource once none is left.
 
     A resource may hold a VEVENT beside a VTODO under one uid, and both
@@ -450,18 +444,13 @@ def delete_components(resource: Any, kind: str) -> None:
     instance = resource.icalendar_instance
     kept = [item for item in instance.subcomponents if item.name != kind]
     if not any(item.name != "VTIMEZONE" for item in kept):
-        resource.delete()
+        delete_resource(resource, tag)
         return
     _LOGGER.debug("Removing the %s of a resource that holds more than one kind", kind)
     instance.subcomponents = kept
     # A zone only the removed component referenced must not stay behind.
-    document = zoned_document(instance)
-    # Nothing here revises what stays, and caldav bumps SEQUENCE regardless.
-    hold_sequence(
-        next(item for item in document.subcomponents if item.name != "VTIMEZONE")
-    )
-    resource.icalendar_instance = document
-    resource.save(increase_seqno=False, only_this_recurrence=False)
+    resource.icalendar_instance = zoned_document(instance)
+    put_resource(resource, tag)
 
 
 def delete_todos(
@@ -469,10 +458,9 @@ def delete_todos(
 ) -> None:
     """Delete several to-do items in one pass, every etag checked first."""
     found = _todos_by_uid(calendar, uids)
+    tags = {uid: held_etag(todo, etags.get(uid)) for uid, todo in found.items()}
     for uid, todo in found.items():
-        check_etag(todo, etags.get(uid))
-    for todo in found.values():
-        delete_components(todo, "VTODO")
+        delete_components(todo, "VTODO", tags[uid])
 
 
 def _todos_by_uid(calendar: caldav.Calendar, uids: list[str]) -> dict[str, Any]:
@@ -506,22 +494,64 @@ def _comparable_etag(value: Any) -> str:
     return str(value).strip().removeprefix("W/")
 
 
-def check_etag(resource: Any, expected_etag: str | None) -> None:
-    """Refuse to overwrite a resource that changed since it was last read.
+def held_etag(resource: Any, expected_etag: str | None) -> str | None:
+    """Return the etag a write back has to match, refusing a stale expected one.
 
-    A read-then-write: caldav sends no If-Match anywhere.
+    It comes with the read that found the resource, or else from a GET. RFC
+    9110 13.1.1 has If-Match compare strongly, and a proxy may weaken a GET's.
     """
-    if expected_etag is None:
-        return
-    resource.load()
-    current = resource.props.get(dav.GetEtag.tag)
-    if current is None:
-        # A proxy that strips the header, or a server that puts an etag on its
-        # REPORT but not on a GET.
-        _LOGGER.debug("No etag on the stored object; writing without the check")
-        return
-    if _comparable_etag(current) != _comparable_etag(expected_etag):
+    held = resource.props.get(dav.GetEtag.tag)
+    if held is None:
+        resource.load()
+        held = resource.props.get(dav.GetEtag.tag)
+    if (
+        held is not None
+        and expected_etag is not None
+        and _comparable_etag(held) != _comparable_etag(expected_etag)
+    ):
         raise Refused("etag_conflict")
+    for tag in (held, expected_etag):
+        if tag is not None and not str(tag).strip().startswith("W/"):
+            return str(tag).strip()
+    _LOGGER.debug("No strong etag on the stored object; writing without If-Match")
+    return None
+
+
+_CALENDAR_TYPE = 'text/calendar; charset="utf-8"'
+
+
+def put_resource(resource: Any, tag: str | None = None, new: str | None = None) -> None:
+    """Write a resource's document over the version tagged, or as a new uid.
+
+    caldav's own save sends neither If-Match nor If-None-Match.
+    """
+    headers = {"Content-Type": _CALENDAR_TYPE}
+    if tag is not None:
+        headers["If-Match"] = tag
+    if new is not None:
+        headers["If-None-Match"] = "*"
+    response = resource.client.put(str(resource.url), resource.data, headers)
+    if response.status == 412 and new is not None:
+        raise Refused("uid_clash", uids=new)
+    if response.status == 412:
+        raise Refused("etag_conflict")
+    if response.status not in (200, 201, 204):
+        raise PutError(errmsg(response))
+
+
+def delete_resource(resource: Any, tag: str | None = None) -> None:
+    """Delete a resource, only the version tagged.
+
+    caldav takes a 404 for success, which hides a url that missed the object.
+    """
+    headers = {} if tag is None else {"If-Match": tag}
+    response = resource.client.request(str(resource.url), "DELETE", "", headers)
+    if response.status == 404:
+        raise NotFoundError(errmsg(response))
+    if response.status == 412:
+        raise Refused("etag_conflict")
+    if response.status not in (200, 202, 204):
+        raise DeleteError(errmsg(response))
 
 
 def stamp(component: Any, addresses: list[str] | None = None) -> None:
@@ -559,6 +589,7 @@ def move_event(
     Nextcloud and Radicale disagree on cross-collection COPY and MOVE.
     """
     event = object_by_uid(source, uid)
+    tag = held_etag(event, None)
     instance = ICalCalendar.from_ical(event.data)
     if not instance.walk("VEVENT"):
         raise Refused("no_event_in_object")
@@ -569,8 +600,8 @@ def move_event(
     if keep_original:
         return
     try:
-        event.delete()
-    except NETWORK_ERRORS:
+        delete_resource(event, tag)
+    except WRITE_ERRORS:
         # The server may have deleted it before the timeout.
         if _still_there(source, uid):
             _undo(copy)
@@ -589,26 +620,42 @@ def _still_there(calendar: caldav.Calendar, uid: str) -> bool:
 def _undo(resource: Any) -> None:
     """Remove a resource this call wrote before failing further on."""
     try:
-        resource.delete()
+        delete_resource(resource)
     except Exception as err:  # noqa: BLE001
         _LOGGER.warning("Could not undo a half-finished write: %s", err)
 
 
 def save_document(
-    calendar: caldav.Calendar, document: ICalCalendar, as_todo: bool
+    calendar: caldav.Calendar,
+    document: ICalCalendar,
+    as_todo: bool,
+    overwrite: bool = False,
 ) -> Any:
-    """Write a whole document to a collection as one resource.
+    """Write a whole document to a collection as a resource named after its uid.
 
-    The document, not its text: caldav puts a string through vcal.fix, whose
-    COMPLETED rule matches inside a DESCRIPTION. only_this_recurrence is read
-    off the first non-timezone component, and a detached instance there has
-    caldav look the uid up on the target before it exists. Saving the resource
-    itself also leaves RELATED-TO alone, unlike Calendar.save_object.
+    As a new one unless told to overwrite. The document, not its text, which
+    caldav would put through vcal.fix.
     """
+    head = next(item for item in document.subcomponents if item.name != "VTIMEZONE")
+    if not (uid := str(_first(head.get("UID", "")))):
+        raise Refused("document_no_uid")
     objclass = caldav.Todo if as_todo else caldav.Event
-    stored = objclass(calendar.client, data=document, parent=calendar)
-    stored.save(only_this_recurrence=False)
+    stored = objclass(
+        calendar.client,
+        url=calendar.url.join(_resource_name(uid)),
+        data=document,
+        parent=calendar,
+    )
+    put_resource(stored, new=None if overwrite else uid)
     return stored
+
+
+def _resource_name(uid: str) -> str:
+    """Return the name caldav gives the resource of a uid.
+
+    Some servers read an encoded slash as a separator, hence the double quoting.
+    """
+    return quote(uid.replace("/", "%2F")) + ".ics"
 
 
 def _first(value: Any) -> Any:
@@ -820,6 +867,7 @@ def respond_to_invitation(
 ) -> None:
     """Set our own participation status on an event we were invited to."""
     event = object_by_uid(calendar, uid)
+    tag = held_etag(event, None)
     instance = event.icalendar_instance
     wanted = {comparable_address(address) for address in addresses}
     changed = False
@@ -838,9 +886,7 @@ def respond_to_invitation(
         raise Refused("not_an_attendee")
     # The document, not its text, which caldav would run through vcal.fix.
     event.icalendar_instance = instance
-    hold_sequence(event.icalendar_component)
-    # only_this_recurrence never terminates on an orphan-override object.
-    event.save(increase_seqno=False, only_this_recurrence=False)
+    put_resource(event, tag)
 
 
 def set_calendar_color(calendar: caldav.Calendar, color: str) -> None:

@@ -1,10 +1,10 @@
 """iCloud answers the UID prop-filter REPORT caldav builds with 412, which
 becomes a different exception in each caldav version."""
 
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 from caldav.lib.error import NotFoundError, ReportError
-from conftest import dav_calendar
+from conftest import RecordingClient, dav_calendar, written_through
 import pytest
 
 from custom_components.ha_caldav.api import delete_todos, object_by_uid, update_todo
@@ -22,7 +22,7 @@ REFUSALS = [
 def _resource(uid: str) -> Mock:
     item = Mock()
     item.icalendar_component = {"UID": uid}
-    return item
+    return written_through(item)
 
 
 def _calendar(refusal: Exception | None, found: list[Mock] | None = None) -> Mock:
@@ -57,7 +57,9 @@ def test_the_scan_covers_the_whole_calendar(todo) -> None:
     kwargs = calendar.search.call_args.kwargs
     assert "start" not in kwargs and "end" not in kwargs
     assert kwargs == (
-        {"todo": True, "include_completed": True} if todo else {"event": True}
+        {"todo": True, "include_completed": True, "props": ANY}
+        if todo
+        else {"event": True, "props": ANY}
     )
 
 
@@ -119,7 +121,7 @@ def _real_resource(raw: str) -> Mock:
     item.icalendar_component = next(
         component for component in ical.walk() if component.name in ("VEVENT", "VTODO")
     )
-    return item
+    return written_through(item)
 
 
 def test_event_delete_survives_a_refused_uid_search() -> None:
@@ -195,29 +197,18 @@ def test_a_todo_write_does_not_ask_the_server_for_the_uid_again() -> None:
     request iCloud refuses."""
     import caldav
 
-    put: dict = {}
     asked: list[str] = []
-
-    class Client:
-        def put(self, url, body, headers=None):
-            put["body"] = body if isinstance(body, str) else body.decode("utf-8")
-            response = Mock()
-            response.status = 204
-            response.headers = {}
-            return response
-
-        def __getattr__(self, name):
-            return Mock()
 
     class RefusingCalendar(caldav.Calendar):
         def todo_by_uid(self, uid):
             asked.append(uid)
             raise ReportError("412 Precondition Failed")
 
-    client = Client()
-    parent = RefusingCalendar(client=client, url="http://dav.test/cal/")
+    client = RecordingClient()
+    client.stored["https://dav.test/cal/evt-1.ics"] = (VTODO, '"e1"')
+    parent = RefusingCalendar(client=client, url="https://dav.test/cal/")
     todo = caldav.Todo(
-        client=client, data=VTODO, url="http://dav.test/cal/evt-1.ics", parent=parent
+        client=client, data=VTODO, url="https://dav.test/cal/evt-1.ics", parent=parent
     )
     todo.id = "evt-1"
     calendar = Mock()
@@ -225,7 +216,7 @@ def test_a_todo_write_does_not_ask_the_server_for_the_uid_again() -> None:
 
     update_todo(calendar, "evt-1", {"summary": "renamed"})
 
-    assert "SUMMARY:renamed" in put["body"]
+    assert "SUMMARY:renamed" in client.bodies[-1]
     assert asked == []
 
 
@@ -251,7 +242,6 @@ def test_an_imported_todo_does_not_overwrite_a_todo_of_the_same_uid() -> None:
     from custom_components.ha_caldav.api import import_ics
     from custom_components.ha_caldav.errors import Refused
 
-    # caldav's event_by_uid is restricted to VEVENT.
     calendar = dav_calendar()
     calendar.event_by_uid.side_effect = NotFoundError("no such event")
     calendar.todo_by_uid.return_value = _resource("task-1")

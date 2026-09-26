@@ -67,7 +67,7 @@ Conventional Commits (https://www.conventionalcommits.org/en/v1.0.0/) with a sho
 - GitHub Actions stay on version tags, never commit SHAs. hassfest has no tagged release and runs from `master`.
 - Renovate opens the bumps. Other PRs leave dependencies alone.
 - `caldav`, `icalendar` and `vobject` follow the versions Home Assistant core pins, in `manifest.json` and `requirements_test.txt`. They move by hand.
-- `dateutil` is not listed.
+- `python-dateutil` is not listed in `manifest.json` or `requirements_test.txt`.
 
 ## Pull requests
 

@@ -3,7 +3,8 @@ from datetime import UTC, date, datetime
 import time
 from unittest.mock import Mock, patch
 
-from caldav.lib.error import DAVError
+from caldav.lib.error import DAVError, NotFoundError
+from conftest import written_through
 from homeassistant.components.todo import (
     TodoItem,
     TodoItemStatus,
@@ -18,6 +19,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 import vobject
 
 from custom_components.ha_caldav.const import CONF_READ_ONLY, DOMAIN
+from custom_components.ha_caldav.errors import Refused
 
 ENTRY_DATA = {
     CONF_URL: "https://cloud.example.com/remote.php/dav",
@@ -132,7 +134,7 @@ def _dav_todo(body: str) -> Mock:
     todo = Mock()
     todo.icalendar_instance = instance
     todo.icalendar_component = next(iter(instance.walk("VTODO")))
-    return todo
+    return written_through(todo)
 
 
 def test_completing_stamps_the_completion_properties() -> None:
@@ -434,7 +436,7 @@ def _vtodo_resource(body: str) -> Mock:
     todo = Mock()
     todo.icalendar_instance = document
     todo.icalendar_component = next(iter(document.walk("VTODO")))
-    return todo
+    return written_through(todo)
 
 
 async def test_a_new_item_carries_its_due_date_and_description(
@@ -603,3 +605,50 @@ async def test_two_quick_edits_of_one_item_do_not_conflict_with_each_other(
         )
 
     assert expected == ['"e1"', None]
+
+
+@pytest.mark.parametrize(
+    "failure", [Refused("etag_conflict"), NotFoundError("gone on the server")]
+)
+async def test_an_edit_the_server_has_moved_past_reads_the_list_again(
+    hass: HomeAssistant, failure: Exception
+) -> None:
+    """The list would otherwise keep offering the item as it was, and every retry
+    fail the same way until the next poll."""
+    await _setup(hass)
+    entity = _entity(hass)
+    refreshes = []
+
+    async def refresh() -> None:
+        refreshes.append(True)
+
+    with (
+        patch("custom_components.ha_caldav.todo.update_todo", side_effect=failure),
+        patch.object(entity.coordinator, "async_refresh", refresh),
+        pytest.raises(HomeAssistantError),
+    ):
+        await entity.async_update_todo_item(TodoItem(uid="uid-1", summary="Milk"))
+
+    assert refreshes
+
+
+async def test_a_write_the_server_refused_does_not_read_the_list_again(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+    entity = _entity(hass)
+    refreshes = []
+
+    async def refresh() -> None:
+        refreshes.append(True)
+
+    with (
+        patch(
+            "custom_components.ha_caldav.todo.update_todo", side_effect=DAVError("500")
+        ),
+        patch.object(entity.coordinator, "async_refresh", refresh),
+        pytest.raises(HomeAssistantError),
+    ):
+        await entity.async_update_todo_item(TodoItem(uid="uid-1", summary="Milk"))
+
+    assert not refreshes

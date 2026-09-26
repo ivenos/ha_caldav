@@ -24,7 +24,7 @@
               "client_key": "Pfad zum Client-Schlüssel"
             },
             "data_description": {
-              "ca_bundle": "Optional. Prüft den Server gegen diese Datei statt gegen den Zertifikatsspeicher des Systems.",
+              "ca_bundle": "Optional. Prüft den Server gegen diese Datei statt gegen den Zertifikatsspeicher des Systems. Mit einer Datei bleibt die Prüfung an.",
               "client_cert": "Optional. Identifiziert Home Assistant gegenüber Servern, die ein Zertifikat verlangen.",
               "client_key": "Optional. Der private Schlüssel zu diesem Zertifikat."
             }
@@ -33,13 +33,15 @@
       },
       "reconfigure": {
         "title": "CalDAV-Verbindung ändern",
-        "description": "Server-URL oder TLS-Einstellungen anpassen. Das Konto selbst bleibt, wie es ist.",
+        "description": "Server-URL, Passwort oder TLS-Einstellungen anpassen. Das Konto selbst bleibt, wie es ist.",
         "data": {
           "url": "Server-URL",
+          "password": "Passwort",
           "verify_ssl": "SSL-Zertifikat prüfen"
         },
         "data_description": {
           "url": "Die Adresse deines CalDAV-Servers. Bei den meisten Servern reicht der bloße Hostname.",
+          "password": "Leer lassen, um das bisherige zu behalten.",
           "verify_ssl": "Ausgeschaltet kann sich jeder, der die Verbindung abfängt, als Server ausgeben und das Passwort mitlesen."
         },
         "sections": {
@@ -52,7 +54,7 @@
               "client_key": "Pfad zum Client-Schlüssel"
             },
             "data_description": {
-              "ca_bundle": "Optional. Prüft den Server gegen diese Datei statt gegen den Zertifikatsspeicher des Systems.",
+              "ca_bundle": "Optional. Prüft den Server gegen diese Datei statt gegen den Zertifikatsspeicher des Systems. Mit einer Datei bleibt die Prüfung an.",
               "client_cert": "Optional. Identifiziert Home Assistant gegenüber Servern, die ein Zertifikat verlangen.",
               "client_key": "Optional. Der private Schlüssel zu diesem Zertifikat."
             }
@@ -92,7 +94,7 @@
         }
       },
       "account": {
-        "title": "Konto-Einstellungen",
+        "title": "Kontoeinstellungen",
         "data": {
           "calendars": "Einzubindende Kalender",
           "scan_interval": "Minuten zwischen Abfragen",
@@ -102,11 +104,12 @@
           "read_only": "Schreibgeschützt"
         },
         "data_description": {
+          "calendars": "Die Kalender, die Entitäten bekommen. Sind alle angehakt, bekommt auch ein neu auf dem Server angelegter Kalender welche.",
           "scan_interval": "Wie oft nach Änderungen außerhalb von Home Assistant gesucht wird.",
           "timeout": "Wie lange eine einzelne Anfrage an den Server dauern darf.",
           "days": "Wie weit vorausgeschaut wird, um den nächsten Termin zu bestimmen.",
           "include_all_day": "Ob ein ganztägiger Termin der nächste Termin sein kann.",
-          "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus."
+          "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus, und die Aktionen schreiben nichts. Eine Umbenennung in Home Assistant bleibt dann dort."
         }
       },
       "pick": {
@@ -117,17 +120,17 @@
       },
       "calendar": {
         "title": "Einstellungen für {calendar}",
-        "description": "Diese ersetzen die Konto-Einstellungen nur für {calendar}.",
+        "description": "Diese ersetzen die Kontoeinstellungen nur für {calendar}.",
         "data": {
           "days": "Tage im Voraus",
           "include_all_day": "Ganztägige Termine einbeziehen",
           "read_only": "Schreibgeschützt",
-          "reset": "Konto-Einstellungen verwenden"
+          "reset": "Kontoeinstellungen verwenden"
         },
         "data_description": {
           "days": "Wie weit vorausgeschaut wird, um den nächsten Termin zu bestimmen.",
           "include_all_day": "Ob ein ganztägiger Termin der nächste Termin sein kann.",
-          "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus.",
+          "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus, und die Aktionen schreiben nichts. Eine Umbenennung in Home Assistant bleibt dann dort.",
           "reset": "Verwirft alles hier Eingestellte und folgt wieder dem Konto."
         }
       }
@@ -176,6 +179,9 @@
     },
     "invalid_rrule": {
       "message": "Die Wiederholungsregel ist ungültig: {reason}"
+    },
+    "last_selected_calendar": {
+      "message": "{name} ist der einzige eingebundene Kalender dieses Kontos. Binde in den Optionen zuerst einen weiteren ein."
     },
     "mixed_time_types": {
       "message": "Start und Ende müssen von derselben Art sein: zwei Datumsangaben für einen ganztägigen Termin oder zwei Zeitpunkte."

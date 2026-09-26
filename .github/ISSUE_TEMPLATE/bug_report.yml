@@ -42,7 +42,7 @@ body:
     id: diagnostics
     attributes:
       label: Diagnostics
-      description: "The file from Download diagnostics in the menu of CalDAV Complete under Settings > Devices & services. Credentials and account names are redacted."
+      description: "The file from Download diagnostics in the menu of CalDAV Complete under Settings > Devices & services. Credentials and the server address are redacted, calendar names are not."
 
   - type: input
     id: version

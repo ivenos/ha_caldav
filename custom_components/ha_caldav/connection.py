@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from http import HTTPStatus
 import logging
 from typing import Any
@@ -17,6 +17,8 @@ from .const import CONF_CA_BUNDLE, CONF_CLIENT_CERT, CONF_CLIENT_KEY, DEFAULT_TI
 _LOGGER = logging.getLogger(__name__)
 
 WELL_KNOWN = "/.well-known/caldav"
+
+UNREACHABLE = requests.exceptions.ConnectTimeout
 
 
 def calendar_key(url: object) -> str:
@@ -88,6 +90,17 @@ def connection_kwargs(
     }
 
 
+def distinctive(key: str, keys: Iterable[str]) -> str:
+    """Return the shortest tail of a calendar key that no other key ends in."""
+    others = [other for other in keys if other != key]
+    parts = key.split("/")
+    for depth in range(1, len(parts) + 1):
+        tail = "/".join(parts[-depth:])
+        if not any(other == tail or other.endswith(f"/{tail}") for other in others):
+            return tail
+    return key
+
+
 def display_name(calendar: object) -> str:
     """Return the name a calendar is selected and shown by."""
     return getattr(calendar, "name", None) or "CalDAV"
@@ -122,7 +135,8 @@ def url_candidates(url: str, kwargs: Mapping[str, Any]) -> Iterator[str]:
     """Yield the urls to try, the entered one first. Blocking past the first.
 
     RFC 6764 puts a bootstrap redirect at /.well-known/caldav, which resolves a
-    bare host name.
+    bare host name. It sits on the same origin, so after UNREACHABLE on the
+    entered url it would only wait as long again.
     """
     # A scheme-less entry would reach requests as a relative url.
     entered = without_userinfo(url if "://" in url else f"https://{url}")
@@ -168,14 +182,16 @@ def _resolve_bootstrap(probe: str, kwargs: Mapping[str, Any]) -> str | None:
 
 
 class HostLockedSession(requests.Session):
-    """A session that carries no credentials across a change of host.
+    """A session that carries no credentials across a change of host or out of https.
 
     requests drops the Authorization header itself, but the digest response
-    hook outlives the redirect and re-signs for the new host.
+    hook outlives the redirect and re-signs for the new host. caldav follows a
+    calendar home set onto another host, scheme and all.
     """
 
     # Where the first request that was moved for good ended up.
     moved_to: str | None = None
+    https_only = False
 
     def request(self, method: str, url: Any, *args: Any, **kwargs: Any) -> Any:
         """Send a request, following a redirect on the same host with its method.
@@ -184,6 +200,12 @@ class HostLockedSession(requests.Session):
         PUT, PROPFIND or MKCALENDAR on without its body. caldav tells a bad
         password from a refusal by the reason phrase, which HTTP/2 leaves out.
         """
+        if self.https_only and urlparse(str(url)).scheme.lower() != "https":
+            _LOGGER.warning(
+                "Not sending the account to %s: the server moved it off https",
+                without_userinfo(str(url)),
+            )
+            raise requests.exceptions.InvalidURL("refusing to leave https")
         if method.upper() in ("GET", "HEAD"):
             response = super().request(method, url, *args, **kwargs)
         else:
@@ -202,7 +224,7 @@ class HostLockedSession(requests.Session):
             target = urljoin(url, location)
             if self.should_strip_auth(url, target):
                 break
-            if response.status_code != 307:
+            if response.status_code in (301, 308):
                 self.moved_to = self.moved_to or target
             url = target
             response = super().request(method, url, *args, **kwargs)
@@ -223,9 +245,11 @@ def build_client(
     client.session.close()
     # caldav never configures its session; multiplexing is optional to it too.
     try:
-        client.session = HostLockedSession(multiplexed=True)
+        session = HostLockedSession(multiplexed=True)
     except TypeError:
-        client.session = HostLockedSession()
+        session = HostLockedSession()
+    session.https_only = urlparse(url).scheme.lower() == "https"
+    client.session = session
     return client
 
 

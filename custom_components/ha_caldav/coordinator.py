@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
+from functools import partial
 import logging
 from math import isfinite
 import threading
@@ -23,8 +24,8 @@ import homeassistant.util.dt as dt_util
 from .capability import Capability
 from .color import Collection, fetch_collections
 from .connection import calendar_key, display_name
-from .errors import NETWORK_ERRORS, rejected
-from .event import read_extras
+from .errors import rejected
+from .event import check_expandable, read_extras
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -260,32 +261,22 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
     ) -> list[CalendarEvent]:
         """Return the events of one window. Blocking, the vobject parse included.
 
-        The rules are read first: expanding a series strips the RRULE from
-        every occurrence, and a series that stopped recurring has to be
-        forgotten before its occurrences are built.
+        A series that stopped recurring has to be forgotten before its
+        occurrences are built.
         """
-        epoch = self._etag_epoch
-        etags, rules = self._window_index(start_date, end_date)
-        self._keep_rules(rules)
-        if etags is not None:
+        window = self._read_window(start_date, end_date)
+        self._keep_rules(window.rules)
+        if (etags := window.etags) is not None:
             # Merged: a panel window need not overlap the polled one.
             with self.etag_lock:
-                if epoch == self._etag_epoch:
+                if window.epoch == self._etag_epoch:
                     kept = {
                         uid: tag for uid, tag in self.etags.items() if uid not in etags
                     }
                     self.etags = _bounded(etags | kept)
-        results = self.calendar.search(
-            start=start_date,
-            end=end_date,
-            event=True,
-            expand=True,
-            split_expanded=False,
-        )
         return [
             event
-            for item in results
-            for vevent in components_of(item, "vevent")
+            for vevent in window.vevents
             if (event := to_event(vevent, self._rule_for(vevent))) is not None
         ]
 
@@ -362,7 +353,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         events, todos = self.halves["events"], self.halves["todos"]
         window = await self._async_read(
             events,
-            self._fetch_events(start, end),
+            partial(self._read_window, start, end),
             _WindowRead(vevents=[], etags={}, rules={}, epoch=self._etag_epoch),
         )
         if window is not None:
@@ -426,28 +417,38 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             else:
                 self.todo_etags = read.etags
 
-    def _fetch_events(self, start: datetime, end: datetime) -> Any:
-        def fetch() -> _WindowRead:
-            epoch = self._etag_epoch
-            # caldav's split reparses the whole expanded object per occurrence.
-            results = self.calendar.search(
-                start=start, end=end, event=True, expand=True, split_expanded=False
-            )
-            etags, rules = self._window_index(start, end)
-            # RFC 5545 makes DTSTART optional once the object carries a METHOD.
-            return _WindowRead(
-                vevents=[
-                    vevent
-                    for item in results
-                    for vevent in components_of(item, "vevent")
-                    if _dated(vevent)
-                ],
-                etags=etags,
-                rules=rules,
-                epoch=epoch,
-            )
+    def _read_window(self, start: datetime, end: datetime) -> _WindowRead:
+        """Read one window in a single REPORT, without keeping any of it. Blocking.
 
-        return fetch
+        The etags are None when the server did not say. The rules map every
+        uid in the window, to None where it has none, so a series that stopped
+        recurring can be told apart from one this window never saw. They are
+        read first, as the expansion strips RRULE from every occurrence.
+        """
+        epoch = self._etag_epoch
+        items = self.calendar.search(
+            start=start, end=end, event=True, props=[dav.GetEtag()]
+        )
+        etags: dict[str, str] = {}
+        rules: dict[str, str | None] = {}
+        vevents: list[Any] = []
+        for item in items:
+            if (series := _series(item)) is not None:
+                uid, rules[uid] = series
+                if isinstance(etag := item.props.get(dav.GetEtag.tag), str):
+                    etags[uid] = etag
+            # RFC 5545 makes DTSTART optional once the object carries a METHOD.
+            vevents.extend(
+                vevent for vevent in occurrences(item, start, end) if _dated(vevent)
+            )
+        if items and not etags:
+            _LOGGER.debug("The window came back without an etag on anything")
+        return _WindowRead(
+            vevents=vevents,
+            etags=etags if etags or not items else None,
+            rules=rules,
+            epoch=epoch,
+        )
 
     def _keep_rules(self, rules: dict[str, str | None]) -> None:
         """Record the rules of a window, forgetting the series that lost theirs."""
@@ -498,7 +499,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         found = []
         etags: dict[str, str] = {}
         for resource in results:
-            vtodo = component_of(resource, "vtodo")
+            vtodo = master_of(resource, "vtodo")
             if vtodo is None or (item := to_todo(vtodo)) is None:
                 continue
             found.append((sort_order(vtodo), item))
@@ -526,38 +527,6 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             # Dropped: a restored server 403s forever on a token it lost.
             return True, None
         return collection.sync_token != self._sync_token, collection.sync_token
-
-    def _window_index(
-        self, start: datetime, end: datetime
-    ) -> tuple[dict[str, str] | None, dict[str, str | None]]:
-        """Return the etags and the rules of a window, without keeping either.
-
-        The etags are None when the server did not say. The rules map every
-        uid in the window, to None where it has none, so a series that stopped
-        recurring can be told apart from one this window never saw.
-        """
-        try:
-            items = self.calendar.search(
-                start=start, end=end, event=True, expand=False, props=[dav.GetEtag()]
-            )
-        except NETWORK_ERRORS as err:
-            _LOGGER.debug("Could not refresh etags: %s", err)
-            return None, {}
-        etags: dict[str, str] = {}
-        rules: dict[str, str | None] = {}
-        for item in items:
-            vevent = master_of(item)
-            if vevent is None or not hasattr(vevent, "uid"):
-                continue
-            uid = str(vevent.uid.value)
-            rule = getattr(vevent, "rrule", None)
-            rules[uid] = str(rule.value) if rule is not None else None
-            if isinstance(etag := item.props.get(dav.GetEtag.tag), str):
-                etags[uid] = etag
-        if items and not etags:
-            _LOGGER.debug("The window came back without an etag on anything")
-            return None, rules
-        return etags, rules
 
 
 class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, Collection]]):
@@ -638,7 +607,8 @@ def to_todo(vtodo: Any) -> TodoItem | None:
         uid=uid,
         summary=summary,
         status=TODO_STATUS.get(
-            get_attr_value(vtodo, "status") or "", TodoItemStatus.NEEDS_ACTION
+            str(get_attr_value(vtodo, "status") or "").upper(),
+            TodoItemStatus.NEEDS_ACTION,
         ),
         due=due,
         description=get_attr_value(vtodo, "description"),
@@ -679,7 +649,7 @@ def _spanning(start: datetime | date, end: datetime | date) -> datetime | date:
     RFC 5545 3.3.5 resolves a start in a DST gap with the offset from before
     the gap, so the start gains an hour the end does not and the two instants
     come back reversed while the wall clock is still right. Two datetimes in
-    the same zone object compare by wall clock, hence the explicit UTC.
+    the same zone object compare and add by wall clock, hence the explicit UTC.
     """
     if not (isinstance(start, datetime) and isinstance(end, datetime)):
         return end
@@ -690,7 +660,8 @@ def _spanning(start: datetime | date, end: datetime | date) -> datetime | date:
     if start.utcoffset() == end.utcoffset():
         # Nothing was resolved across a gap; the object is simply malformed.
         return end
-    return start + max(end.replace(tzinfo=None) - start.replace(tzinfo=None), _NOTHING)
+    length = max(end.replace(tzinfo=None) - start.replace(tzinfo=None), _NOTHING)
+    return (start.astimezone(UTC) + length).astimezone(end.tzinfo)
 
 
 _NOTHING = timedelta(0)
@@ -759,23 +730,71 @@ def components_of(item: Any, name: str) -> list[Any]:
         return []
 
 
-def component_of(item: Any, name: str) -> Any | None:
-    """Return the first named component of a search result, or None."""
-    found = components_of(item, name)
-    return found[0] if found else None
-
-
-def master_of(item: Any) -> Any | None:
+def master_of(item: Any, name: str = "vevent") -> Any | None:
     """Return the series master of a search result, or its only component.
 
     RFC 5545 leaves the component order open, so a detached occurrence may
     come first.
     """
-    found = components_of(item, "vevent")
-    for vevent in found:
-        if not hasattr(vevent, "recurrence_id"):
-            return vevent
+    found = components_of(item, name)
+    for component in found:
+        if not hasattr(component, "recurrence_id"):
+            return component
     return found[0] if found else None
+
+
+_RECURRING = ("RRULE", "RDATE", "EXDATE", "EXRULE")
+
+
+def _vevents(item: Any) -> list[Any]:
+    """Return the VEVENTs of a search result as icalendar reads them."""
+    try:
+        return list(item.icalendar_instance.walk("VEVENT"))
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("icalendar cannot read an object: %s", err)
+        return []
+
+
+def _first(value: Any) -> Any:
+    """Return one value where a repeated property left icalendar holding a list."""
+    return value[0] if isinstance(value, list) and value else value
+
+
+def _series(item: Any) -> tuple[str, str | None] | None:
+    """Return the uid and the rule of an object, None without a uid."""
+    vevents = _vevents(item)
+    masters = [vevent for vevent in vevents if "RECURRENCE-ID" not in vevent] or vevents
+    if not masters or (uid := masters[0].get("UID")) is None:
+        return None
+    rule = _first(masters[0].get("RRULE"))
+    return str(_first(uid)), None if rule is None else rule.to_ical().decode("utf-8")
+
+
+def occurrences(item: Any, start: datetime, end: datetime) -> list[Any]:
+    """Return the VEVENTs of an object in a window, a series expanded on its own.
+
+    caldav's expansion covers a whole search, so one series it cannot expand
+    would take every other event of the window with it. It also drops the
+    VTIMEZONEs, and vobject reads a TZID it never saw as floating.
+    """
+    vevents = _vevents(item)
+    if any(key in vevent for vevent in vevents for key in _RECURRING):
+        try:
+            for vevent in vevents:
+                rule = vevent.get("RRULE")
+                if rule is not None and "RECURRENCE-ID" not in vevent:
+                    check_expandable(_first(rule), vevent["DTSTART"].dt)
+            zones = [
+                part
+                for part in item.icalendar_instance.subcomponents
+                if part.name == "VTIMEZONE"
+            ]
+            item.expand_rrule(start, end)
+            item.icalendar_instance.subcomponents[:0] = zones
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Skipping a series that cannot be expanded: %s", err)
+            return []
+    return components_of(item, "vevent")
 
 
 def to_event(vevent: Any, rrule: str | None = None) -> CalendarEvent | None:

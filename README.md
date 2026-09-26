@@ -41,7 +41,7 @@ Or open **Settings → Devices & services → Add integration** and search for *
 
 Setup asks for the server URL, username and password. The host name is usually enough, the CalDAV address is found through `/.well-known/caldav`. Certificate verification can be turned off, and under **Certificates** a CA bundle and a client certificate and key can be set.
 
-Each calendar gets a `calendar.<calendar>` entity for its events and a `todo.<calendar>` entity for its to-dos, depending on what it holds. Both are named after the calendar on the server, which is also the name Assist uses for them. A calendar renamed on the server is renamed in Home Assistant at the next poll, and renaming one of its entities in Home Assistant renames the calendar on the server, unless it is read-only. The last three options can also be set per calendar.
+Each calendar gets a `calendar.<calendar>` entity for its events and a `todo.<calendar>` entity for its to-dos, depending on what it holds. Both are named after the calendar on the server, which is also the name Assist uses for them. A calendar renamed on the server is renamed in Home Assistant at the next poll, one deleted there loses its entities after two more polls, and renaming one of its entities in Home Assistant renames the calendar on the server, unless it is read-only. The last three options can also be set per calendar.
 
 | Option | Default | Description |
 |---|---|---|

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import datetime
 import logging
 
+from caldav.lib.error import NotFoundError
 from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later
@@ -13,7 +14,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import set_calendar_name
 from .coordinator import HaCaldavCoordinator, ManagedCalendar
-from .errors import as_reported
+from .errors import Refused, as_reported
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -111,9 +112,21 @@ class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
             try:
                 await self.hass.async_add_executor_job(job)
             except Exception as err:
+                if _outdated(err):
+                    await self.coordinator.async_refresh()
                 # caldav asserts on an unexpected response and raises TypeError
                 # on html; as_reported names only the type.
                 raise as_reported(err, action) from err
             if forget is not None:
                 self.coordinator.forget_etags(*forget)
             await self.coordinator.async_refresh()
+
+
+def _outdated(err: Exception) -> bool:
+    """Return whether a write failed on a state the server has moved past.
+
+    Every retry would fail the same way until the next poll read it again.
+    """
+    if isinstance(err, Refused):
+        return err.key == "etag_conflict"
+    return isinstance(err, NotFoundError)

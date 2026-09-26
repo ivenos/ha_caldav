@@ -75,5 +75,34 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements_test.txt
 
+      - name: Check that this is the oldest Home Assistant hacs.json allows
+        if: matrix.homeassistant == 'oldest'
+        run: |
+          python - <<'EOF'
+          import json
+          from homeassistant.const import __version__
+          allowed = json.load(open("hacs.json"))["homeassistant"].rsplit(".", 1)[0]
+          assert __version__.startswith(f"{allowed}."), (__version__, allowed)
+          EOF
+
+      - name: Check that the pins follow Home Assistant core
+        if: matrix.homeassistant == 'pinned'
+        run: |
+          python - <<'EOF'
+          import json
+          from pathlib import Path
+          import homeassistant.components.caldav as core
+          ours = json.loads(Path("custom_components/ha_caldav/manifest.json").read_text())
+          theirs = json.loads((Path(core.__file__).parent / "manifest.json").read_text())
+          names = {pin.split("==")[0] for pin in ours["requirements"]}
+          tested = [
+              line
+              for line in Path("requirements_test.txt").read_text().split()
+              if line.split("==")[0] in names
+          ]
+          wanted = sorted(theirs["requirements"])
+          assert sorted(ours["requirements"]) == sorted(tested) == wanted, wanted
+          EOF
+
       - name: Run tests
         run: pytest

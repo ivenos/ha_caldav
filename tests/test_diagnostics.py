@@ -191,6 +191,31 @@ async def test_diagnostics_keeps_the_account_out_of_the_calendar_options(
     assert "iven" not in json.dumps(diag)
 
 
+async def test_two_calendars_ending_alike_both_stay_in_the_diagnostics(
+    hass: HomeAssistant,
+) -> None:
+    """Google ends every collection in /events, with the account just before."""
+    work = "/caldav/v2/iven%40example.com/events"
+    team = "/caldav/v2/team%40group.example.com/events"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data=ENTRY_DATA,
+        options={
+            "calendars": [work, team],
+            "calendar_options": {team: {"days": 30}},
+        },
+        unique_id="g",
+    )
+    entry.add_to_hass(hass)
+    entry.runtime_data = _runtime(_client([]))
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert diag["options"]["calendars"] == ["events", "events (2)"]
+    assert diag["options"]["calendar_options"] == {"events (2)": {"days": 30}}
+    assert "example.com" not in json.dumps(diag["options"])
+
+
 async def test_diagnostics_survives_a_server_answering_with_nonsense(
     hass: HomeAssistant,
 ) -> None:

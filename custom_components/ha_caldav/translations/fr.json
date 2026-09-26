@@ -24,7 +24,7 @@
               "client_key": "Chemin de la clé client"
             },
             "data_description": {
-              "ca_bundle": "Facultatif. Vérifie le serveur avec ce fichier plutôt qu'avec le magasin du système.",
+              "ca_bundle": "Facultatif. Vérifie le serveur avec ce fichier plutôt qu'avec le magasin du système. Avec un fichier, la vérification reste active.",
               "client_cert": "Facultatif. Identifie Home Assistant auprès des serveurs qui demandent un certificat.",
               "client_key": "Facultatif. La clé privée de ce certificat."
             }
@@ -33,13 +33,15 @@
       },
       "reconfigure": {
         "title": "Modifier la connexion CalDAV",
-        "description": "Mettez à jour l'URL du serveur ou les réglages TLS. Le compte lui-même ne change pas.",
+        "description": "Mettez à jour l'URL du serveur, le mot de passe ou les paramètres TLS. Le compte lui-même ne change pas.",
         "data": {
           "url": "URL du serveur",
+          "password": "Mot de passe",
           "verify_ssl": "Vérifier le certificat SSL"
         },
         "data_description": {
           "url": "L'adresse de votre serveur CalDAV. Sur la plupart des serveurs, le nom d'hôte suffit.",
+          "password": "Laissez vide pour conserver le mot de passe actuel.",
           "verify_ssl": "Désactivée, quiconque intercepte la connexion peut se faire passer pour le serveur et lire le mot de passe."
         },
         "sections": {
@@ -52,7 +54,7 @@
               "client_key": "Chemin de la clé client"
             },
             "data_description": {
-              "ca_bundle": "Facultatif. Vérifie le serveur avec ce fichier plutôt qu'avec le magasin du système.",
+              "ca_bundle": "Facultatif. Vérifie le serveur avec ce fichier plutôt qu'avec le magasin du système. Avec un fichier, la vérification reste active.",
               "client_cert": "Facultatif. Identifie Home Assistant auprès des serveurs qui demandent un certificat.",
               "client_key": "Facultatif. La clé privée de ce certificat."
             }
@@ -87,12 +89,12 @@
       "init": {
         "title": "Options CalDAV",
         "menu_options": {
-          "account": "Réglages pour tout le compte",
-          "pick": "Réglages pour un seul calendrier"
+          "account": "Paramètres pour tout le compte",
+          "pick": "Paramètres pour un seul calendrier"
         }
       },
       "account": {
-        "title": "Réglages du compte",
+        "title": "Paramètres du compte",
         "data": {
           "calendars": "Calendriers à inclure",
           "scan_interval": "Minutes entre les interrogations",
@@ -102,11 +104,12 @@
           "read_only": "Lecture seule"
         },
         "data_description": {
+          "calendars": "Les calendriers qui reçoivent des entités. Si tous sont cochés, un calendrier ajouté sur le serveur en reçoit aussi.",
           "scan_interval": "À quelle fréquence rechercher les modifications effectuées en dehors de Home Assistant.",
           "timeout": "Combien de temps attendre la réponse du serveur à une seule requête.",
           "days": "Sur combien de jours chercher pour déterminer le prochain événement.",
           "include_all_day": "Si un événement sur toute la journée peut être le prochain.",
-          "read_only": "Masque les commandes de création, de modification et de suppression."
+          "read_only": "Masque les commandes de création, de modification et de suppression, et les actions refusent d'écrire. Un renommage dans Home Assistant reste alors local."
         }
       },
       "pick": {
@@ -116,18 +119,18 @@
         }
       },
       "calendar": {
-        "title": "Réglages pour {calendar}",
-        "description": "Ils remplacent les réglages du compte pour {calendar} uniquement.",
+        "title": "Paramètres pour {calendar}",
+        "description": "Ces paramètres remplacent ceux du compte pour {calendar} uniquement.",
         "data": {
           "days": "Jours à l'avance",
           "include_all_day": "Inclure les événements sur toute la journée",
           "read_only": "Lecture seule",
-          "reset": "Utiliser les réglages du compte"
+          "reset": "Utiliser les paramètres du compte"
         },
         "data_description": {
           "days": "Sur combien de jours chercher pour déterminer le prochain événement.",
           "include_all_day": "Si un événement sur toute la journée peut être le prochain.",
-          "read_only": "Masque les commandes de création, de modification et de suppression.",
+          "read_only": "Masque les commandes de création, de modification et de suppression, et les actions refusent d'écrire. Un renommage dans Home Assistant reste alors local.",
           "reset": "Abandonne tout ce qui est réglé ici et suit de nouveau le compte."
         }
       }
@@ -176,6 +179,9 @@
     },
     "invalid_rrule": {
       "message": "La règle de récurrence n'est pas valide : {reason}"
+    },
+    "last_selected_calendar": {
+      "message": "{name} est le seul calendrier inclus pour ce compte. Incluez-en d'abord un autre dans les options."
     },
     "mixed_time_types": {
       "message": "Le début et la fin doivent être de même nature : deux dates pour un événement sur toute la journée, ou deux dates avec heure."

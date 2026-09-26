@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import suppress
+from copy import deepcopy
 from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
 from itertools import islice
@@ -28,10 +29,13 @@ from icalendar import (
 )
 
 from .api import (
-    check_etag,
     collapse_repeated,
     delete_components,
+    delete_resource,
+    held_etag,
     object_by_uid,
+    put_resource,
+    save_document,
     stamp,
     zoned_document,
 )
@@ -43,7 +47,6 @@ from .event import (
     check_rule,
     date_values,
     framed_rule,
-    hold_sequence,
     holders,
     replace,
     reset_replies,
@@ -57,6 +60,8 @@ from .event import (
 _LOGGER = logging.getLogger(__name__)
 
 _MAX_OCCURRENCES = 100_000
+
+_RECURRING = ("RRULE", "RDATE", "EXDATE", "EXRULE")
 
 # How many occurrences two spellings of a rule have to agree on.
 _COMPARED = 500
@@ -77,15 +82,16 @@ def update_event(
     An rrule of "" ends the recurrence, an absent one leaves it as it is.
     """
     dav_event = object_by_uid(calendar, uid)
-    check_etag(dav_event, expected_etag)
+    tag = held_etag(dav_event, expected_etag)
     ical = _collapsed(dav_event.icalendar_instance)
     master = _master(ical)
+    save = partial(_save, dav_event, ical, addresses=addresses, tag=tag)
 
     if recurrence_id is None:
         if data.get("rrule") and "RECURRENCE-ID" in master:
             # No series head here; a rule on a detached instance is inert.
             raise Refused("not_recurring")
-        _update_series(dav_event, ical, master, data, own_address, addresses)
+        _update_series(ical, master, data, own_address, save, addresses)
         return
 
     _check_no_ranged_override(ical)
@@ -108,7 +114,8 @@ def update_event(
                 raise Refused("occurrence_not_found", recurrence_id=recurrence_id)
             target = _new_override(ical, master, occurrence)
         _apply(target, _without_rrule(data), own_address)
-        _save(dav_event, ical, target, addresses)
+        _share_organizer(ical, target)
+        save(target)
         return
 
     if to_utc(occurrence) <= to_utc(master["DTSTART"].dt):
@@ -122,7 +129,7 @@ def update_event(
                 _apply(split, _without_times(data), own_address)
                 stamp(split, addresses)
                 data = _rebased(master, data, occurrence, split["DTSTART"].dt)
-        _update_series(dav_event, ical, master, data, own_address, addresses)
+        _update_series(ical, master, data, own_address, save, addresses)
         return
 
     if "RRULE" not in master and "RDATE" not in master:
@@ -143,17 +150,20 @@ def update_event(
 
     # RFC 4791 allows one UID per object; a derived UID lets a retry overwrite
     # the tail instead of duplicating it.
-    tail = calendar.save_event(
-        _tail_document(ical, master, data, occurrence, own_address)
+    tail = save_document(
+        calendar,
+        _tail_document(ical, master, data, occurrence, own_address),
+        as_todo=False,
+        overwrite=True,
     )
     try:
         _cap_series(master, occurrence)
         _drop_overrides(ical, master, occurrence, from_occurrence=True)
         # Nextcloud refuses an object left with no instance at all.
         if _series_empty(master) and not _overrides(ical):
-            delete_components(dav_event, "VEVENT")
+            delete_components(dav_event, "VEVENT", tag)
         else:
-            _save(dav_event, ical, master, addresses)
+            save(master)
     except WRITE_ERRORS:
         # The server may have committed the cap before the timeout.
         if _head_uncapped(calendar, uid, occurrence):
@@ -167,11 +177,11 @@ def update_event(
 
 
 def _update_series(
-    dav_event: caldav.Event,
     ical: Any,
     master: Any,
     data: dict[str, Any],
     own_address: str | None,
+    save: Callable[[Any], None],
     addresses: list[str] | None = None,
 ) -> None:
     """Apply an edit to every occurrence of a series and save it."""
@@ -181,11 +191,12 @@ def _update_series(
     old_text = _rule_string(master)
     _apply(master, data, own_address)
     if ATTR_ORGANIZER in data:
-        # RFC 6638 3.1: one organizer for every component of the object.
         for override in _overrides(ical):
             if override is not master:
                 apply_extras(override, {ATTR_ORGANIZER: data[ATTR_ORGANIZER]})
                 stamp(override, addresses)
+    else:
+        _share_organizer(ical, master)
     new_start = master["DTSTART"].dt
     start_moved = to_utc(new_start) != to_utc(old_start)
     delta = _wall(master, new_start) - _wall(master, old_start)
@@ -211,19 +222,22 @@ def _update_series(
                 ical, master, old_start, from_occurrence=False, all_overrides=True
             )
             _clear_dates(master)
-        elif rule_changed:
-            _filter_dates(master, "EXDATE", partial(_has_slot, master))
-            for override in _overrides(ical):
-                rid = override["RECURRENCE-ID"].dt
-                if override is not master and not _is_occurrence(master, rid):
-                    ical.subcomponents.remove(override)
-        elif delta:
-            for override in _overrides(ical):
-                if override is not master:
-                    _shift_override(override, delta, zone)
-                    stamp(override, addresses)
-            _shift_dates(master, delta, zone)
-    _save(dav_event, ical, master, addresses)
+        else:
+            # Moved before the new rule is checked: the editor re-spells the
+            # rule whenever the start moves.
+            if delta:
+                for override in _overrides(ical):
+                    if override is not master:
+                        _shift_override(override, delta, zone)
+                        stamp(override, addresses)
+                _shift_dates(master, delta, zone)
+            if rule_changed:
+                _filter_dates(master, "EXDATE", partial(_has_slot, master))
+                for override in _overrides(ical):
+                    rid = override["RECURRENCE-ID"].dt
+                    if override is not master and not _is_occurrence(master, rid):
+                        ical.subcomponents.remove(override)
+    save(master)
 
 
 def _same_rule(
@@ -268,10 +282,10 @@ def delete_event(
 ) -> None:
     """Delete a whole series, a single occurrence, or an occurrence onwards."""
     dav_event = object_by_uid(calendar, uid)
-    check_etag(dav_event, expected_etag)
+    tag = held_etag(dav_event, expected_etag)
 
     if recurrence_id is None:
-        delete_components(dav_event, "VEVENT")
+        delete_components(dav_event, "VEVENT", tag)
         return
 
     ical = _collapsed(dav_event.icalendar_instance)
@@ -286,12 +300,12 @@ def delete_event(
             raise Refused("not_recurring")
         # Capping before the first occurrence would leave an empty series.
         if to_utc(occurrence) <= to_utc(master["DTSTART"].dt):
-            delete_components(dav_event, "VEVENT")
+            delete_components(dav_event, "VEVENT", tag)
             return
         _cap_series(master, occurrence)
         _drop_overrides(ical, master, occurrence, from_occurrence=True)
         if _series_empty(master) and not _overrides(ical):
-            delete_components(dav_event, "VEVENT")
+            delete_components(dav_event, "VEVENT", tag)
             return
     elif "RECURRENCE-ID" in master:
         target = _override(ical, occurrence)
@@ -299,10 +313,10 @@ def delete_event(
             raise Refused("occurrence_not_found", recurrence_id=recurrence_id)
         remaining = [v for v in _overrides(ical) if v is not target]
         if not remaining:
-            delete_components(dav_event, "VEVENT")
+            delete_components(dav_event, "VEVENT", tag)
             return
         ical.subcomponents.remove(target)
-        _save(dav_event, ical, None, addresses)
+        _save(dav_event, ical, None, addresses, tag)
         return
     else:
         if "RRULE" not in master and "RDATE" not in master:
@@ -310,10 +324,10 @@ def delete_event(
         _add_exdate(master, occurrence)
         _drop_overrides(ical, master, occurrence, from_occurrence=False)
         if _series_empty(master) and not _overrides(ical):
-            delete_components(dav_event, "VEVENT")
+            delete_components(dav_event, "VEVENT", tag)
             return
 
-    _save(dav_event, ical, master, addresses)
+    _save(dav_event, ical, master, addresses, tag)
 
 
 def parse_recurrence_id(value: str) -> datetime | date:
@@ -386,11 +400,9 @@ def _override(ical: Any, occurrence: datetime | date) -> Any | None:
 
 def _new_override(ical: Any, master: Any, occurrence: datetime | date) -> Any:
     override = ICalEvent.from_ical(master.to_ical())
-    for key in ("RRULE", "RDATE", "EXDATE"):
+    for key in _RECURRING:
         if key in override:
             del override[key]
-    replace(override, "dtstamp", dt_util.utcnow())
-    replace(override, "sequence", None)
     override.add("RECURRENCE-ID", vDDDTypes(_align(master, occurrence)))
     _anchor_at(override, master, occurrence)
     ical.add_component(override)
@@ -493,7 +505,7 @@ def _has_slot(master: Any, moment: datetime | date) -> bool:
 
 def _series_empty(master: Any) -> bool:
     recur = master.get("RRULE")
-    if recur is not None and not recur.get("COUNT") and not recur.get("UNTIL"):
+    if recur is not None and not _bounded(recur):
         return False
     exdates = [to_utc(value) for value in date_values(master, "EXDATE")]
     remaining = rruleset()
@@ -571,8 +583,6 @@ def _tail_document(
         replace(component, "dtstamp", now)
         replace(component, "last-modified", now)
         replace(component, "sequence", None)
-        # A kept RELATED-TO would make save_event write into other objects.
-        replace(component, "related-to", None)
     _keep_dates(vevent, "RDATE", occurrence, before=False)
     _keep_dates(vevent, "EXDATE", occurrence, before=False)
     start = vevent["DTSTART"].dt
@@ -583,6 +593,10 @@ def _tail_document(
             _clear_dates(vevent)
         else:
             check_rule(vevent["RRULE"], start)
+            if delta:
+                _shift_dates(vevent, delta, zone)
+                for override in carried:
+                    _shift_override(override, delta, zone)
             _filter_dates(vevent, "EXDATE", partial(_has_slot, vevent))
             carried = [
                 override
@@ -601,11 +615,26 @@ def _tail_document(
                 recur["UNTIL"] = [shifted(until[0], delta, zone)]
             for override in carried:
                 _shift_override(override, delta, zone)
+    for override in carried:
+        reset_replies(override)
     zones = [sub for sub in source.subcomponents if sub.name == "VTIMEZONE"]
     # Master first: caldav reads the first non-timezone component, and a
     # RECURRENCE-ID there sends it looking for a uid that does not exist yet.
     source.subcomponents = [*zones, vevent, *carried]
+    _share_organizer(source, vevent)
     return zoned_document(source)
+
+
+def _share_organizer(ical: Any, source: Any) -> None:
+    """Give the organizer an edit named on one component to those without one.
+
+    RFC 6638 3.1 wants one organizer on every component of the object.
+    """
+    if (organizer := source.get("ORGANIZER")) is None:
+        return
+    for vevent in ical.walk("VEVENT"):
+        if vevent is not source and "ORGANIZER" not in vevent:
+            vevent.add("ORGANIZER", deepcopy(organizer), encode=False)
 
 
 def _shown_span(component: Any) -> dict[str, Any]:
@@ -786,7 +815,7 @@ def _head_uncapped(
 
 def _discard(tail: Any) -> None:
     try:
-        tail.delete()
+        delete_resource(tail)
     except NETWORK_ERRORS as err:
         _LOGGER.warning(
             "The split-off series could not be removed after a failed update"
@@ -828,7 +857,7 @@ def _shift_dates(component: Any, delta: timedelta, zone: Any) -> None:
 
 
 def _clear_dates(component: Any) -> None:
-    for key in ("EXDATE", "RDATE"):
+    for key in ("EXDATE", "EXRULE", "RDATE"):
         if key in component:
             del component[key]
 
@@ -990,15 +1019,12 @@ def _save(
     ical: Any,
     touched: Any | None,
     addresses: list[str] | None = None,
+    tag: str | None = None,
 ) -> None:
-    """Write the object back, marking the component the edit revised."""
+    """Write the object back over the version read, marking what the edit revised."""
     if touched is not None:
         stamp(touched, addresses)
-    # caldav bumps SEQUENCE regardless of increase_seqno, on the first
-    # component that is not a timezone, a VTODO sharing the resource too.
-    hold_sequence(next(item for item in ical.subcomponents if item.name != "VTIMEZONE"))
     # An edit can introduce a TZID the object never defined. The document,
     # not its text, which caldav would run through vcal.fix.
     dav_event.icalendar_instance = zoned_document(ical)
-    # only_this_recurrence would splice back only the first component.
-    dav_event.save(increase_seqno=False, only_this_recurrence=False)
+    put_resource(dav_event, tag)

@@ -422,7 +422,7 @@ def test_a_write_redirected_on_the_same_host_goes_on_as_it_was_sent(
         assert call.kwargs["data"] == "<x/>"
         assert call.kwargs["allow_redirects"] is False
     assert session.moved_to == (
-        None if status == 307 else "https://cloud.example.com/dav/"
+        "https://cloud.example.com/dav/" if status in (301, 308) else None
     )
 
 
@@ -448,6 +448,31 @@ def test_a_redirect_the_write_does_not_follow_is_answered_as_it_came(
     assert response is answer
     assert sent.call_count == 1
     assert session.moved_to is None
+
+
+@pytest.mark.parametrize("method", ["PROPFIND", "GET"])
+def test_an_account_entered_over_https_is_never_sent_over_http(method: str) -> None:
+    """caldav moves the client onto a calendar home set on another host, scheme
+    included, as a SOGo behind a proxy names its backend."""
+    session = build_client("https://cloud.example.com/dav/", "u", "p", {}).session
+
+    with (
+        patch.object(requests.Session, "request") as sent,
+        pytest.raises(requests.exceptions.InvalidURL),
+    ):
+        session.request(method, "http://backend.internal:20000/SOGo/dav/")
+
+    sent.assert_not_called()
+
+
+def test_an_account_entered_over_http_stays_on_http() -> None:
+    session = build_client("http://nas.local/dav/", "u", "p", {}).session
+    answer = _answer(207, "http://nas.local/dav/")
+
+    with patch.object(requests.Session, "request", return_value=answer) as sent:
+        session.request("PROPFIND", "http://nas.local/dav/", data="<x/>")
+
+    sent.assert_called_once()
 
 
 def test_a_read_leaves_its_redirects_to_requests() -> None:

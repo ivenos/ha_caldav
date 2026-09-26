@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from caldav.elements import dav
 from caldav.lib.error import AuthorizationError, DAVError
+from conftest import stored
 from homeassistant.components.calendar import CalendarEntityFeature
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import (
@@ -32,7 +33,11 @@ from custom_components.ha_caldav.const import (
     CONF_READ_ONLY,
     DOMAIN,
 )
-from custom_components.ha_caldav.coordinator import _MAX_KEPT_POLLS, _TodoRead
+from custom_components.ha_caldav.coordinator import (
+    _MAX_KEPT_POLLS,
+    _TodoRead,
+    _WindowRead,
+)
 
 ENTRY_DATA = {
     CONF_URL: "https://cloud.example.com/remote.php/dav",
@@ -118,27 +123,24 @@ async def test_scan_interval_defaults_to_fifteen_minutes(hass: HomeAssistant) ->
     assert entity.coordinator.update_interval == timedelta(minutes=15)
 
 
-def _result(body: str) -> Mock:
-    item = Mock()
-    item.vobject_instance = vobject.readOne(
+def _result(body: str):
+    return stored(
         "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
         f"BEGIN:VEVENT\nUID:{abs(hash(body))}\nDTSTAMP:20260101T000000Z\n"
         f"{body}\nEND:VEVENT\nEND:VCALENDAR\n"
     )
-    return item
 
 
-def _search_item(summary: str, start_offset: timedelta) -> Mock:
+def _search_item(summary: str, start_offset: timedelta, etag: str | None = None):
     start = dt_util.utcnow() + start_offset
     end = start + timedelta(hours=1)
-    item = Mock()
-    item.vobject_instance = vobject.readOne(
+    return stored(
         "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
         f"BEGIN:VEVENT\nUID:{summary}\nDTSTAMP:20260101T000000Z\n"
         f"DTSTART:{start:%Y%m%dT%H%M%S}Z\nDTEND:{end:%Y%m%dT%H%M%S}Z\n"
-        f"SUMMARY:{summary}\nEND:VEVENT\nEND:VCALENDAR\n"
+        f"SUMMARY:{summary}\nEND:VEVENT\nEND:VCALENDAR\n",
+        etag,
     )
-    return item
 
 
 async def test_an_event_that_already_ended_is_not_the_upcoming_one(
@@ -272,7 +274,7 @@ async def test_change_survives_a_failed_poll(hass: HomeAssistant) -> None:
     )
 
     def search(**kwargs):
-        if kwargs.get("expand"):
+        if kwargs.get("event"):
             result = next(displays)
             if isinstance(result, Exception):
                 raise result
@@ -333,25 +335,24 @@ async def test_delete_forwards_etag_and_clears_it_after_write(
     assert "uid-1" not in entity.coordinator.etags
 
 
-def _etag_item(uid: str, etag: str) -> Mock:
-    item = Mock()
-    item.vobject_instance = vobject.readOne(
+def _etag_item(uid: str, etag: str | None):
+    return stored(
         "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
         f"BEGIN:VEVENT\nUID:{uid}\nDTSTAMP:20260101T000000Z\n"
         "DTSTART:20260706T090000Z\nDTEND:20260706T100000Z\nSUMMARY:x\n"
-        "END:VEVENT\nEND:VCALENDAR\n"
+        "END:VEVENT\nEND:VCALENDAR\n",
+        etag,
     )
-    item.props = {dav.GetEtag.tag: etag}
-    return item
 
 
 async def test_get_events_caches_etags(hass: HomeAssistant) -> None:
     calendar = _calendar("Personal")
     calendar.search.side_effect = lambda **kw: (
-        [_etag_item("uid-1", '"e"')] if kw.get("expand") is False else []
+        [_etag_item("uid-1", '"e"')] if kw.get("event") else []
     )
     await _setup(hass, [calendar])
     entity = _entity(hass, "calendar.personal")
+    entity.coordinator.etags = {}
 
     await entity.async_get_events(
         hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
@@ -375,26 +376,6 @@ async def test_failed_write_keeps_etag_for_retry(hass: HomeAssistant) -> None:
         await entity.async_update_event("uid-1", _event_fields())
 
     assert entity.coordinator.etags["uid-1"] == '"e"'
-
-
-async def test_get_events_survives_etag_refresh_failure(hass: HomeAssistant) -> None:
-    calendar = _calendar("Personal")
-
-    def search(**kw):
-        if kw.get("expand") is False:
-            raise DAVError("boom")
-        return []
-
-    calendar.search.side_effect = search
-    await _setup(hass, [calendar])
-    entity = _entity(hass, "calendar.personal")
-
-    events = await entity.async_get_events(
-        hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
-    )
-
-    assert events == []
-    assert entity.coordinator.etags == {}
 
 
 async def test_a_rejected_password_starts_a_reauth_flow(hass: HomeAssistant) -> None:
@@ -449,7 +430,7 @@ async def test_a_failing_todo_half_does_not_take_the_calendar_down(
             if calls["todo"] > 1:
                 raise Timeout("the completed items time out")
             return []
-        return events if kwargs.get("expand") else []
+        return events
 
     calendar.search.side_effect = search
     calendar.objects_by_sync_token.side_effect = lambda token=None: Mock(
@@ -480,15 +461,10 @@ async def test_etags_are_cached_by_the_poll_not_only_by_the_panel(
     hass: HomeAssistant,
 ) -> None:
     calendar = _calendar("Personal")
-    item = _search_item("Standup", timedelta(days=1))
-    tagged = Mock()
-    tagged.vobject_instance = item.vobject_instance
-    tagged.props = {dav.GetEtag.tag: '"etag-1"'}
+    tagged = _search_item("Standup", timedelta(days=1), '"etag-1"')
 
     def search(**kwargs):
-        if kwargs.get("todo"):
-            return []
-        return [item] if kwargs.get("expand") else [tagged]
+        return [] if kwargs.get("todo") else [tagged]
 
     calendar.search.side_effect = search
     await _setup(hass, [calendar])
@@ -500,7 +476,6 @@ async def test_etags_are_cached_by_the_poll_not_only_by_the_panel(
 
 async def test_the_panel_window_caches_its_own_etags(hass: HomeAssistant) -> None:
     calendar = _calendar("Personal")
-    far = _search_item("Retro", timedelta(days=90))
     window = dt_util.now() + timedelta(days=80)
 
     def search(**kwargs):
@@ -508,12 +483,7 @@ async def test_the_panel_window_caches_its_own_etags(hass: HomeAssistant) -> Non
             return []
         if kwargs["start"] < window:
             return []
-        if kwargs.get("expand"):
-            return [far]
-        tagged = Mock()
-        tagged.vobject_instance = far.vobject_instance
-        tagged.props = {dav.GetEtag.tag: '"etag-far"'}
-        return [tagged]
+        return [_search_item("Retro", timedelta(days=90), '"etag-far"')]
 
     calendar.search.side_effect = search
     await _setup(hass, [calendar])
@@ -555,7 +525,7 @@ async def test_a_half_that_answered_before_keeps_its_last_result(
             if fail_todos:
                 raise Timeout("boom")
             return []
-        return [item] if kwargs.get("expand") else []
+        return [item]
 
     calendar.search.side_effect = search
     await _setup(hass, [calendar])
@@ -574,8 +544,7 @@ async def test_an_event_core_refuses_does_not_take_the_calendar_down(
 ) -> None:
     calendar = _calendar("Personal")
     good = _search_item("Standup", timedelta(days=1))
-    broken = Mock()
-    broken.vobject_instance = vobject.readOne(
+    broken = stored(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
         "BEGIN:VEVENT\r\nUID:Backwards\r\nDTSTAMP:20260101T000000Z\r\n"
         "DTSTART:20260706T100000Z\r\nDTEND:20260706T090000Z\r\n"
@@ -608,10 +577,10 @@ async def test_the_days_option_sets_the_search_window(hass: HomeAssistant) -> No
     calendar = _calendar("Personal")
     await _setup(hass, [calendar], options={CONF_DAYS: 30})
 
-    expand = next(
-        call for call in calendar.search.call_args_list if call.kwargs.get("expand")
+    read = next(
+        call for call in calendar.search.call_args_list if call.kwargs.get("event")
     )
-    window = expand.kwargs["end"] - expand.kwargs["start"]
+    window = read.kwargs["end"] - read.kwargs["start"]
     assert window == timedelta(days=30)
 
 
@@ -669,18 +638,15 @@ async def test_an_event_without_a_start_does_not_take_the_calendar_down(
     assert hass.states.get("calendar.personal").attributes["message"] == "Standup"
 
 
-async def test_the_poll_does_not_ask_caldav_to_split_the_expansion(
-    hass: HomeAssistant,
-) -> None:
+async def test_the_poll_reads_its_window_in_one_report(hass: HomeAssistant) -> None:
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
 
-    # caldav's split copies and reparses the whole expanded object once per
-    # occurrence, which is quadratic in their number.
-    expand = next(
-        call for call in calendar.search.call_args_list if call.kwargs.get("expand")
-    )
-    assert expand.kwargs["split_expanded"] is False
+    reads = [
+        call for call in calendar.search.call_args_list if call.kwargs.get("event")
+    ]
+    assert len(reads) == 1
+    assert not reads[0].kwargs.get("expand")
 
 
 async def test_a_failed_poll_does_not_log_the_collection_url(
@@ -717,7 +683,7 @@ async def test_the_only_half_of_a_calendar_rides_out_a_failure_then_gives_up(
 
     calendar = _calendar("Personal")
     events = [_search_item("Standup", timedelta(days=1))]
-    calendar.search.side_effect = lambda **kw: events if kw.get("expand") else []
+    calendar.search.side_effect = lambda **kw: [] if kw.get("todo") else events
     with patch(
         "custom_components.ha_caldav.fetch_capabilities",
         return_value={
@@ -835,13 +801,12 @@ async def test_an_event_without_a_uid_does_not_take_the_poll_down(
     hass: HomeAssistant,
 ) -> None:
     calendar = _calendar("Personal")
-    item = Mock()
-    item.vobject_instance = vobject.readOne(
+    item = stored(
         "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n"
         "BEGIN:VEVENT\nDTSTAMP:20260101T000000Z\nDTSTART:20260706T090000Z\n"
-        "SUMMARY:No uid\nEND:VEVENT\nEND:VCALENDAR\n"
+        "SUMMARY:No uid\nEND:VEVENT\nEND:VCALENDAR\n",
+        '"e"',
     )
-    item.props = {dav.GetEtag.tag: '"e"'}
     calendar.search.return_value = [item]
     await _setup(hass, [calendar])
     entity = _entity(hass, "calendar.personal")
@@ -855,25 +820,20 @@ async def test_the_panel_gets_the_recurrence_rule_of_a_series(
     """Expanding a series strips RRULE from every occurrence it produces."""
     calendar = _calendar("Personal")
     start = dt_util.utcnow() + timedelta(days=1)
-    occurrence = Mock()
-    occurrence.vobject_instance = vobject.readOne(
-        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n"
-        f"BEGIN:VEVENT\nUID:series-1\nDTSTAMP:20260101T000000Z\n"
-        f"DTSTART:{start:%Y%m%dT%H%M%S}Z\n"
-        f"DTEND:{start + timedelta(hours=1):%Y%m%dT%H%M%S}Z\n"
-        "SUMMARY:Standup\nEND:VEVENT\nEND:VCALENDAR\n"
-    )
-    master = Mock()
-    master.vobject_instance = vobject.readOne(
-        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n"
-        f"BEGIN:VEVENT\nUID:series-1\nDTSTAMP:20260101T000000Z\n"
-        f"DTSTART:{start:%Y%m%dT%H%M%S}Z\n"
-        f"DTEND:{start + timedelta(hours=1):%Y%m%dT%H%M%S}Z\n"
-        "RRULE:FREQ=WEEKLY;BYDAY=MO\nSUMMARY:Standup\nEND:VEVENT\nEND:VCALENDAR\n"
-    )
-    master.props = {dav.GetEtag.tag: '"e"'}
     calendar.search.side_effect = lambda **kw: (
-        [master] if kw.get("expand") is False else [occurrence]
+        []
+        if kw.get("todo")
+        else [
+            stored(
+                "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n"
+                f"BEGIN:VEVENT\nUID:series-1\nDTSTAMP:20260101T000000Z\n"
+                f"DTSTART:{start:%Y%m%dT%H%M%S}Z\n"
+                f"DTEND:{start + timedelta(hours=1):%Y%m%dT%H%M%S}Z\n"
+                "RRULE:FREQ=WEEKLY;BYDAY=MO\nSUMMARY:Standup\nEND:VEVENT\n"
+                "END:VCALENDAR\n",
+                '"e"',
+            )
+        ]
     )
     await _setup(hass, [calendar])
     entity = _entity(hass, "calendar.personal")
@@ -904,20 +864,18 @@ async def test_a_series_that_stops_recurring_loses_its_recorded_rule(
     calendar = _calendar("Personal")
     start = dt_util.utcnow() + timedelta(days=1)
 
-    def body(rule: str) -> Mock:
-        item = Mock()
-        item.vobject_instance = vobject.readOne(
+    def body(rule: str):
+        return stored(
             "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n"
             f"BEGIN:VEVENT\nUID:series-1\nDTSTAMP:20260101T000000Z\n"
             f"DTSTART:{start:%Y%m%dT%H%M%S}Z\n"
             f"DTEND:{start + timedelta(hours=1):%Y%m%dT%H%M%S}Z\n"
-            f"{rule}SUMMARY:Standup\nEND:VEVENT\nEND:VCALENDAR\n"
+            f"{rule}SUMMARY:Standup\nEND:VEVENT\nEND:VCALENDAR\n",
+            '"e"',
         )
-        item.props = {dav.GetEtag.tag: '"e"'}
-        return item
 
     calendar.search.side_effect = lambda **kw: (
-        [body("RRULE:FREQ=WEEKLY\n")] if kw.get("expand") is False else [body("")]
+        [] if kw.get("todo") else [body("RRULE:FREQ=WEEKLY\n")]
     )
     await _setup(hass, [calendar])
     entity = _entity(hass, "calendar.personal")
@@ -926,7 +884,7 @@ async def test_a_series_that_stops_recurring_loses_its_recorded_rule(
     )
     assert entity.coordinator.rrules == {"series-1": "FREQ=WEEKLY"}
 
-    calendar.search.side_effect = lambda **kw: [body("")]
+    calendar.search.side_effect = lambda **kw: [] if kw.get("todo") else [body("")]
     events = await entity.async_get_events(
         hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
     )
@@ -942,9 +900,7 @@ async def test_an_edit_leaves_the_etag_the_refresh_read_back(
     etag = '"v1"'
 
     def search(**kwargs):
-        if kwargs.get("todo") or kwargs.get("expand") is not False:
-            return []
-        return [_etag_item("uid-1", etag)]
+        return [] if kwargs.get("todo") else [_etag_item("uid-1", etag)]
 
     calendar.search.side_effect = search
     await _setup(hass, [calendar])
@@ -969,13 +925,9 @@ async def test_a_poll_that_could_not_read_the_etags_keeps_its_token(
     hass: HomeAssistant,
 ) -> None:
     calendar = _calendar("Personal")
-
-    def search(**kwargs):
-        if kwargs.get("expand") is False:
-            raise DAVError("etag report refused")
-        return []
-
-    calendar.search.side_effect = search
+    calendar.search.side_effect = lambda **kw: (
+        [] if kw.get("todo") else [_etag_item("uid-1", None)]
+    )
     calendar.objects_by_sync_token.return_value = Mock(sync_token="t2")
     await _setup(hass, [calendar])
     coordinator = _entity(hass, "calendar.personal").coordinator
@@ -1064,7 +1016,7 @@ async def test_the_panel_etags_and_the_polled_ones_live_side_by_side(
     far = _etag_item("far-1", '"far"')
 
     def search(**kwargs):
-        if kwargs.get("todo") or kwargs.get("expand") is not False:
+        if kwargs.get("todo"):
             return []
         far_away = kwargs["start"] > dt_util.now() + timedelta(days=30)
         return [far] if far_away else [_etag_item("near-1", '"near"')]
@@ -1084,8 +1036,7 @@ async def test_a_server_that_puts_no_etag_on_a_window_still_reports_a_read(
     hass: HomeAssistant,
 ) -> None:
     calendar = _calendar("Personal")
-    bare = _etag_item("uid-1", '"e"')
-    bare.props = {}
+    bare = _etag_item("uid-1", None)
     calendar.search.side_effect = lambda **kw: [] if kw.get("todo") else [bare]
     calendar.objects_by_sync_token.side_effect = lambda token=None: Mock(
         sync_token=object()
@@ -1126,20 +1077,17 @@ async def test_the_recorded_rule_comes_off_the_master_of_the_object(
 ) -> None:
     """RFC 5545 leaves the component order open."""
     calendar = _calendar("Personal")
-    item = Mock()
-    item.vobject_instance = vobject.readOne(
+    item = stored(
         "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
         "BEGIN:VEVENT\nUID:series-1\nRECURRENCE-ID:20260713T090000Z\n"
         "DTSTAMP:20260101T000000Z\nDTSTART:20260713T110000Z\n"
         "DTEND:20260713T120000Z\nSUMMARY:Moved\nEND:VEVENT\n"
         "BEGIN:VEVENT\nUID:series-1\nDTSTAMP:20260101T000000Z\n"
         "DTSTART:20260706T090000Z\nDTEND:20260706T100000Z\n"
-        "RRULE:FREQ=WEEKLY\nSUMMARY:Standup\nEND:VEVENT\nEND:VCALENDAR\n"
+        "RRULE:FREQ=WEEKLY\nSUMMARY:Standup\nEND:VEVENT\nEND:VCALENDAR\n",
+        '"e"',
     )
-    item.props = {dav.GetEtag.tag: '"e"'}
-    calendar.search.side_effect = lambda **kw: (
-        [item] if kw.get("expand") is False else []
-    )
+    calendar.search.side_effect = lambda **kw: [] if kw.get("todo") else [item]
 
     await _setup(hass, [calendar])
     entity = _entity(hass, "calendar.personal")
@@ -1245,8 +1193,7 @@ async def test_one_unplaceable_event_does_not_cost_the_collection_its_entities(
     """A DTEND in the year 9999 overflows the moment a zone offset reaches it, and
     OverflowError is an ArithmeticError."""
     calendar = _calendar("Personal")
-    forever = Mock()
-    forever.vobject_instance = vobject.readOne(
+    forever = stored(
         "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//t//EN\n"
         "BEGIN:VEVENT\nUID:forever\nDTSTAMP:20260101T000000Z\n"
         "DTSTART:20260101T100000Z\nDTEND:99991231T235959Z\n"
@@ -1479,7 +1426,7 @@ async def test_a_dead_half_beside_one_still_serving_is_not_a_failed_poll(
     def search(**kwargs):
         if kwargs.get("todo"):
             raise Timeout("the list never answered")
-        return events if kwargs.get("expand") else []
+        return events
 
     calendar.search.side_effect = search
     calendar.objects_by_sync_token.side_effect = lambda token=None: Mock(
@@ -1675,11 +1622,14 @@ async def test_a_panel_read_already_on_the_wire_cannot_restore_a_dropped_etag(
     coordinator = _entity(hass, "calendar.personal").coordinator
 
     def read_while_a_write_lands(start, end):
+        read = _WindowRead(
+            vevents=[], etags={"uid-1": '"v1"'}, rules={}, epoch=coordinator._etag_epoch
+        )
         coordinator.forget_etags("etags", ("uid-1",))
-        return {"uid-1": '"v1"'}, {}
+        return read
 
     now = dt_util.now()
-    with patch.object(coordinator, "_window_index", read_while_a_write_lands):
+    with patch.object(coordinator, "_read_window", read_while_a_write_lands):
         await coordinator.async_get_events(now, now + timedelta(days=30))
 
     assert "uid-1" not in coordinator.etags

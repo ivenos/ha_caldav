@@ -24,7 +24,7 @@
               "client_key": "Percorso della chiave client"
             },
             "data_description": {
-              "ca_bundle": "Facoltativo. Verifica il server con questo file anziché con l'archivio di sistema.",
+              "ca_bundle": "Facoltativo. Verifica il server con questo file anziché con l'archivio di sistema. Con un file la verifica resta attiva.",
               "client_cert": "Facoltativo. Identifica Home Assistant presso i server che chiedono un certificato.",
               "client_key": "Facoltativo. La chiave privata di quel certificato."
             }
@@ -33,13 +33,15 @@
       },
       "reconfigure": {
         "title": "Modifica la connessione CalDAV",
-        "description": "Aggiorna l'URL del server o le impostazioni TLS. L'account resta invariato.",
+        "description": "Aggiorna l'URL del server, la password o le impostazioni TLS. L'account resta invariato.",
         "data": {
           "url": "URL del server",
+          "password": "Password",
           "verify_ssl": "Verifica il certificato SSL"
         },
         "data_description": {
           "url": "L'indirizzo del tuo server CalDAV. Sulla maggior parte dei server basta il nome host.",
+          "password": "Lascia vuoto per mantenere quella attuale.",
           "verify_ssl": "Disattivato, chiunque intercetti la connessione può fingersi il server e leggere la password."
         },
         "sections": {
@@ -52,7 +54,7 @@
               "client_key": "Percorso della chiave client"
             },
             "data_description": {
-              "ca_bundle": "Facoltativo. Verifica il server con questo file anziché con l'archivio di sistema.",
+              "ca_bundle": "Facoltativo. Verifica il server con questo file anziché con l'archivio di sistema. Con un file la verifica resta attiva.",
               "client_cert": "Facoltativo. Identifica Home Assistant presso i server che chiedono un certificato.",
               "client_key": "Facoltativo. La chiave privata di quel certificato."
             }
@@ -102,11 +104,12 @@
           "read_only": "Sola lettura"
         },
         "data_description": {
+          "calendars": "I calendari che ricevono entità. Con tutti selezionati, anche un calendario aggiunto sul server le riceve.",
           "scan_interval": "Ogni quanto cercare modifiche fatte fuori da Home Assistant.",
           "timeout": "Quanto tempo attendere la risposta del server a una singola richiesta.",
           "days": "Con quanto anticipo cercare il prossimo evento.",
           "include_all_day": "Se un evento di tutto il giorno può essere il prossimo.",
-          "read_only": "Nasconde i comandi di creazione, modifica ed eliminazione."
+          "read_only": "Nasconde i comandi di creazione, modifica ed eliminazione e le azioni si rifiutano di scrivere. Una ridenominazione in Home Assistant resta allora locale."
         }
       },
       "pick": {
@@ -117,7 +120,7 @@
       },
       "calendar": {
         "title": "Impostazioni di {calendar}",
-        "description": "Sostituiscono le impostazioni dell'account solo per {calendar}.",
+        "description": "Queste impostazioni sostituiscono quelle dell'account solo per {calendar}.",
         "data": {
           "days": "Giorni di anticipo",
           "include_all_day": "Includi gli eventi di tutto il giorno",
@@ -127,7 +130,7 @@
         "data_description": {
           "days": "Con quanto anticipo cercare il prossimo evento.",
           "include_all_day": "Se un evento di tutto il giorno può essere il prossimo.",
-          "read_only": "Nasconde i comandi di creazione, modifica ed eliminazione.",
+          "read_only": "Nasconde i comandi di creazione, modifica ed eliminazione e le azioni si rifiutano di scrivere. Una ridenominazione in Home Assistant resta allora locale.",
           "reset": "Scarta tutto ciò che è impostato qui e torna a seguire l'account."
         }
       }
@@ -176,6 +179,9 @@
     },
     "invalid_rrule": {
       "message": "La regola di ricorrenza non è valida: {reason}"
+    },
+    "last_selected_calendar": {
+      "message": "{name} è l'unico calendario incluso per questo account. Includine prima un altro nelle opzioni."
     },
     "mixed_time_types": {
       "message": "Inizio e fine devono essere dello stesso tipo: due date per un evento di tutto il giorno, oppure due date con ora."

@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
+from conftest import written_through
 from homeassistant.util import dt as dt_util
 from icalendar import Calendar as ICalendar
 
@@ -20,6 +21,7 @@ class FakeTodo:
         self.data = ics
         self._cal = ICalendar.from_ical(ics)
         self.saved = False
+        written_through(self)
 
     @property
     def icalendar_instance(self):
@@ -41,6 +43,9 @@ class FakeTodo:
         vtodo.pop("DUE", None)
         vtodo.pop("DURATION", None)
         vtodo.add("DUE", due)
+
+    def load(self) -> None:
+        return
 
     def save(self, **kwargs) -> None:
         self.saved = True

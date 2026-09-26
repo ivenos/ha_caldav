@@ -4,7 +4,6 @@ from datetime import UTC, date, datetime
 import os
 from urllib.parse import urlparse
 
-import caldav
 import pytest
 import pytest_socket
 
@@ -15,6 +14,7 @@ from custom_components.ha_caldav.api import (
     object_by_uid,
     update_todo,
 )
+from custom_components.ha_caldav.connection import build_client, connection_kwargs
 from custom_components.ha_caldav.errors import Refused
 from custom_components.ha_caldav.recurrence import delete_event, update_event
 
@@ -58,7 +58,8 @@ def calendar(module_sockets):
     """Nextcloud rate-limits calendar creation ("Too many calendars created")."""
     if not URL:
         pytest.skip("CALDAV_URL is not set")
-    principal = caldav.DAVClient(URL, username=USERNAME, password=PASSWORD).principal()
+    client = build_client(URL, USERNAME, PASSWORD, connection_kwargs({}))
+    principal = client.principal()
     for existing in principal.calendars():
         if existing.name == CALENDAR_NAME:
             existing.delete()
@@ -91,17 +92,11 @@ def todos(calendar) -> dict:
 
 
 def _expanded(calendar):
-    """Yield every occurrence the way coordinator._fetch_events reads them."""
-    from custom_components.ha_caldav.coordinator import components_of
+    """Yield every occurrence the way the coordinator reads a window."""
+    from custom_components.ha_caldav.coordinator import occurrences
 
-    for item in calendar.search(
-        start=RANGE_START,
-        end=RANGE_END,
-        event=True,
-        expand=True,
-        split_expanded=False,
-    ):
-        yield from components_of(item, "vevent")
+    for item in calendar.search(start=RANGE_START, end=RANGE_END, event=True):
+        yield from occurrences(item, RANGE_START, RANGE_END)
 
 
 def starts(calendar) -> list:
@@ -287,12 +282,7 @@ def test_recurrence_id_from_the_server_round_trips(calendar) -> None:
     from custom_components.ha_caldav.coordinator import to_event
 
     uid = series(calendar, rrule="FREQ=WEEKLY;COUNT=3")
-    events = [
-        to_event(item.vobject_instance.vevent)
-        for item in calendar.search(
-            start=RANGE_START, end=RANGE_END, event=True, expand=True
-        )
-    ]
+    events = [to_event(vevent) for vevent in _expanded(calendar)]
     second = next(e for e in events if e.start.astimezone(UTC).day == 13)
     assert second.recurrence_id is not None
 
@@ -331,7 +321,6 @@ def test_create_update_delete_todo(calendar) -> None:
     item = stored["Buy oat milk"]
     assert item.status is TodoItemStatus.COMPLETED
     assert item.due == date(2026, 7, 11)
-    # Description survives alongside due: set_due mutates the same component.
     assert item.description == "The barista one"
 
     delete_todos(calendar, [uid], {})
@@ -672,19 +661,22 @@ def test_import_refuses_to_overwrite_what_is_already_there(calendar) -> None:
     assert len(found) == 1
 
 
-def test_a_stale_todo_edit_is_refused_by_the_server_state(calendar) -> None:
+def test_a_todo_edit_checks_the_etag_the_list_read_off_its_report(calendar) -> None:
     from caldav.elements import dav
 
     from custom_components.ha_caldav.api import update_todo
 
     create_todo(calendar, {"summary": "Live etag"})
     uid = next(iter(todos(calendar).values())).uid
-    resource = object_by_uid(calendar, uid, todo=True)
-    resource.load()
-    etag = resource.props.get(dav.GetEtag.tag)
-    assert etag is not None
+    etag = next(
+        item.props[dav.GetEtag.tag]
+        for item in calendar.search(
+            todo=True, include_completed=True, props=[dav.GetEtag()]
+        )
+        if str(item.vobject_instance.vtodo.uid.value) == uid
+    )
 
-    update_todo(calendar, uid, {"summary": "Changed elsewhere"})
+    update_todo(calendar, uid, {"summary": "Changed elsewhere"}, expected_etag=etag)
 
     with pytest.raises(Refused, match="etag_conflict"):
         update_todo(calendar, uid, {"summary": "Mine"}, expected_etag=etag)
@@ -747,3 +739,84 @@ def test_moving_one_item_leaves_the_others_untouched(calendar) -> None:
         vtodo = resource.vobject_instance.vtodo
         positions[str(vtodo.summary.value)] = sort_order(vtodo)
     assert positions["Live three"] < positions["Live one"] < positions["Live two"]
+
+
+def _raw(uid: str, summary: str = "Raw") -> str:
+    return (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//live//EN\r\nBEGIN:VEVENT\r\n"
+        f"UID:{uid}\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:20260708T090000Z\r\n"
+        f"DTEND:20260708T100000Z\r\nSUMMARY:{summary}\r\nEND:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+
+
+def _put_raw(calendar, name: str, body: str) -> int:
+    from caldav.lib.error import AuthorizationError
+
+    try:
+        response = calendar.client.put(
+            str(calendar.url.join(name)), body, {"Content-Type": "text/calendar"}
+        )
+    except AuthorizationError:
+        return 403
+    return response.status
+
+
+def test_the_server_refuses_a_write_over_a_version_it_moved_past(calendar) -> None:
+    from caldav.elements import dav
+
+    from custom_components.ha_caldav.api import put_resource
+
+    create_event(
+        calendar,
+        {
+            "summary": "Meeting",
+            "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+        },
+    )
+    mine = object_by_uid(calendar, uid_of(calendar))
+    mine.load()
+    seen = mine.props[dav.GetEtag.tag]
+    other = object_by_uid(calendar, uid_of(calendar))
+    other.data = other.data.replace("Meeting", "Changed elsewhere")
+    put_resource(other)
+
+    mine.data = mine.data.replace("Meeting", "Mine")
+    with pytest.raises(Refused, match="etag_conflict"):
+        put_resource(mine, seen)
+    assert "Changed elsewhere" in summaries(calendar).values()
+
+
+def test_an_import_leaves_an_object_stored_under_its_resource_name_alone(
+    calendar,
+) -> None:
+    """A uid lookup cannot see an object whose resource is named after another uid."""
+    from custom_components.ha_caldav.api import import_ics
+
+    if "/SOGo/" in (URL or ""):
+        pytest.skip("SOGo ignores If-None-Match and overwrites")
+
+    assert _put_raw(calendar, "taken.ics", _raw("someone-else")) in (200, 201, 204)
+
+    with pytest.raises(Refused, match="uid_clash"):
+        import_ics(calendar, _raw("taken", "Imported"))
+
+    assert "Raw" in summaries(calendar).values()
+
+
+def test_deleting_from_a_resource_with_an_encoded_slash_never_fakes_success(
+    calendar,
+) -> None:
+    """Xandikos lists such a resource and then answers 404 however it is spelled."""
+    from caldav.lib.error import NotFoundError
+
+    if _put_raw(calendar, "a%2Fb-live.ics", _raw("slashed")) not in (200, 201, 204):
+        pytest.skip("server does not store a resource name with an encoded slash")
+
+    try:
+        delete_event(calendar, "slashed")
+    except NotFoundError:
+        assert "Raw" in summaries(calendar).values()
+    else:
+        assert "Raw" not in summaries(calendar).values()

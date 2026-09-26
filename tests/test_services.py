@@ -2,6 +2,8 @@ from datetime import UTC, date, datetime, timedelta
 from unittest.mock import Mock, patch
 
 from caldav.lib.error import DAVError
+from caldav.lib.url import URL
+from conftest import RecordingClient, stored
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import Context, HomeAssistant
@@ -48,6 +50,12 @@ def _calendar(name: str) -> Mock:
     calendar.url = f"https://cloud.example.com/remote.php/dav/{name}"
     calendar.search.return_value = []
     return calendar
+
+
+def _record_writes(calendar: Mock) -> None:
+    calendar.client = RecordingClient()
+    calendar.client.url = URL("https://cloud.example.com/")
+    calendar.url = URL(calendar.url)
 
 
 def _search_item(summary: str) -> Mock:
@@ -207,6 +215,23 @@ async def test_update_event_only_forwards_the_named_fields(
     assert update.call_args.args[1] == "uid-1"
 
 
+@pytest.mark.parametrize(("given", "forwarded"), [("Agenda", "Agenda"), ("", None)])
+async def test_update_event_forwards_a_description_and_clears_an_empty_one(
+    hass: HomeAssistant, given: str, forwarded: str | None
+) -> None:
+    await _setup(hass)
+
+    with patch("custom_components.ha_caldav.calendar.update_event") as update:
+        await hass.services.async_call(
+            DOMAIN,
+            "update_event",
+            {"entity_id": "calendar.personal", "uid": "uid-1", "description": given},
+            blocking=True,
+        )
+
+    assert update.call_args.args[2] == {"description": forwarded}
+
+
 async def test_update_event_forwards_the_recurrence_range(hass: HomeAssistant) -> None:
     await _setup(hass)
 
@@ -226,6 +251,29 @@ async def test_update_event_forwards_the_recurrence_range(hass: HomeAssistant) -
 
     assert update.call_args.args[3] == "2026-07-13 09:00:00+00:00"
     assert update.call_args.args[4] is True
+
+
+async def test_an_occurrence_a_template_rendered_empty_edits_the_series(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+
+    with patch("custom_components.ha_caldav.calendar.update_event") as update:
+        await hass.services.async_call(
+            DOMAIN,
+            "update_event",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "summary": "Renamed",
+                "recurrence_id": "",
+                "recurrence_range": "",
+            },
+            blocking=True,
+        )
+
+    assert update.call_args.args[3] is None
+    assert update.call_args.args[4] is False
 
 
 async def test_delete_event_removes_the_whole_series_by_default(
@@ -453,6 +501,24 @@ async def test_create_calendar_reloads_the_account(hass: HomeAssistant) -> None:
     assert create.call_args.args[1] == "Holidays"
     assert create.call_args.args[2] == ["VEVENT"]
     reload.assert_called_once_with(entry.entry_id)
+
+
+async def test_a_read_only_account_gets_no_new_calendar(hass: HomeAssistant) -> None:
+    entry = await _setup(hass, options={CONF_READ_ONLY: True})
+
+    with (
+        patch("custom_components.ha_caldav.services.create_calendar") as create,
+        pytest.raises(ServiceValidationError) as refusal,
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "create_calendar",
+            {"config_entry_id": entry.entry_id, "name": "Holidays"},
+            blocking=True,
+        )
+
+    assert refusal.value.translation_key == "read_only"
+    create.assert_not_called()
 
 
 async def test_a_new_calendar_is_added_to_an_explicit_selection(
@@ -1004,6 +1070,39 @@ async def test_moving_into_a_calendar_the_caller_may_not_control_is_refused(
         )
 
 
+async def test_a_caller_who_may_control_both_calendars_moves_the_event(
+    hass: HomeAssistant,
+) -> None:
+    from homeassistant.auth.permissions import PolicyPermissions
+
+    await _setup(hass, [_calendar("Personal"), _calendar("Private")])
+    user = MockUser()
+    user.add_to_hass(hass)
+    user.permissions = PolicyPermissions(
+        {
+            "entities": {
+                "entity_ids": {"calendar.personal": True, "calendar.private": True}
+            }
+        },
+        user.id,
+    )
+
+    with patch("custom_components.ha_caldav.services.move_event") as move:
+        await hass.services.async_call(
+            DOMAIN,
+            "move_event",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "target_entity_id": "calendar.private",
+            },
+            blocking=True,
+            context=Context(user_id=user.id),
+        )
+
+    move.assert_called_once()
+
+
 def test_an_event_that_ends_when_it_starts_is_refused() -> None:
     """end_date reads as "the last day", and that pair is invalid per RFC 5545."""
     from custom_components.ha_caldav.services import _check_span
@@ -1072,16 +1171,19 @@ async def test_replying_to_an_invitation_clears_the_events_etag(
 async def test_deleting_a_calendar_takes_its_key_out_of_the_selection(
     hass: HomeAssistant,
 ) -> None:
-    calendar = _calendar("Personal")
     entry = await _setup(
-        hass, [calendar], options={CONF_CALENDARS: ["/remote.php/dav/Personal"]}
+        hass,
+        [_calendar("Personal"), _calendar("Work")],
+        options={CONF_CALENDARS: ["/remote.php/dav/Personal", "/remote.php/dav/Work"]},
     )
 
     with (
         patch("custom_components.ha_caldav.services.delete_calendar"),
         patch("custom_components.ha_caldav.caldav.DAVClient") as client,
     ):
-        client.return_value.principal.return_value.calendars.return_value = []
+        client.return_value.principal.return_value.calendars.return_value = [
+            _calendar("Work")
+        ]
         await hass.services.async_call(
             DOMAIN,
             "delete_calendar",
@@ -1090,7 +1192,30 @@ async def test_deleting_a_calendar_takes_its_key_out_of_the_selection(
         )
         await hass.async_block_till_done()
 
-    assert CONF_CALENDARS not in entry.options
+    assert entry.options[CONF_CALENDARS] == ["/remote.php/dav/Work"]
+
+
+async def test_the_only_selected_calendar_is_not_deleted(hass: HomeAssistant) -> None:
+    """With the selection empty, every other calendar of the account would load."""
+    entry = await _setup(
+        hass,
+        [_calendar("Personal"), _calendar("Work")],
+        options={CONF_CALENDARS: ["/remote.php/dav/Personal"]},
+    )
+
+    with (
+        patch("custom_components.ha_caldav.services.delete_calendar") as delete,
+        pytest.raises(ServiceValidationError) as refusal,
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "delete_calendar",
+            {"config_entry_id": entry.entry_id, "name": "Personal"},
+            blocking=True,
+        )
+
+    assert refusal.value.translation_key == "last_selected_calendar"
+    delete.assert_not_called()
 
 
 async def test_a_move_between_two_accounts_sharing_a_path_is_allowed(
@@ -1328,6 +1453,7 @@ async def test_an_event_created_with_attendees_names_the_account_as_organizer(
     """RFC 5546 3 requires it, and sabre/dav answers 500 on deleting an object that
     lists attendees without one."""
     calendar = _calendar("Personal")
+    _record_writes(calendar)
     with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
         principal = client.return_value.principal.return_value
         principal.calendars.return_value = [calendar]
@@ -1355,7 +1481,7 @@ async def test_an_event_created_with_attendees_names_the_account_as_organizer(
         blocking=True,
     )
 
-    body = calendar.save_event.call_args.args[0].to_ical().decode("utf-8")
+    body = calendar.client.bodies[-1]
     assert "ORGANIZER:mailto:iven@example.com" in body
     assert "ATTENDEE" in body
 
@@ -1555,28 +1681,14 @@ async def test_search_returns_the_extra_properties(hass: HomeAssistant) -> None:
     assert events[0]["url"] == "https://meet.example.com/x"
 
 
-EXPANDED = (
-    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n"
-    + "".join(
-        "BEGIN:VEVENT\r\nUID:uid-1\r\nDTSTAMP:20260101T000000Z\r\n"
-        f"RECURRENCE-ID:202607{day}T090000Z\r\nDTSTART:202607{day}T090000Z\r\n"
-        "DTEND:20260706T100000Z\r\nSUMMARY:Standup\r\nEND:VEVENT\r\n".replace(
-            "DTEND:20260706", f"DTEND:202607{day}"
-        )
-        for day in ("06", "13")
-    )
-    + "END:VCALENDAR\r\n"
-)
-
-
 async def test_a_search_within_a_window_answers_with_each_occurrence(
     hass: HomeAssistant,
 ) -> None:
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
-    item = Mock()
-    item.vobject_instance = vobject.readOne(EXPANDED)
-    calendar.search.return_value = [item]
+    calendar.search.return_value = [
+        stored(ICS.replace("SUMMARY:", "RRULE:FREQ=WEEKLY;COUNT=2\r\nSUMMARY:"))
+    ]
 
     response = await hass.services.async_call(
         DOMAIN,
@@ -1591,11 +1703,38 @@ async def test_a_search_within_a_window_answers_with_each_occurrence(
         return_response=True,
     )
 
-    assert calendar.search.call_args.kwargs["expand"] is True
     events = response["calendar.personal"]["events"]
     assert [event["recurrence_id"] for event in events] == [
         "2026-07-06 09:00:00+00:00",
         "2026-07-13 09:00:00+00:00",
+    ]
+
+
+async def test_one_series_that_cannot_be_expanded_leaves_the_other_matches(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    lunar = ICS.replace("uid-1", "lunar").replace(
+        "SUMMARY:", "RRULE:RSCALE=CHINESE;FREQ=YEARLY\r\nSUMMARY:"
+    )
+    calendar.search.return_value = [stored(lunar), stored(ICS)]
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "search_events",
+        {
+            "entity_id": "calendar.personal",
+            "text": "Standup",
+            "start": "2026-07-01T00:00:00+00:00",
+            "end": "2026-07-31T00:00:00+00:00",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert [event["uid"] for event in response["calendar.personal"]["events"]] == [
+        "uid-1"
     ]
 
 
@@ -1778,6 +1917,7 @@ async def test_an_empty_text_from_an_automation_clears_the_field(
 
 async def test_an_empty_rule_on_a_new_event_is_no_rule(hass: HomeAssistant) -> None:
     calendar = _calendar("Personal")
+    _record_writes(calendar)
     await _setup(hass, [calendar])
 
     await hass.services.async_call(
@@ -1794,7 +1934,7 @@ async def test_an_empty_rule_on_a_new_event_is_no_rule(hass: HomeAssistant) -> N
         blocking=True,
     )
 
-    written = calendar.save_event.call_args.args[0].to_ical().decode()
+    written = calendar.client.bodies[-1]
     assert "RRULE" not in written
     assert "LOCATION" not in written
 

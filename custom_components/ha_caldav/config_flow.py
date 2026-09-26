@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 import logging
 import os
@@ -35,11 +36,13 @@ from homeassistant.helpers.selector import (
 import voluptuous as vol
 
 from .connection import (
+    UNREACHABLE,
     account_key,
     build_client,
     calendar_key,
     connection_kwargs,
     display_name,
+    distinctive,
     url_candidates,
     without_userinfo,
 )
@@ -88,10 +91,11 @@ DATA_SCHEMA = vol.Schema(
     }
 )
 
-# The account stays put on reconfigure and the password belongs to reauth.
+# The account stays put on reconfigure, and a password left empty stays too.
 RECONFIGURE_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_URL): cv.string,
+        vol.Optional(CONF_PASSWORD, default=""): cv.string,
         vol.Optional(CONF_VERIFY_SSL, default=True): cv.boolean,
         vol.Optional(CONF_CERTIFICATES): CERTIFICATES_SECTION,
     }
@@ -133,9 +137,11 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Change the server url or the TLS settings of an account.
+        """Change the server url, the password or the TLS settings of an account.
 
-        The account itself is fixed: the entry is keyed on it.
+        The account itself is fixed: the entry is keyed on it. A move to a new
+        server often comes with a new password, which reauth would test against
+        the old url.
         """
         errors: dict[str, str] = {}
         entry = self._get_reconfigure_entry()
@@ -143,8 +149,9 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
             cleaned = {
                 **_cleaned(user_input),
                 CONF_USERNAME: entry.data[CONF_USERNAME],
-                CONF_PASSWORD: entry.data[CONF_PASSWORD],
             }
+            if not cleaned.get(CONF_PASSWORD):
+                cleaned[CONF_PASSWORD] = entry.data[CONF_PASSWORD]
             error, url = await self.hass.async_add_executor_job(
                 _test_connection, cleaned, request_timeout(entry)
             )
@@ -250,7 +257,7 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
         if choices:
             fields[
                 vol.Optional(CONF_CALENDARS, default=_selected_keys(options, choices))
-            ] = cv.multi_select(choices)
+            ] = cv.multi_select(_labels(choices))
         fields[
             vol.Optional(
                 CONF_SCAN_INTERVAL,
@@ -276,7 +283,18 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
         return self.async_show_form(
             step_id="pick",
             data_schema=vol.Schema(
-                {vol.Required(CONF_CALENDAR): vol.In(_labeled(self._managed()))}
+                {
+                    vol.Required(CONF_CALENDAR): vol.In(
+                        _sorted(
+                            _labels(
+                                {
+                                    calendar_key(item.calendar.url): item.name
+                                    for item in self._managed()
+                                }
+                            )
+                        )
+                    )
+                }
             ),
         )
 
@@ -299,7 +317,6 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
         account = account_settings(self.config_entry)
         if user_input is not None:
             reset = user_input.pop(CONF_RESET, False)
-            overrides.pop(name, None)
             overrides.pop(key, None)
             if not reset:
                 changed = {
@@ -316,7 +333,7 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
                 }
             )
 
-        current = overrides.get(key, overrides.get(name, {}))
+        current = overrides.get(key, {})
         return self.async_show_form(
             step_id="calendar",
             description_placeholders={"calendar": name},
@@ -355,10 +372,7 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
 
 
 def _number(low: int, high: int, unit: str) -> NumberSelector:
-    """Return a whole-number field bounded by the frontend itself.
-
-    A voluptuous range answers with its own English message.
-    """
+    """Return a number field in whole steps, with its bounds shown in the form."""
     return NumberSelector(
         NumberSelectorConfig(
             min=low,
@@ -384,10 +398,11 @@ def _calendar_fields(values: Mapping[str, Any]) -> dict[Any, Any]:
 def _selected_keys(options: Mapping[str, Any], choices: dict[str, str]) -> list[str]:
     """Return the stored selection as keys, defaulting to every calendar.
 
-    Entries written before v1.2.0 selected by display name.
+    Entries written before v1.2.0 selected by display name, and v1.1.0 could
+    store an empty selection, which reads as every calendar too.
     """
     stored = options.get(CONF_CALENDARS)
-    if stored is None:
+    if not stored:
         return list(choices)
     return [key for key, name in choices.items() if key in stored or name in stored]
 
@@ -425,9 +440,14 @@ def _title(url: str, username: str) -> str:
 
 
 def _suggested(data: Mapping[str, Any]) -> dict[str, Any]:
-    """Return stored data in the shape of the form, paths under their section."""
+    """Return stored data in the shape of the form, paths under their section.
+
+    The password stays out: a suggested value reaches the frontend as text.
+    """
     suggested = {
-        key: value for key, value in data.items() if key not in CERTIFICATE_PATHS
+        key: value
+        for key, value in data.items()
+        if key not in (*CERTIFICATE_PATHS, CONF_PASSWORD)
     }
     suggested[CONF_CERTIFICATES] = {
         key: data[key] for key in CERTIFICATE_PATHS if key in data
@@ -463,35 +483,20 @@ def _calendar_choices(client: caldav.DAVClient) -> dict[str, str]:
     }
 
 
-def _labeled(managed: list[Any]) -> dict[str, str]:
-    """Return url key -> menu label for the loaded calendars.
+def _labels(names: Mapping[str, str]) -> dict[str, str]:
+    """Return url key -> label, a shared name told apart by its path.
 
     A shared calendar keeps its owner's name, so two can share one.
     """
-    names = [item.name for item in managed]
-    labels = {}
-    for item in managed:
-        key = calendar_key(item.calendar.url)
-        if names.count(item.name) > 1:
-            labels[key] = f"{item.name} ({_distinctive(key, managed)})"
-        else:
-            labels[key] = item.name
+    counts = Counter(names.values())
+    return {
+        key: name if counts[name] == 1 else f"{name} ({distinctive(key, names)})"
+        for key, name in names.items()
+    }
+
+
+def _sorted(labels: dict[str, str]) -> dict[str, str]:
     return dict(sorted(labels.items(), key=lambda pair: pair[1]))
-
-
-def _distinctive(key: str, managed: list[Any]) -> str:
-    """Return the shortest tail of a calendar path that no other one shares."""
-    others = [
-        calendar_key(item.calendar.url)
-        for item in managed
-        if calendar_key(item.calendar.url) != key
-    ]
-    parts = key.split("/")
-    for depth in range(1, len(parts) + 1):
-        tail = "/".join(parts[-depth:])
-        if not any(other.endswith(tail) for other in others):
-            return tail
-    return key
 
 
 def _is_http_url(url: str) -> bool:
@@ -518,8 +523,10 @@ def _test_connection(
         return "certificate_not_found", entered
     kwargs = connection_kwargs(user_input, timeout)
     error = "cannot_connect"
+    unexpected: Exception | None = None
     for url in url_candidates(entered, kwargs):
         candidate_error = "cannot_connect"
+        unreachable = False
         client = build_client(
             url, user_input[CONF_USERNAME], user_input[CONF_PASSWORD], kwargs
         )
@@ -533,9 +540,11 @@ def _test_connection(
                 # Remembered, not returned: a bare host may sit behind another
                 # auth realm while the bootstrap candidate works.
                 candidate_error = "invalid_auth"
+            unreachable = isinstance(err, UNREACHABLE)
             _LOGGER.debug("CalDAV connection error: %s", err)
-        except Exception:
-            _LOGGER.exception("Unexpected error connecting to the CalDAV server")
+        except Exception as err:
+            _LOGGER.debug("Unexpected answer from %s", url, exc_info=True)
+            unexpected = err
             candidate_error = "unknown"
         else:
             return None, client.session.moved_to or url
@@ -544,4 +553,10 @@ def _test_connection(
         # Rejected credentials outrank a candidate that would not answer.
         if error != "invalid_auth":
             error = candidate_error
+        if unreachable:
+            break
+    if error == "unknown":
+        _LOGGER.error(
+            "Unexpected error connecting to the CalDAV server", exc_info=unexpected
+        )
     return error, entered

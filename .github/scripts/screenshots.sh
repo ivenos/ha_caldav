@@ -14,11 +14,10 @@ HARNESS=$(sed -n 's/^pytest-homeassistant-custom-component==//p' "$ROOT/requirem
 HA_VERSION=$(curl -sf "https://pypi.org/pypi/pytest-homeassistant-custom-component/$HARNESS/json" \
     | python3 -c "import json, sys; print(next(r.split('==')[1] for r in json.load(sys.stdin)['info']['requires_dist'] if r.startswith('homeassistant==')))")
 HA_IMAGE="${HA_IMAGE:-ghcr.io/home-assistant/home-assistant:$HA_VERSION}"
-DAV_IMAGE="${DAV_IMAGE:-$(sed -n 's/.*"\(tomsquest\/docker-radicale\):\$tag".*/\1/p' "$ROOT/tests/live-test.sh"):latest}"
+DAV_IMAGE="${DAV_IMAGE:-tomsquest/docker-radicale:latest}"
 BROWSER_IMAGE="${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v1.63.0-noble}"
 # The image carries the browsers but not the library, and the two have to be the same release.
 BROWSER_VERSION=$(printf '%s' "$BROWSER_IMAGE" | sed -n 's/.*:v\([0-9.]*\).*/\1/p')
-case "$DAV_IMAGE" in :*) echo "tests/live-test.sh named no Radicale image" >&2; exit 1 ;; esac
 
 cleanup() {
     docker rm -fv "$HA" "$DAV" >/dev/null 2>&1 || true

@@ -4,7 +4,7 @@ set -euo pipefail
 server="${1:?usage: live-test.sh <server> [tag] [-- pytest args]}"
 shift || true
 tag="latest"
-if [[ "${1:-}" != "" && "${1:-}" != "--" ]]; then
+if [[ -n "${1:-}" && "${1:-}" != -* ]]; then
   tag="$1"
   shift
 fi
@@ -23,6 +23,7 @@ cleanup() {
   docker network rm "$network" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 cleanup
 
 wait_for() {

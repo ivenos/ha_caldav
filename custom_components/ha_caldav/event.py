@@ -63,15 +63,23 @@ _BY_RANGES = {
 _TOO_DENSE = frozenset({"SECONDLY", "MINUTELY"})
 
 
+def check_expandable(recur: Any, dtstart: datetime | date) -> None:
+    """Refuse a rule whose expansion would never finish or flood the window.
+
+    Each poll window is expanded in memory, a week of a minutely rule to 10,080.
+    """
+    if str((recur.get("FREQ") or [""])[0]).upper() in _TOO_DENSE:
+        raise Refused("rrule_too_dense")
+    rule_from(recur, dtstart)
+
+
 def check_rule(recur: Any, dtstart: datetime | date) -> None:
     """Refuse a rule before it is stored rather than after.
 
     A rule producing nothing has dateutil search to the year 9999 on every
-    poll, and an object stored with one cannot be deleted from here. caldav
-    expands each poll window in memory, a week of a minutely rule to 10,080.
+    poll, and an object stored with one cannot be deleted from here.
     """
-    if str((recur.get("FREQ") or [""])[0]).upper() in _TOO_DENSE:
-        raise Refused("rrule_too_dense")
+    check_expandable(recur, dtstart)
     if next(iter(rule_from(recur, dtstart)), None) is None:
         raise Refused("invalid_rrule", reason=recur.to_ical().decode("utf-8"))
 
@@ -109,12 +117,14 @@ def framed_rule(recur: Any, dtstart: datetime | date) -> Any:
     """Return the rule with its UNTIL in the form RFC 5545 3.3.10 ties to DTSTART.
 
     The Home Assistant editor writes the UNTIL of a zoned series as UTC digits
-    without the Z.
+    without the Z. A DATE beside a timed start ends with the last second of it.
     """
     values = recur.get("UNTIL")
     if not values:
         return recur
     until = values[0] if isinstance(values, list) else values
+    if isinstance(dtstart, datetime) and not isinstance(until, datetime):
+        until = datetime.combine(until, time(23, 59, 59), tzinfo=dtstart.tzinfo)
     framed = until_frame(dtstart, until)
     if not isinstance(dtstart, datetime) and isinstance(framed, datetime):
         framed = framed.date()
@@ -150,19 +160,6 @@ def to_utc(value: datetime | date) -> datetime:
     if value.tzinfo is None:
         value = value.replace(tzinfo=dt_util.get_default_time_zone())
     return value.astimezone(UTC)
-
-
-def hold_sequence(component: Any) -> None:
-    """Set SEQUENCE one low so caldav's bump lands back on the current value.
-
-    caldav 2.1.0 bumps regardless of increase_seqno, and RFC 5546 lets only
-    the organizer move SEQUENCE.
-    """
-    try:
-        current = int(component.get("SEQUENCE"))
-    except TypeError, ValueError:
-        return
-    component["SEQUENCE"] = current - 1
 
 
 def as_datetime(value: datetime | date) -> datetime:
@@ -389,12 +386,18 @@ def reset_replies(component: Any) -> None:
     """Put the attendees of a split-off series back to NEEDS-ACTION.
 
     RFC 5546 has a REQUEST for a new event carry NEEDS-ACTION, and a tail is
-    a new object under a uid nobody has answered for.
+    a new object under a uid nobody has answered for but its organizer.
     """
     current = component.get("ATTENDEE")
     if current is None:
         return
+    organizer = component.get("ORGANIZER")
+    if isinstance(organizer, list):
+        organizer = organizer[0] if organizer else None
+    own = None if organizer is None else comparable_address(str(organizer))
     for address in current if isinstance(current, list) else [current]:
+        if comparable_address(str(address)) == own:
+            continue
         if "PARTSTAT" in address.params:
             address.params["PARTSTAT"] = vText("NEEDS-ACTION")
 

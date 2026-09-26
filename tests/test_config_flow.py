@@ -17,8 +17,8 @@ from homeassistant.data_entry_flow import FlowResultType, section
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ha_caldav.config_flow import _labeled
-from custom_components.ha_caldav.connection import HostLockedSession
+from custom_components.ha_caldav.config_flow import _labels
+from custom_components.ha_caldav.connection import HostLockedSession, distinctive
 from custom_components.ha_caldav.const import (
     CONF_CA_BUNDLE,
     CONF_CALENDAR_OPTIONS,
@@ -251,6 +251,7 @@ async def test_reauth_rejects_wrong_password(hass: HomeAssistant) -> None:
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {CONF_PASSWORD: "still-wrong"}
         )
+        await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_auth"}
@@ -335,7 +336,8 @@ async def test_reconfigure_updates_the_connection(hass: HomeAssistant) -> None:
     result = await entry.start_reconfigure_flow(hass)
     assert result["type"] is FlowResultType.FORM
     assert CONF_USERNAME not in result["data_schema"].schema
-    assert CONF_PASSWORD not in result["data_schema"].schema
+    password = next(key for key in result["data_schema"].schema if key == CONF_PASSWORD)
+    assert "suggested_value" not in (password.description or {})
 
     with (
         patch("custom_components.ha_caldav.config_flow.caldav.DAVClient"),
@@ -345,11 +347,44 @@ async def test_reconfigure_updates_the_connection(hass: HomeAssistant) -> None:
             result["flow_id"],
             {CONF_URL: USER_INPUT[CONF_URL], CONF_VERIFY_SSL: False},
         )
+        await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_VERIFY_SSL] is False
     assert entry.data[CONF_PASSWORD] == "secret"
+
+
+async def test_a_move_to_a_new_server_can_bring_a_new_password(
+    hass: HomeAssistant,
+) -> None:
+    """Reauth would test the new password against the old url."""
+    entry = _entry()
+    entry.add_to_hass(hass)
+
+    def server(url, username, password, **_kwargs):
+        client = Mock()
+        if password != "new":
+            client.principal.side_effect = AuthorizationError(reason="Unauthorized")
+        return client
+
+    result = await entry.start_reconfigure_flow(hass)
+    with (
+        patch(
+            "custom_components.ha_caldav.config_flow.caldav.DAVClient",
+            side_effect=server,
+        ),
+        patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {CONF_URL: "https://new.example.com/dav", CONF_PASSWORD: "new"},
+        )
+        await hass.async_block_till_done()
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data[CONF_URL] == "https://new.example.com/dav"
+    assert entry.data[CONF_PASSWORD] == "new"
 
 
 async def test_reconfigure_moves_the_account_to_a_new_url(
@@ -366,6 +401,7 @@ async def test_reconfigure_moves_the_account_to_a_new_url(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {CONF_URL: "https://other.example.com/dav"}
         )
+        await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
@@ -392,6 +428,7 @@ async def test_reconfigure_refuses_a_url_another_entry_already_holds(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {CONF_URL: "https://other.example.com/dav"}
         )
+        await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
@@ -437,6 +474,7 @@ async def test_reconfigure_can_clear_a_client_certificate(
             result["flow_id"],
             {CONF_URL: USER_INPUT[CONF_URL], "certificates": {CONF_CLIENT_CERT: ""}},
         )
+        await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.ABORT
     assert CONF_CLIENT_CERT not in entry.data
@@ -456,6 +494,7 @@ async def test_a_bootstrapped_account_can_be_reconfigured(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {**USER_INPUT, CONF_URL: "https://cloud.example.com"}
         )
+        await hass.async_block_till_done()
     entry = hass.config_entries.async_entries(DOMAIN)[0]
     assert entry.data[CONF_URL].endswith("/.well-known/caldav")
 
@@ -487,6 +526,7 @@ async def test_reconfigure_keeps_the_form_on_a_bad_connection(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {CONF_URL: USER_INPUT[CONF_URL]}
         )
+        await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "cannot_connect"}
@@ -662,7 +702,9 @@ async def test_a_per_calendar_override_reaches_the_coordinator(
         hass,
         options={
             CONF_DAYS: 7,
-            CONF_CALENDAR_OPTIONS: {"Work": {CONF_DAYS: 30, CONF_READ_ONLY: True}},
+            CONF_CALENDAR_OPTIONS: {
+                "/remote.php/dav/Work": {CONF_DAYS: 30, CONF_READ_ONLY: True}
+            },
         },
     )
 
@@ -763,6 +805,53 @@ async def test_the_options_form_keeps_a_selection_stored_by_name(
         key.default() for key in result["data_schema"].schema if key == CONF_CALENDARS
     )
     assert default == ["/remote.php/dav/Personal"]
+
+
+def test_a_path_that_merely_ends_like_another_is_told_apart_by_its_last_part() -> None:
+    assert distinctive("/dav/Personal", ["/dav/MyPersonal"]) == "Personal"
+
+
+async def test_the_account_form_tells_two_calendars_of_one_name_apart(
+    hass: HomeAssistant,
+) -> None:
+    """A calendar shared with the account keeps its owner's name."""
+    entry = await _setup_entry(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    with patch(
+        "custom_components.ha_caldav.config_flow._calendar_choices",
+        return_value={
+            "/remote.php/dav/Personal": "Personal",
+            "/remote.php/dav/shared/Personal": "Personal",
+        },
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "account"}
+        )
+
+    field = next(
+        value
+        for key, value in result["data_schema"].schema.items()
+        if key == CONF_CALENDARS
+    )
+    assert sorted(field.options.values()) == [
+        "Personal (dav/Personal)",
+        "Personal (shared/Personal)",
+    ]
+
+
+async def test_an_empty_selection_from_an_older_version_opens_as_every_calendar(
+    hass: HomeAssistant,
+) -> None:
+    entry = await _setup_entry(hass, options={CONF_CALENDARS: []})
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "account"}
+    )
+
+    default = next(
+        key.default() for key in result["data_schema"].schema if key == CONF_CALENDARS
+    )
+    assert default == ["/remote.php/dav/Personal", "/remote.php/dav/Work"]
 
 
 async def test_a_401_on_the_entered_url_still_tries_the_bootstrap(
@@ -913,14 +1002,9 @@ async def test_the_options_of_an_entry_that_never_loaded_still_open(
 
 
 def test_two_calendars_whose_paths_nest_still_get_a_label_each() -> None:
-    nested = Mock(name="a")
-    nested.name = "Personal"
-    nested.calendar.url = "https://cloud.example.com/personal"
-    outer = Mock(name="b")
-    outer.name = "Personal"
-    outer.calendar.url = "https://cloud.example.com/remote.php/dav/iven/personal"
-
-    labels = _labeled([nested, outer])
+    labels = _labels(
+        {"/personal": "Personal", "/remote.php/dav/iven/personal": "Personal"}
+    )
 
     assert labels == {
         "/personal": "Personal (/personal)",
@@ -948,6 +1032,7 @@ async def test_reauth_asks_with_the_timeout_the_account_was_given(
         await hass.config_entries.flow.async_configure(
             result["flow_id"], {CONF_PASSWORD: "new"}
         )
+        await hass.async_block_till_done()
 
     assert client.call_args.kwargs["timeout"] == 90
 
@@ -974,6 +1059,7 @@ async def test_reconfigure_asks_with_the_timeout_the_account_was_given(
         await hass.config_entries.flow.async_configure(
             result["flow_id"], {CONF_URL: USER_INPUT[CONF_URL], CONF_VERIFY_SSL: True}
         )
+        await hass.async_block_till_done()
 
     assert client.call_args.kwargs["timeout"] == 90
 
@@ -1077,6 +1163,7 @@ async def test_reconfigure_follows_the_host_in_an_untouched_title(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {CONF_URL: "https://new.example.com/dav"}
         )
+        await hass.async_block_till_done()
 
     assert result["reason"] == "reconfigure_successful"
     assert entry.title == "iven@new.example.com"
@@ -1099,6 +1186,7 @@ async def test_reconfigure_keeps_a_title_the_user_chose(hass: HomeAssistant) -> 
         await hass.config_entries.flow.async_configure(
             result["flow_id"], {CONF_URL: "https://new.example.com/dav"}
         )
+        await hass.async_block_till_done()
 
     assert entry.title == "Work"
 
@@ -1186,3 +1274,62 @@ async def test_ticking_every_calendar_again_follows_the_server_again(
         await hass.async_block_till_done()
 
     assert CONF_CALENDARS not in entry.options
+
+
+async def test_a_host_that_never_answers_is_not_asked_twice(
+    hass: HomeAssistant, bootstrap_probe
+) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+
+    with patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client:
+        client.return_value.principal.side_effect = requests.ConnectTimeout()
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**USER_INPUT, CONF_URL: "https://cloud.example.com"}
+        )
+
+    assert result["errors"] == {"base": "cannot_connect"}
+    assert client.call_count == 1
+    bootstrap_probe.assert_not_called()
+
+
+async def test_a_bare_host_answering_html_logs_no_error_once_the_bootstrap_works(
+    hass: HomeAssistant, caplog
+) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+
+    with (
+        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client,
+        patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
+    ):
+        client.return_value.principal.side_effect = [TypeError("html"), Mock()]
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**USER_INPUT, CONF_URL: "https://cloud.example.com"}
+        )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert not [record for record in caplog.records if record.levelname == "ERROR"]
+
+
+async def test_an_unexpected_answer_from_every_candidate_is_logged(
+    hass: HomeAssistant, caplog
+) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+
+    with patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client:
+        client.return_value.principal.side_effect = TypeError("html")
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {**USER_INPUT, CONF_URL: "https://cloud.example.com"}
+        )
+
+    assert result["errors"] == {"base": "unknown"}
+    assert any(
+        "Unexpected error" in record.getMessage()
+        for record in caplog.records
+        if record.levelname == "ERROR"
+    )

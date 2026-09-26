@@ -1,8 +1,11 @@
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from caldav.elements import dav
-from caldav.lib.error import DAVError
+from caldav.lib.error import DAVError, NotFoundError
+from caldav.lib.url import URL
+from conftest import written_through
 from homeassistant.util import dt as dt_util
 from icalendar import Calendar as ICalendar
 import pytest
@@ -320,6 +323,7 @@ class FakeEvent:
         self._etag = etag
         self._instance = ICalendar.from_ical(ics)
         self._server_ics = ics if server_ics is None else server_ics
+        written_through(self)
 
     @property
     def icalendar_instance(self) -> ICalendar:
@@ -342,16 +346,6 @@ class FakeEvent:
     def save(self, **kwargs) -> None:
         self.saved = True
         self.save_kwargs = kwargs
-        # caldav 2.1.0 bumps the first component's SEQUENCE on the way out whatever
-        # increase_seqno says.
-        ical = ICalendar.from_ical(self.data)
-        component = next(
-            (item for item in ical.subcomponents if item.name != "VTIMEZONE"), None
-        )
-        if component is not None and "SEQUENCE" in component:
-            seqno = component.pop("SEQUENCE")
-            component.add("SEQUENCE", int(seqno) + 1)
-            self.data = ical.to_ical().decode("utf-8")
         if self._save_error is not None:
             raise self._save_error
 
@@ -377,12 +371,21 @@ class FakeCalendar:
     ) -> None:
         self.event = FakeEvent(ics, save_error, etag, server_ics)
         self.created: list[FakeEvent] = []
+        self.url = URL("https://dav.test/cal/")
+        self.client = SimpleNamespace(
+            put=self._put, request=self._request, url=URL("https://dav.test/")
+        )
         self._refetch_ics = refetch_ics
         self._refetch_error = refetch_error
         self._created_delete_error = created_delete_error
         self._fetches = 0
 
     def event_by_uid(self, uid: str) -> FakeEvent:
+        for created in self.created:
+            if uid in _uids(created.stored()):
+                return created
+        if uid not in _uids(self.event.stored()):
+            raise NotFoundError(uid)
         self._fetches += 1
         if self._fetches > 1:
             if self._refetch_error is not None:
@@ -396,13 +399,30 @@ class FakeCalendar:
             raise self._refetch_error
         return [self.event]
 
-    def save_event(self, document: ICalendar) -> FakeEvent:
-        # caldav takes the document and serializes it itself; handed a string
-        # it would put it through vcal.fix first.
-        created = FakeEvent(document.to_ical().decode("utf-8"))
+    def _put(self, url, body, headers=None):
+        for created in self.created:
+            if created.url == str(url):
+                created.data = body
+                return SimpleNamespace(status=204)
+        created = FakeEvent(body)
+        created.url = str(url)
         created._delete_error = self._created_delete_error
         self.created.append(created)
-        return created
+        return SimpleNamespace(status=201)
+
+    def _request(self, url, method="GET", body="", headers=None):
+        for created in self.created:
+            if created.url == str(url):
+                created.delete()
+        return SimpleNamespace(status=204)
+
+
+def _uids(ical: ICalendar) -> set[str]:
+    found = set()
+    for vevent in ical.walk("VEVENT"):
+        uid = vevent.get("UID")
+        found.update(str(value) for value in (uid if isinstance(uid, list) else [uid]))
+    return found
 
 
 def _master(ical: ICalendar):
@@ -553,16 +573,14 @@ def test_delete_unknown_occurrence_on_orphan_object_raises() -> None:
         delete_event(calendar, "timed-1", recurrence_id="2026-08-01 09:00:00+00:00")
 
 
-def test_save_writes_the_resource_verbatim() -> None:
-    """With only_this_recurrence=True, caldav refetches a resource whose first
-    component carries a RECURRENCE-ID and keeps only that component's changes."""
-    calendar = FakeCalendar(SERIES_WITH_OVERRIDE_FIRST)
+def test_a_write_goes_over_the_version_it_read() -> None:
+    """caldav's own save sends no If-Match, which leaves the write racing another
+    client's."""
+    calendar = FakeCalendar(SERIES_WITH_OVERRIDE_FIRST, etag='"v1"')
+
     delete_event(calendar, "timed-1", recurrence_id=SECOND_OCCURRENCE)
 
-    assert calendar.event.save_kwargs == {
-        "increase_seqno": False,
-        "only_this_recurrence": False,
-    }
+    assert calendar.event.save_kwargs["headers"]["If-Match"] == '"v1"'
 
 
 def test_delete_this_and_future_caps_series() -> None:
@@ -1710,15 +1728,17 @@ def test_a_new_override_does_not_inherit_the_dates_of_its_series() -> None:
     assert "EXDATE" not in override
 
 
-def test_a_new_override_starts_its_own_sequence() -> None:
-    calendar = FakeCalendar(DATED_MASTER)
+def test_a_new_override_goes_on_from_the_sequence_of_its_series() -> None:
+    """RFC 5546 2.1.4: an attendee holds the instance at the series' SEQUENCE and
+    takes a lower one for stale."""
+    calendar = FakeCalendar(DATED_MASTER.replace("RRULE:", "SEQUENCE:5\nRRULE:"))
 
     update_event(
         calendar, "dated-2", {"summary": "Moved"}, recurrence_id=SECOND_OCCURRENCE
     )
 
     override = _overrides(calendar.event.stored())[0]
-    assert int(override["SEQUENCE"]) == 1
+    assert int(override["SEQUENCE"]) == 6
 
 
 def test_an_orphan_object_refuses_an_occurrence_it_does_not_hold() -> None:
@@ -1910,8 +1930,7 @@ def test_an_all_day_series_gets_a_date_exdate_from_a_timed_recurrence_id() -> No
     assert _exdates(_master(calendar.event.stored())) == [date(2026, 7, 8)]
 
 
-def test_a_split_off_tail_drops_related_to() -> None:
-    # caldav follows RELATED-TO and would write into the objects it names.
+def test_a_split_off_tail_keeps_its_relation_and_writes_nowhere_else() -> None:
     calendar = FakeCalendar(RELATED_SERIES)
 
     update_event(
@@ -1922,7 +1941,8 @@ def test_a_split_off_tail_drops_related_to() -> None:
         this_and_future=True,
     )
 
-    assert "RELATED-TO" not in _master(calendar.created[0].stored())
+    [tail] = calendar.created
+    assert "RELATED-TO" in _master(tail.stored())
 
 
 def test_an_rdate_only_series_cannot_be_switched_to_all_day() -> None:
@@ -3797,3 +3817,203 @@ def test_a_rule_denser_than_hourly_is_refused(frequency: str) -> None:
         update_event(calendar, "timed-1", {"rrule": f"FREQ={frequency}"})
 
     assert not calendar.event.saved
+
+
+MONDAY_SERIES = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//EN
+BEGIN:VEVENT
+UID:mon-1
+DTSTAMP:20260101T000000Z
+DTSTART;TZID=Europe/Berlin:20260706T090000
+DTEND;TZID=Europe/Berlin:20260706T100000
+RRULE:FREQ=WEEKLY;UNTIL=20260831T070000Z
+EXDATE;TZID=Europe/Berlin:20260713T090000
+EXDATE;TZID=Europe/Berlin:20260727T090000
+SUMMARY:Standup
+END:VEVENT
+BEGIN:VEVENT
+UID:mon-1
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID;TZID=Europe/Berlin:20260803T090000
+DTSTART;TZID=Europe/Berlin:20260803T110000
+DTEND;TZID=Europe/Berlin:20260803T120000
+SUMMARY:Standup moved
+END:VEVENT
+END:VCALENDAR
+"""
+BERLIN = ZoneInfo("Europe/Berlin")
+# As the editor sends it: its own BYDAY, and UNTIL still at the old end date.
+TUESDAYS = "FREQ=WEEKLY;BYDAY=TU;UNTIL=20260831T070000Z"
+
+
+def _dates(values) -> list[date]:
+    return [value.astimezone(BERLIN).date() for value in values]
+
+
+def test_moving_a_series_to_another_weekday_takes_its_exceptions_along() -> None:
+    calendar = FakeCalendar(MONDAY_SERIES)
+
+    update_event(
+        calendar,
+        "mon-1",
+        {
+            "summary": "Standup",
+            "dtstart": datetime(2026, 7, 7, 9, 0, tzinfo=BERLIN),
+            "dtend": datetime(2026, 7, 7, 10, 0, tzinfo=BERLIN),
+            "rrule": TUESDAYS,
+        },
+    )
+
+    stored = calendar.event.stored()
+    assert _dates(_exdates(_master(stored))) == [date(2026, 7, 14), date(2026, 7, 28)]
+    [override] = _overrides(stored)
+    assert _dates([override["RECURRENCE-ID"].dt]) == [date(2026, 8, 4)]
+
+
+def test_moving_the_rest_of_a_series_to_another_weekday_takes_its_exceptions() -> None:
+    calendar = FakeCalendar(MONDAY_SERIES)
+
+    update_event(
+        calendar,
+        "mon-1",
+        {
+            "summary": "Standup",
+            "dtstart": datetime(2026, 7, 21, 9, 0, tzinfo=BERLIN),
+            "dtend": datetime(2026, 7, 21, 10, 0, tzinfo=BERLIN),
+            "rrule": TUESDAYS,
+        },
+        recurrence_id="2026-07-20 07:00:00+00:00",
+        this_and_future=True,
+    )
+
+    tail = calendar.created[0].stored()
+    assert _dates(_exdates(_master(tail))) == [date(2026, 7, 28)]
+    [override] = _overrides(tail)
+    assert _dates([override["RECURRENCE-ID"].dt]) == [date(2026, 8, 4)]
+
+
+ORGANIZED_SERIES = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//EN
+BEGIN:VEVENT
+UID:invite-1
+DTSTAMP:20260101T000000Z
+DTSTART:20260706T090000Z
+DTEND:20260706T100000Z
+RRULE:FREQ=WEEKLY
+ORGANIZER:mailto:me@example.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:bob@example.com
+SUMMARY:Planning
+END:VEVENT
+BEGIN:VEVENT
+UID:invite-1
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID:20260803T090000Z
+DTSTART:20260803T110000Z
+DTEND:20260803T120000Z
+ORGANIZER:mailto:me@example.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com
+ATTENDEE;PARTSTAT=DECLINED:mailto:bob@example.com
+SUMMARY:Planning moved
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def test_a_split_off_series_asks_the_attendees_again_but_not_its_organizer() -> None:
+    calendar = FakeCalendar(ORGANIZED_SERIES)
+
+    update_event(
+        calendar,
+        "invite-1",
+        {"summary": "Planning, new room"},
+        recurrence_id=THIRD_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    tail = calendar.created[0].stored()
+    for component in tail.walk("VEVENT"):
+        replies = {
+            str(attendee): str(attendee.params["PARTSTAT"])
+            for attendee in component["ATTENDEE"]
+        }
+        assert replies == {
+            "mailto:me@example.com": "ACCEPTED",
+            "mailto:bob@example.com": "NEEDS-ACTION",
+        }
+
+
+UNORGANIZED_SERIES = TIMED_SERIES.replace(
+    "SUMMARY:", "ATTENDEE:mailto:bob@example.com\nSUMMARY:"
+)
+
+
+def test_an_organizer_named_for_one_occurrence_is_the_whole_series_one() -> None:
+    """RFC 6638 3.1: one organizer for every component of the object."""
+    calendar = FakeCalendar(UNORGANIZED_SERIES)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"summary": "Moved"},
+        recurrence_id=SECOND_OCCURRENCE,
+        own_address="mailto:me@example.com",
+    )
+
+    organizers = {
+        str(component.get("ORGANIZER"))
+        for component in calendar.event.stored().walk("VEVENT")
+    }
+    assert organizers == {"mailto:me@example.com"}
+
+
+def test_a_date_until_on_a_timed_series_ends_with_that_day() -> None:
+    """RFC 5545 3.3.10 wants UNTIL in the value type of DTSTART."""
+    calendar = FakeCalendar(TZID_SERIES)
+
+    update_event(calendar, "tz-1", {"rrule": "FREQ=DAILY;UNTIL=20260710"})
+
+    until = _master(calendar.event.stored())["RRULE"]["UNTIL"][0]
+    assert until == datetime(2026, 7, 10, 21, 59, 59, tzinfo=UTC)
+
+
+def test_a_series_that_stops_recurring_loses_its_exclusion_rule_too() -> None:
+    calendar = FakeCalendar(
+        TIMED_SERIES.replace(
+            "RRULE:FREQ=WEEKLY", "RRULE:FREQ=WEEKLY\nEXRULE:FREQ=MONTHLY"
+        )
+    )
+
+    update_event(calendar, "timed-1", {"rrule": ""})
+
+    assert "EXRULE" not in _master(calendar.event.stored())
+
+
+@pytest.mark.parametrize(
+    ("recurrence_id", "this_and_future"),
+    [(None, False), (SECOND_OCCURRENCE, False), (SECOND_OCCURRENCE, True)],
+    ids=["series", "occurrence", "onwards"],
+)
+@pytest.mark.parametrize("description", ["Agenda in the doc", None])
+def test_a_description_reaches_the_part_of_the_series_edited(
+    recurrence_id: str | None, this_and_future: bool, description: str | None
+) -> None:
+    calendar = FakeCalendar(DETAILED_SERIES)
+
+    update_event(
+        calendar,
+        "detailed-1",
+        {"description": description},
+        recurrence_id=recurrence_id,
+        this_and_future=this_and_future,
+    )
+
+    if this_and_future:
+        edited = _master(calendar.created[0].stored())
+    elif recurrence_id:
+        [edited] = _overrides(calendar.event.stored())
+    else:
+        edited = _master(calendar.event.stored())
+    assert edited.get("DESCRIPTION") == description

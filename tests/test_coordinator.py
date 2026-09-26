@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from conftest import stored
 from homeassistant.components.todo import TodoItemStatus
 from homeassistant.util import dt as dt_util
 import pytest
@@ -8,12 +9,13 @@ import vobject
 
 from custom_components.ha_caldav.coordinator import (
     calendar_unique_id,
-    component_of,
     components_of,
     get_attr_value,
     get_end_date,
     is_all_day,
     is_over,
+    master_of,
+    occurrences,
     sort_key,
     to_event,
     to_local,
@@ -66,8 +68,9 @@ def test_an_occurrence_in_the_spring_forward_gap_is_shown(berlin) -> None:
         "DTSTART;TZID=America/New_York:20260308T023000\n"
         "DTEND;TZID=America/New_York:20260308T031500\nSUMMARY:Backup"
     )
+    start = v.dtstart.value.astimezone(UTC)
     assert to_event(v) is not None
-    assert get_end_date(v) - v.dtstart.value == timedelta(minutes=45)
+    assert get_end_date(v).astimezone(UTC) - start == timedelta(minutes=45)
 
 
 def test_an_event_whose_ends_disagree_about_a_zone_is_still_shown(berlin) -> None:
@@ -248,6 +251,7 @@ def test_to_todo_maps_every_field() -> None:
         ("IN-PROCESS", TodoItemStatus.NEEDS_ACTION),
         ("COMPLETED", TodoItemStatus.COMPLETED),
         ("CANCELLED", TodoItemStatus.COMPLETED),
+        ("completed", TodoItemStatus.COMPLETED),
     ],
 )
 def test_to_todo_folds_four_caldav_states_into_two(status, expected) -> None:
@@ -338,10 +342,44 @@ def test_components_of_skips_an_object_that_cannot_be_parsed() -> None:
     assert components_of(_Item("<html>503 backend down</html>"), "vevent") == []
 
 
-def test_component_of_takes_the_first_and_tolerates_an_empty_object() -> None:
-    item = _Item(_calendar_ics("DTSTART:20260706T090000Z\nSUMMARY:a"))
-    assert component_of(item, "vevent").summary.value == "a"
-    assert component_of(item, "vtodo") is None
+def test_the_series_of_a_todo_is_read_off_its_master() -> None:
+    item = _Item(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//t//EN\n"
+        "BEGIN:VTODO\nUID:plants\nDTSTAMP:20260101T000000Z\n"
+        "RECURRENCE-ID;VALUE=DATE:20260706\nSTATUS:COMPLETED\nSUMMARY:Water\n"
+        "END:VTODO\n"
+        "BEGIN:VTODO\nUID:plants\nDTSTAMP:20260101T000000Z\n"
+        "DUE;VALUE=DATE:20260706\nRRULE:FREQ=WEEKLY\nSUMMARY:Water\n"
+        "END:VTODO\nEND:VCALENDAR\n"
+    )
+
+    assert master_of(item, "vtodo").rrule.value == "FREQ=WEEKLY"
+    assert master_of(item, "vevent") is None
+
+
+def test_a_series_in_a_zone_of_its_own_keeps_it_through_the_expansion() -> None:
+    """caldav's expansion drops the VTIMEZONE, and vobject reads a TZID it never
+    registered as floating."""
+    item = stored(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//t//EN\n"
+        "BEGIN:VTIMEZONE\nTZID:Office zone\n"
+        "BEGIN:STANDARD\nDTSTART:19701025T030000\n"
+        "RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\n"
+        "TZOFFSETFROM:+0200\nTZOFFSETTO:+0100\nEND:STANDARD\n"
+        "BEGIN:DAYLIGHT\nDTSTART:19700329T020000\n"
+        "RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\n"
+        "TZOFFSETFROM:+0100\nTZOFFSETTO:+0200\nEND:DAYLIGHT\nEND:VTIMEZONE\n"
+        "BEGIN:VEVENT\nUID:office\nDTSTAMP:20260101T000000Z\n"
+        "DTSTART;TZID=Office zone:20260706T090000\n"
+        "DTEND;TZID=Office zone:20260706T100000\n"
+        "RRULE:FREQ=WEEKLY;COUNT=2\nSUMMARY:Standup\nEND:VEVENT\nEND:VCALENDAR\n"
+    )
+
+    found = occurrences(
+        item, datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 8, 1, tzinfo=UTC)
+    )
+
+    assert [v.dtstart.value.astimezone(UTC).hour for v in found] == [7, 7]
 
 
 def test_the_unique_id_shapes_are_pinned() -> None:

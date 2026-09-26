@@ -51,6 +51,8 @@ PERSONAL_HREF = f"{PERSONAL_PATH}/"
         ("#f00a", "#ff0000"),
         ("  #00679e  ", "#00679e"),
         ("00679e", "#00679e"),
+        ("bad", None),
+        ("cafe", None),
         ("#12345", None),
         ("#1234567", None),
         ("#zzzzzz", None),

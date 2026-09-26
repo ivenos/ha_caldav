@@ -54,7 +54,7 @@ def as_reported(err: Exception, action: str) -> HomeAssistantError:
             translation_domain=DOMAIN, translation_key="not_found"
         )
     if isinstance(err, ValueError) and not isinstance(err, NETWORK_ERRORS):
-        # Several niquests errors are ValueErrors naming the collection.
+        # The HTTP libraries raise ValueErrors too, which name the collection.
         return ServiceValidationError(
             translation_domain=DOMAIN,
             translation_key="refused",

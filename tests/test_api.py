@@ -1,14 +1,14 @@
 from datetime import UTC, date, datetime
-from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+import caldav
 from caldav.calendarobjectresource import Event as CaldavEvent
 from caldav.davclient import requests
-from caldav.elements import ical
+from caldav.elements import dav, ical
 from caldav.lib.error import AuthorizationError, NotFoundError, PutError, ReportError
-from conftest import dav_calendar
+from conftest import RecordingClient, dav_calendar, written_through
 from icalendar import Calendar as ICalCalendar
 import pytest
 from test_todo_recurrence import FakeTodoCalendar
@@ -59,7 +59,7 @@ def _component(body: str, name: str = "VEVENT"):
 
 
 def test_create_event_sends_one_complete_document() -> None:
-    calendar = Mock()
+    calendar = dav_calendar()
 
     create_event(
         calendar,
@@ -72,19 +72,19 @@ def test_create_event_sends_one_complete_document() -> None:
         },
     )
 
-    assert calendar.save_event.call_count == 1
+    assert len(_written(calendar)) == 1
     assert calendar.add_event.call_count == 0
-    body = calendar.save_event.call_args.args[0].to_ical().decode("utf-8")
+    body = _written(calendar)[-1]
     assert "TRIGGER:-PT15M" in body
     assert "https://meet.example.com/x" in body
 
 
 def test_create_todo_marked_done_carries_the_completion_properties() -> None:
-    calendar = Mock()
+    calendar = dav_calendar()
 
     create_todo(calendar, {"summary": "Already done", "status": "COMPLETED"})
 
-    body = calendar.save_todo.call_args.args[0].to_ical().decode("utf-8")
+    body = _written(calendar)[-1]
     component = _component(body, "VTODO")
     assert str(component["STATUS"]) == "COMPLETED"
     assert int(component["PERCENT-COMPLETE"]) == 100
@@ -174,7 +174,7 @@ def test_import_stores_an_object_whose_first_component_is_an_exception() -> None
 
 
 def test_move_carries_an_object_whose_first_component_is_an_exception() -> None:
-    event = Mock(data=ORPHAN_OVERRIDE)
+    event = written_through(Mock(data=ORPHAN_OVERRIDE))
     source, target = Mock(), dav_calendar()
     source.event_by_uid.return_value = event
     target.event_by_uid.side_effect = NotFoundError("uid-1 not found on server")
@@ -224,7 +224,7 @@ def test_export_of_one_object_finds_a_todo_too() -> None:
     )
     calendar = Mock()
     calendar.event_by_uid.side_effect = NotFoundError("not an event")
-    calendar.todo_by_uid.return_value = Mock(data=body)
+    calendar.todo_by_uid.return_value = written_through(Mock(data=body))
 
     assert export_ics(calendar, "t-1") == body
 
@@ -269,7 +269,7 @@ def test_export_writes_a_resource_both_searches_match_only_once() -> None:
 
 
 def _move_pair() -> tuple[Mock, Mock, Mock]:
-    event = Mock(data=EVENT)
+    event = written_through(Mock(data=EVENT))
     source, target = Mock(), dav_calendar()
     source.event_by_uid.return_value = event
     target.event_by_uid.side_effect = NotFoundError("uid-1 not found on server")
@@ -297,7 +297,7 @@ def test_move_can_keep_the_original() -> None:
 
 def test_moving_onto_the_calendar_the_event_is_already_on_is_refused() -> None:
     """caldav names the resource after the uid."""
-    event = Mock(data=EVENT)
+    event = written_through(Mock(data=EVENT))
     calendar = dav_calendar()
     calendar.event_by_uid.return_value = event
 
@@ -309,7 +309,7 @@ def test_moving_onto_the_calendar_the_event_is_already_on_is_refused() -> None:
 
 
 def test_moving_onto_a_calendar_that_holds_the_uid_is_refused() -> None:
-    event = Mock(data=EVENT)
+    event = written_through(Mock(data=EVENT))
     source, target = Mock(), dav_calendar()
     source.event_by_uid.return_value = event
     target.event_by_uid.return_value = Mock()
@@ -327,18 +327,10 @@ class _Resource:
     def __init__(self, ics: str) -> None:
         self.data = ics
         self._instance = ICalCalendar.from_ical(ics)
-        self.save = Mock(side_effect=self._bump)
+        self.save = Mock()
         self.delete = Mock()
-
-    def _bump(self, **kwargs: Any) -> None:
-        """caldav 2.1.0 bumps the SEQUENCE of the first non-timezone component on the
-        way out, whatever increase_seqno says."""
-        if (component := self.icalendar_component) is not None and (
-            "SEQUENCE" in component
-        ):
-            seqno = component.pop("SEQUENCE")
-            component.add("SEQUENCE", int(seqno) + 1)
-        self.data = self._instance.to_ical().decode("utf-8")
+        self.load = Mock()
+        written_through(self)
 
     @property
     def icalendar_instance(self) -> ICalCalendar:
@@ -374,8 +366,6 @@ def test_responding_matches_the_address_however_it_is_spelled(attendee) -> None:
     respond_to_invitation(calendar, "uid-1", "ACCEPTED", ["mailto:iven@example.com"])
 
     assert "PARTSTAT=ACCEPTED" in event.data
-    # With only_this_recurrence, caldav recurses on an orphan-override object.
-    assert event.save.call_args.kwargs["only_this_recurrence"] is False
 
 
 def test_responding_to_an_event_we_are_not_on_is_refused() -> None:
@@ -437,17 +427,7 @@ def _todo(body: str) -> Mock:
     # A caldav resource carries both, the component a subcomponent of the instance.
     todo.icalendar_instance = instance
     todo.icalendar_component = next(iter(instance.walk("VTODO")))
-
-    def save(**_kwargs: object) -> None:
-        # caldav 2.1.0 bumps SEQUENCE on the way out whatever increase_seqno says,
-        # and only when the property is already there.
-        component = todo.icalendar_component
-        if "SEQUENCE" in component:
-            seqno = component.pop("SEQUENCE")
-            component.add("SEQUENCE", int(seqno) + 1)
-
-    todo.save.side_effect = save
-    return todo
+    return written_through(todo)
 
 
 def test_a_stale_todo_edit_is_refused() -> None:
@@ -646,6 +626,7 @@ def test_a_todo_update_writes_the_due_date_and_the_description() -> None:
     todo = Mock()
     todo.icalendar_instance = instance
     todo.icalendar_component = next(iter(instance.walk("VTODO")))
+    written_through(todo)
     calendar = Mock()
     calendar.todo_by_uid.return_value = todo
 
@@ -715,25 +696,13 @@ def test_a_reply_keeps_the_sequence_the_organizer_issued() -> None:
     increase_seqno and bumps regardless."""
     import caldav
 
-    put: dict = {}
-
-    class Client:
-        def put(self, url, body, headers=None):
-            put["body"] = body if isinstance(body, str) else body.decode("utf-8")
-            response = Mock()
-            response.status = 204
-            response.headers = {}
-            return response
-
-        def __getattr__(self, name):
-            return Mock()
-
-    client = Client()
-    parent = caldav.Calendar(client=client, url="http://dav.test/cal/")
+    client = RecordingClient()
+    client.stored["https://dav.test/cal/inv-1.ics"] = (INVITE_WITH_SEQUENCE, '"e1"')
+    parent = caldav.Calendar(client=client, url="https://dav.test/cal/")
     event = caldav.Event(
         client=client,
         data=INVITE_WITH_SEQUENCE,
-        url="http://dav.test/cal/inv-1.ics",
+        url="https://dav.test/cal/inv-1.ics",
         parent=parent,
     )
     event.id = "inv-1"
@@ -742,13 +711,14 @@ def test_a_reply_keeps_the_sequence_the_organizer_issued() -> None:
 
     respond_to_invitation(calendar, "inv-1", "ACCEPTED", ["iven@example.com"])
 
-    assert "SEQUENCE:3" in put["body"]
-    assert "PARTSTAT=ACCEPTED" in put["body"]
+    assert client.put_headers[-1]["If-Match"] == '"e1"'
+    assert "SEQUENCE:3" in client.bodies[-1]
+    assert "PARTSTAT=ACCEPTED" in client.bodies[-1]
 
 
 def test_a_created_event_defines_the_timezone_it_references() -> None:
     """RFC 5545 requires the TZID to be defined in the same object."""
-    calendar = Mock()
+    calendar = dav_calendar()
     zone = ZoneInfo("Europe/Berlin")
 
     create_event(
@@ -760,7 +730,7 @@ def test_a_created_event_defines_the_timezone_it_references() -> None:
         },
     )
 
-    document = calendar.save_event.call_args.args[0]
+    document = ICalCalendar.from_ical(_written(calendar)[-1])
     assert "TZID=Europe/Berlin" in document.to_ical().decode("utf-8")
     assert [str(item["TZID"]) for item in document.walk("VTIMEZONE")] == [
         "Europe/Berlin"
@@ -768,7 +738,7 @@ def test_a_created_event_defines_the_timezone_it_references() -> None:
 
 
 def test_a_created_todo_defines_the_timezone_it_references() -> None:
-    calendar = Mock()
+    calendar = dav_calendar()
     zone = ZoneInfo("Europe/Berlin")
 
     create_todo(
@@ -776,7 +746,7 @@ def test_a_created_todo_defines_the_timezone_it_references() -> None:
         {"summary": "Pay rent", "due": datetime(2026, 7, 6, 9, 0, tzinfo=zone)},
     )
 
-    document = calendar.save_todo.call_args.args[0]
+    document = ICalCalendar.from_ical(_written(calendar)[-1])
     assert [str(item["TZID"]) for item in document.walk("VTIMEZONE")] == [
         "Europe/Berlin"
     ]
@@ -815,13 +785,13 @@ def test_a_large_import_sees_a_clash_of_either_kind() -> None:
 
     # A good few servers answer a query without a component filter with nothing.
     assert [call.kwargs for call in calendar.search.call_args_list] == [
-        {"event": True},
-        {"todo": True, "include_completed": True},
+        {"event": True, "props": ANY},
+        {"todo": True, "include_completed": True, "props": ANY},
     ]
 
 
 def test_a_created_event_writes_no_property_named_after_an_attribute() -> None:
-    calendar = Mock()
+    calendar = dav_calendar()
 
     create_event(
         calendar,
@@ -835,7 +805,7 @@ def test_a_created_event_writes_no_property_named_after_an_attribute() -> None:
         },
     )
 
-    written = calendar.save_event.call_args.args[0].to_ical().decode("utf-8")
+    written = _written(calendar)[-1]
     # Not every extra is an iCalendar property, and caldav's create_ical writes
     # whatever it is handed verbatim, with a Python repr for a value.
     real = {
@@ -1015,11 +985,8 @@ def test_a_failed_import_takes_back_what_it_already_wrote() -> None:
         )
 
     assert calendar.client.deletes == [f"{calendar.url}u0.ics"]
-    # caldav answers a refusal by reserializing through vobject and putting the
-    # same resource a second time.
     assert [url for url, _ in calendar.client.puts] == [
         f"{calendar.url}u0.ics",
-        f"{calendar.url}u1.ics",
         f"{calendar.url}u1.ics",
     ]
 
@@ -1090,6 +1057,7 @@ def test_ticking_a_todo_does_not_write_into_the_event_beside_it() -> None:
     todo = Mock()
     todo.icalendar_instance = instance
     todo.icalendar_component = next(iter(instance.walk("VEVENT")))
+    written_through(todo)
     calendar = Mock()
     calendar.todo_by_uid.return_value = todo
 
@@ -1114,24 +1082,13 @@ def test_a_recurring_todo_with_a_zero_interval_can_still_be_completed() -> None:
     todo = Mock()
     todo.icalendar_instance = instance
     todo.icalendar_component = next(iter(instance.walk("VTODO")))
+    written_through(todo)
     calendar = Mock()
     calendar.todo_by_uid.return_value = todo
 
     update_todo(calendar, "t", {"summary": "Water plants", "status": "COMPLETED"})
 
     assert str(next(iter(instance.walk("VTODO")))["STATUS"]) == "COMPLETED"
-
-
-def test_a_todo_is_saved_without_the_single_recurrence_path() -> None:
-    """At caldav's default, a to-do holding only a detached instance has it refetch
-    and splice back the first component until the stack runs out."""
-    todo = _todo("SUMMARY:Task")
-    calendar = Mock()
-    calendar.todo_by_uid.return_value = todo
-
-    update_todo(calendar, "uid-1", {"summary": "Task"})
-
-    assert todo.save.call_args.kwargs["only_this_recurrence"] is False
 
 
 def test_the_export_leaves_out_an_object_it_cannot_parse() -> None:
@@ -1167,9 +1124,8 @@ def test_a_folded_uid_is_read_whole() -> None:
     assert _raw_uid(item) == uid
 
 
-def test_the_sequence_hold_lands_where_caldav_bumps() -> None:
-    """caldav raises the SEQUENCE of the first component that is not a timezone,
-    whichever it is."""
+def test_a_todo_edit_moves_only_its_own_sequence() -> None:
+    """The event sharing its resource is written back as it was read."""
     instance = ICalCalendar.from_ical(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
         "BEGIN:VEVENT\r\nUID:u\r\nDTSTAMP:20260101T000000Z\r\n"
@@ -1182,13 +1138,7 @@ def test_the_sequence_hold_lands_where_caldav_bumps() -> None:
     todo = Mock()
     todo.icalendar_instance = instance
     todo.icalendar_component = next(iter(instance.walk("VEVENT")))
-
-    def save(**_kwargs: object) -> None:
-        component = todo.icalendar_component
-        if "SEQUENCE" in component:
-            component.add("SEQUENCE", int(component.pop("SEQUENCE")) + 1)
-
-    todo.save.side_effect = save
+    written_through(todo)
     calendar = Mock()
     calendar.todo_by_uid.return_value = todo
 
@@ -1246,7 +1196,7 @@ def test_moving_a_resource_that_holds_no_event_is_refused() -> None:
         "BEGIN:VTODO\r\nUID:uid-1\r\nDTSTAMP:20260101T000000Z\r\n"
         "SUMMARY:Task\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
     )
-    event = Mock(data=body)
+    event = written_through(Mock(data=body))
     source, target = Mock(), dav_calendar()
     source.event_by_uid.return_value = event
 
@@ -1258,20 +1208,26 @@ def test_moving_a_resource_that_holds_no_event_is_refused() -> None:
 
 
 @pytest.mark.parametrize(
-    ("stored", "expected"),
-    [('W/"abc"', '"abc"'), ('"abc"', 'W/"abc"'), ('W/"abc"', 'W/"abc"')],
+    ("stored", "expected", "sent"),
+    [
+        ('W/"abc"', '"abc"', '"abc"'),
+        ('"abc"', 'W/"abc"', '"abc"'),
+        ('W/"abc"', 'W/"abc"', None),
+    ],
 )
-def test_the_weak_marker_does_not_make_an_etag_a_conflict(stored, expected) -> None:
+def test_the_weak_marker_does_not_make_an_etag_a_conflict(
+    stored, expected, sent
+) -> None:
     """RFC 7232 2.3.2 wants weak comparison here, and a proxy may add or drop the
-    W/ between two reads."""
+    W/ between two reads; If-Match compares strongly."""
     from caldav.elements import dav
 
-    from custom_components.ha_caldav.api import check_etag
+    from custom_components.ha_caldav.api import held_etag
 
     resource = Mock()
     resource.props = {dav.GetEtag.tag: stored}
 
-    check_etag(resource, expected)
+    assert held_etag(resource, expected) == sent
 
 
 def test_a_rule_naming_a_day_no_month_has_is_refused() -> None:
@@ -1286,6 +1242,7 @@ def test_a_rule_naming_a_day_no_month_has_is_refused() -> None:
     todo = Mock()
     todo.icalendar_instance = instance
     todo.icalendar_component = next(iter(instance.walk("VTODO")))
+    written_through(todo)
     calendar = Mock()
     calendar.todo_by_uid.return_value = todo
 
@@ -1310,6 +1267,7 @@ def test_a_due_date_lands_on_the_todo_and_not_on_the_event_beside_it() -> None:
     todo = Mock()
     todo.icalendar_instance = instance
     todo.icalendar_component = next(iter(instance.walk("VEVENT")))
+    written_through(todo)
     calendar = Mock()
     calendar.todo_by_uid.return_value = todo
 
@@ -1415,6 +1373,7 @@ def test_a_move_keeps_the_original_when_the_copy_will_not_land() -> None:
     source, target = dav_calendar(), _missing_calendar()
     target.client.fail_from = 0
     stored = CaldavEvent(source.client, data=EVENT, url=f"{source.url}uid-1.ics")
+    source.client.stored[str(stored.url)] = (EVENT, '"e1"')
     source.event_by_uid.return_value = stored
 
     with pytest.raises(PutError):
@@ -1573,12 +1532,12 @@ def test_a_recurring_todo_with_no_date_at_all_is_simply_closed() -> None:
     assert str(calendar.todo.stored()["STATUS"]) == "COMPLETED"
 
 
-def _created_uid(save: Mock, kind: str = "VEVENT") -> UUID:
-    return UUID(str(_component(save.call_args.args[0].to_ical().decode(), kind)["UID"]))
+def _created_uid(body: str, kind: str = "VEVENT") -> UUID:
+    return UUID(str(_component(body, kind)["UID"]))
 
 
 def test_a_new_event_and_todo_carry_a_random_uid() -> None:
-    calendar = Mock()
+    calendar = dav_calendar()
 
     create_event(
         calendar,
@@ -1590,8 +1549,9 @@ def test_a_new_event_and_todo_carry_a_random_uid() -> None:
     )
     create_todo(calendar, {"summary": "Task"})
 
-    assert _created_uid(calendar.save_event).version == 4
-    assert _created_uid(calendar.save_todo, "VTODO").version == 4
+    event, todo = _written(calendar)
+    assert _created_uid(event).version == 4
+    assert _created_uid(todo, "VTODO").version == 4
 
 
 def test_a_new_calendar_gets_a_random_collection_name() -> None:
@@ -1605,7 +1565,7 @@ def test_a_new_calendar_gets_a_random_collection_name() -> None:
 
 def test_a_new_series_gets_its_end_in_utc() -> None:
     # The frontend writes UTC digits without the Z.
-    calendar = Mock()
+    calendar = dav_calendar()
     berlin = ZoneInfo("Europe/Berlin")
 
     create_event(
@@ -1618,7 +1578,7 @@ def test_a_new_series_gets_its_end_in_utc() -> None:
         },
     )
 
-    body = calendar.save_event.call_args.args[0].to_ical().decode()
+    body = _written(calendar)[-1]
     assert "UNTIL=20261229T090000Z" in body
 
 
@@ -1760,7 +1720,7 @@ def test_swapping_two_neighbors_writes_the_one_that_moved_up() -> None:
 
 @pytest.mark.parametrize("frequency", ["SECONDLY", "MINUTELY"])
 def test_a_new_event_denser_than_hourly_is_refused(frequency: str) -> None:
-    calendar = Mock()
+    calendar = dav_calendar()
 
     with pytest.raises(Refused, match="rrule_too_dense"):
         create_event(
@@ -1773,11 +1733,11 @@ def test_a_new_event_denser_than_hourly_is_refused(frequency: str) -> None:
             },
         )
 
-    calendar.save_event.assert_not_called()
+    assert _written(calendar) == []
 
 
 def test_an_all_day_series_takes_its_end_as_a_date() -> None:
-    calendar = Mock()
+    calendar = dav_calendar()
 
     create_event(
         calendar,
@@ -1789,5 +1749,147 @@ def test_an_all_day_series_takes_its_end_as_a_date() -> None:
         },
     )
 
-    body = calendar.save_event.call_args.args[0].to_ical().decode("utf-8")
+    body = _written(calendar)[-1]
     assert _component(body)["RRULE"]["UNTIL"] == [date(2026, 7, 10)]
+
+
+def test_an_import_keeps_the_sequence_the_document_carries() -> None:
+    """caldav 2.1.0 raises SEQUENCE on every save, a new object's too."""
+    calendar = _missing_calendar()
+
+    import_ics(calendar, EVENT.replace("SUMMARY:", "SEQUENCE:4\r\nSUMMARY:"))
+
+    assert int(_component(_written(calendar)[0])["SEQUENCE"]) == 4
+
+
+def test_renaming_a_todo_without_a_status_keeps_its_progress() -> None:
+    calendar = Mock()
+    todo = _todo("SUMMARY:Tax return\r\nPERCENT-COMPLETE:60")
+    calendar.todo_by_uid.return_value = todo
+
+    update_todo(
+        calendar, "uid-1", {"summary": "Tax return 2026", "status": "NEEDS-ACTION"}
+    )
+
+    assert int(todo.icalendar_component["PERCENT-COMPLETE"]) == 60
+    assert "STATUS" not in todo.icalendar_component
+
+
+def test_completing_a_series_listed_behind_its_exception_rolls_the_series() -> None:
+    instance = ICalCalendar.from_ical(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
+        "BEGIN:VTODO\r\nUID:uid-1\r\nDTSTAMP:20260101T000000Z\r\n"
+        "RECURRENCE-ID;VALUE=DATE:20260706\r\nDUE;VALUE=DATE:20260706\r\n"
+        "STATUS:COMPLETED\r\nSUMMARY:Water plants\r\nEND:VTODO\r\n"
+        "BEGIN:VTODO\r\nUID:uid-1\r\nDTSTAMP:20260101T000000Z\r\n"
+        "DUE;VALUE=DATE:20260713\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Water plants\r\n"
+        "END:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+    override, series = instance.walk("VTODO")
+    todo = written_through(
+        Mock(icalendar_instance=instance, icalendar_component=override)
+    )
+    calendar = Mock()
+    calendar.todo_by_uid.return_value = todo
+
+    update_todo(calendar, "uid-1", {"summary": "Water plants", "status": "COMPLETED"})
+
+    assert series["DUE"].dt == date(2026, 7, 20)
+    assert override["DUE"].dt == date(2026, 7, 6)
+
+
+def _todos_only(todos: dict[str, Mock]) -> Mock:
+    calendar = Mock()
+    calendar.search.side_effect = lambda **kind: (
+        list(todos.values()) if kind.get("todo") else []
+    )
+    return calendar
+
+
+def test_clearing_many_completed_items_finds_them_among_the_todos() -> None:
+    """Core's "clear completed" hands over every completed uid at once."""
+    todos = {f"t{n}": _ordered_todo(f"t{n}", "SUMMARY:x") for n in range(9)}
+    calendar = _todos_only(todos)
+
+    delete_todos(calendar, list(todos), {})
+
+    assert all(todo.delete.called for todo in todos.values())
+    calendar.todo_by_uid.assert_not_called()
+
+
+def test_a_reorder_reads_the_todos_and_not_the_events() -> None:
+    todos = {
+        "a": _ordered_todo("a", f"SUMMARY:a\r\n{SORT_ORDER_PROPERTY}:0"),
+        "b": _ordered_todo("b", f"SUMMARY:b\r\n{SORT_ORDER_PROPERTY}:1024"),
+    }
+
+    reorder_todos(_todos_only(todos), ["b", "a"])
+
+    assert str(todos["b"].icalendar_component[SORT_ORDER_PROPERTY]) == "-1024"
+    todos["a"].save.assert_not_called()
+
+
+def _stored_todo(client: RecordingClient, etag: str, read: str | None = None):
+    """A to-do the server holds at one etag, found by a read that saw another."""
+    url = "https://dav.test/cal/uid-1.ics"
+    client.stored[url] = (TODO_BODY, etag)
+    todo = caldav.Todo(client=client, data=TODO_BODY, url=url)
+    if read is not None:
+        todo.props[dav.GetEtag.tag] = read
+    return todo
+
+
+TODO_BODY = (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VTODO\r\n"
+    "UID:uid-1\r\nDTSTAMP:20260101T000000Z\r\nSUMMARY:Milk\r\nEND:VTODO\r\n"
+    "END:VCALENDAR\r\n"
+)
+
+
+def test_a_write_the_server_moved_past_since_the_read_is_refused() -> None:
+    """Between the read that found the item and the write, another client saved it."""
+    client = RecordingClient()
+    calendar = Mock()
+    calendar.todo_by_uid.return_value = _stored_todo(client, '"2"', read='"1"')
+
+    with pytest.raises(Refused, match="etag_conflict"):
+        update_todo(calendar, "uid-1", {"summary": "Oat milk"})
+
+    assert client.put_headers[-1]["If-Match"] == '"1"'
+    assert client.stored["https://dav.test/cal/uid-1.ics"][0] == TODO_BODY
+
+
+def test_a_write_without_an_etag_from_its_read_takes_one_from_a_get() -> None:
+    client = RecordingClient()
+    calendar = Mock()
+    calendar.todo_by_uid.return_value = _stored_todo(client, '"7"')
+
+    update_todo(calendar, "uid-1", {"summary": "Oat milk"})
+
+    assert client.put_headers[-1]["If-Match"] == '"7"'
+    assert "SUMMARY:Oat milk" in client.stored["https://dav.test/cal/uid-1.ics"][0]
+
+
+def test_an_import_does_not_overwrite_an_object_its_uid_names_by_resource() -> None:
+    """Xandikos stores a resource called u1.ics under whatever uid it carries, and a
+    uid lookup does not see it."""
+    calendar = _missing_calendar()
+    calendar.client.stored[f"{calendar.url}u1.ics"] = (EVENT, '"1"')
+
+    with pytest.raises(Refused, match="uid_clash"):
+        import_ics(calendar, EVENT.replace("UID:uid-1", "UID:u1"))
+
+    assert calendar.client.stored[f"{calendar.url}u1.ics"] == (EVENT, '"1"')
+
+
+def test_deleting_an_object_the_url_missed_is_not_reported_as_done() -> None:
+    """caldav takes a 404 on DELETE for success."""
+    client = RecordingClient()
+    calendar = Mock()
+    todo = caldav.Todo(client=client, data=TODO_BODY, url="https://dav.test/cal/x.ics")
+    todo.props[dav.GetEtag.tag] = '"1"'
+    calendar.todo_by_uid.return_value = todo
+    client.delete_status = 404
+
+    with pytest.raises(NotFoundError):
+        delete_todos(calendar, ["uid-1"], {})

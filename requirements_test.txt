@@ -3,4 +3,4 @@ caldav==2.1.0
 icalendar==6.3.1
 vobject==0.9.9
 hypothesis==6.168.1
-ruff==0.16.8
+ruff==0.16.9

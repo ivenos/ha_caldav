@@ -19,7 +19,7 @@ python3.14 -m venv .venv
 .venv/bin/ruff format --check
 ```
 
-- CI runs the unit tests against the Home Assistant pinned in `requirements_test.txt` and against the oldest one `hacs.json` allows.
+- CI runs the unit tests against the Home Assistant pinned in `requirements_test.txt` and against the oldest one `hacs.json` allows with the minimum versions from `manifest.json`, on changes and daily.
 - The live tests run against a real CalDAV server in throwaway Docker containers, which are removed afterwards:
 
 ```bash
@@ -66,7 +66,7 @@ Conventional Commits (https://www.conventionalcommits.org/en/v1.0.0/) with a sho
 
 - GitHub Actions stay on version tags, never commit SHAs. hassfest has no tagged release and runs from `master`.
 - Renovate opens the bumps. Other PRs leave dependencies alone.
-- `caldav`, `icalendar` and `vobject` follow the versions Home Assistant core pins, in `manifest.json` and `requirements_test.txt`. They move by hand.
+- `caldav`, `icalendar` and `vobject` follow Home Assistant core. `manifest.json` lists them as minimum versions, the ones the oldest supported Home Assistant pins. `requirements_test.txt` pins the versions the newest Home Assistant pins, its beta included. Both move by hand.
 - `python-dateutil` is not listed in `manifest.json` or `requirements_test.txt`.
 
 ## Pull requests

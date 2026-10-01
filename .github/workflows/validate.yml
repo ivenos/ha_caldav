@@ -6,6 +6,8 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -62,9 +64,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Pin the oldest supported Home Assistant
+      - name: Pin the oldest supported Home Assistant and the minimum requirements
         if: matrix.homeassistant == 'oldest'
-        run: sed -i "s/^pytest-homeassistant-custom-component==.*/pytest-homeassistant-custom-component==$OLDEST_HARNESS/" requirements_test.txt
+        run: |
+          sed -i "s/^pytest-homeassistant-custom-component==.*/pytest-homeassistant-custom-component==$OLDEST_HARNESS/" requirements_test.txt
+          jq -r '.requirements[]' custom_components/ha_caldav/manifest.json | while read -r minimum; do
+            sed -i "s/^${minimum%%>=*}==.*/${minimum/>=/==}/" requirements_test.txt
+          done
 
       - uses: actions/setup-python@v7
         with:
@@ -85,23 +91,44 @@ jobs:
           assert __version__.startswith(f"{allowed}."), (__version__, allowed)
           EOF
 
-      - name: Check that the pins follow Home Assistant core
-        if: matrix.homeassistant == 'pinned'
+      - name: Check that the requirements follow Home Assistant core
         run: |
           python - <<'EOF'
           import json
           from pathlib import Path
+          from packaging.requirements import Requirement
+          from packaging.version import Version
           import homeassistant.components.caldav as core
           ours = json.loads(Path("custom_components/ha_caldav/manifest.json").read_text())
           theirs = json.loads((Path(core.__file__).parent / "manifest.json").read_text())
-          names = {pin.split("==")[0] for pin in ours["requirements"]}
-          tested = [
-              line
-              for line in Path("requirements_test.txt").read_text().split()
-              if line.split("==")[0] in names
-          ]
-          wanted = sorted(theirs["requirements"])
-          assert sorted(ours["requirements"]) == sorted(tested) == wanted, wanted
+          minimums = [Requirement(entry) for entry in ours["requirements"]]
+          tested = dict(
+              line.split("==") for line in Path("requirements_test.txt").read_text().split()
+          )
+          shipped = dict(pin.split("==") for pin in theirs["requirements"])
+          assert sorted(minimum.name for minimum in minimums) == sorted(shipped), shipped
+          for minimum in minimums:
+              version = shipped[minimum.name]
+              assert minimum.specifier.contains(version, prereleases=True), (minimum, version)
+              assert Version(tested[minimum.name]) >= Version(version), (minimum.name, version)
+          EOF
+
+      - name: Check that the tested requirements cover the Home Assistant beta
+        if: matrix.homeassistant == 'pinned' && github.event_name != 'pull_request'
+        run: |
+          python - <<'EOF'
+          import json
+          from pathlib import Path
+          from urllib.request import urlopen
+          from packaging.version import Version
+          url = "https://raw.githubusercontent.com/home-assistant/core/rc/homeassistant/components/caldav/manifest.json"
+          with urlopen(url, timeout=30) as response:
+              shipped = dict(pin.split("==") for pin in json.load(response)["requirements"])
+          tested = dict(
+              line.split("==") for line in Path("requirements_test.txt").read_text().split()
+          )
+          for name, version in shipped.items():
+              assert Version(tested[name]) >= Version(version), (name, version)
           EOF
 
       - name: Run tests

@@ -1342,8 +1342,8 @@ def test_an_import_never_writes_over_a_uid_the_collection_already_holds(
     assert calendar.client.puts == []
 
 
-# Short enough that RFC 5545's 75-octet fold does not reach them.
-UNREADABLE_UIDS = ("uid-1", "uid-ü-\U0001f600", "   ", "a" * 60)
+# No fold at RFC 5545's 75 octets, no trailing whitespace: caldav 3 strips it.
+UNREADABLE_UIDS = ("uid-1", "uid-ü-\U0001f600", "a b", "a" * 60)
 
 
 @pytest.mark.parametrize("uid", UNREADABLE_UIDS)

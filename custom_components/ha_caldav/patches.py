@@ -1,4 +1,4 @@
-"""Fixes to caldav 2.1.0 and vobject 0.9.9 that no call of ours can route around."""
+"""Fixes to caldav and vobject that no call of ours can route around."""
 
 from __future__ import annotations
 

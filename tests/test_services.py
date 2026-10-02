@@ -313,6 +313,29 @@ async def test_delete_event_forwards_the_occurrence_and_its_range(
     assert delete.call_args.args[1:] == ("uid-1", "2026-07-13 09:00:00+00:00", True)
 
 
+@pytest.mark.parametrize(
+    ("action", "fields"),
+    [("update_event", {"summary": "Renamed"}), ("delete_event", {})],
+)
+async def test_an_action_is_not_held_to_an_etag_the_calendar_cached(
+    hass: HomeAssistant, action: str, fields: dict
+) -> None:
+    await _setup(hass)
+    entity = hass.data["entity_components"]["calendar"].get_entity("calendar.personal")
+    entity.coordinator.etags = {"uid-1": '"read by the panel"'}
+
+    with patch(f"custom_components.ha_caldav.calendar.{action}") as write:
+        await hass.services.async_call(
+            DOMAIN,
+            action,
+            {"entity_id": "calendar.personal", "uid": "uid-1", **fields},
+            blocking=True,
+        )
+
+    assert write.call_args.kwargs["expected_etag"] is None
+    assert "uid-1" not in entity.coordinator.etags
+
+
 async def test_a_delete_with_a_range_but_no_occurrence_deletes_nothing(
     hass: HomeAssistant,
 ) -> None:

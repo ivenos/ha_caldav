@@ -485,6 +485,23 @@ def test_a_read_leaves_its_redirects_to_requests() -> None:
     assert "allow_redirects" not in sent.call_args.kwargs
 
 
+def test_a_read_asks_for_the_answer_unencoded_so_a_proxy_leaves_its_etag_alone() -> (
+    None
+):
+    session = HostLockedSession()
+    answer = _answer(200, "https://cloud.example.com/dav/a.ics")
+
+    with patch.object(requests.Session, "request", return_value=answer) as sent:
+        session.request(
+            "GET", "https://cloud.example.com/dav/a.ics", headers={"Accept": "*/*"}
+        )
+        session.request("PROPFIND", "https://cloud.example.com/dav/", data="<x/>")
+
+    read, listing = sent.call_args_list
+    assert read.kwargs["headers"] == {"Accept": "*/*", "Accept-Encoding": "identity"}
+    assert "headers" not in listing.kwargs
+
+
 @pytest.mark.parametrize(
     ("status", "phrase"), [(401, "Unauthorized"), (403, "Forbidden")]
 )

@@ -199,6 +199,7 @@ class HostLockedSession(requests.Session):
         requests turns a DELETE redirected with 302 into a GET, and sends a
         PUT, PROPFIND or MKCALENDAR on without its body. caldav tells a bad
         password from a refusal by the reason phrase, which HTTP/2 leaves out.
+        A proxy that compresses a GET gives its etag a suffix (RFC 9110 8.8.3.3).
         """
         if self.https_only and urlparse(str(url)).scheme.lower() != "https":
             _LOGGER.warning(
@@ -207,6 +208,10 @@ class HostLockedSession(requests.Session):
             )
             raise requests.exceptions.InvalidURL("refusing to leave https")
         if method.upper() in ("GET", "HEAD"):
+            kwargs["headers"] = {
+                **(kwargs.get("headers") or {}),
+                "Accept-Encoding": "identity",
+            }
             response = super().request(method, url, *args, **kwargs)
         else:
             response = self._follow(method, str(url), *args, **kwargs)

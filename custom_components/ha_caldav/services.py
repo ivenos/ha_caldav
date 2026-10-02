@@ -502,6 +502,7 @@ async def _async_delete_event(
         call.data["uid"],
         call.data.get("recurrence_id"),
         call.data.get("recurrence_range"),
+        as_shown=False,
     )
 
 

@@ -240,7 +240,9 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         data = _item_data(event)
         if "rrule" not in data and _accepted(self.coordinator.rrules.get(uid)):
             data["rrule"] = ""
-        await self.async_update_full_event(uid, data, recurrence_id, recurrence_range)
+        await self.async_update_full_event(
+            uid, data, recurrence_id, recurrence_range, as_shown=True
+        )
 
     async def async_update_full_event(
         self,
@@ -248,8 +250,13 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         data: dict[str, Any],
         recurrence_id: str | None = None,
         recurrence_range: str | None = None,
+        *,
+        as_shown: bool = False,
     ) -> None:
-        """Update an event from an already-mapped field set."""
+        """Update an event from an already-mapped field set.
+
+        Only an edit of what the editor showed is held to the version last read.
+        """
         await self.async_write(
             lambda: update_event(
                 self.calendar,
@@ -257,7 +264,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
                 data,
                 recurrence_id,
                 recurrence_range == RANGE_THIS_AND_FUTURE,
-                expected_etag=self.coordinator.etags.get(uid),
+                expected_etag=self.coordinator.etags.get(uid) if as_shown else None,
                 own_address=self._own_address,
                 addresses=self.runtime_data.address_set,
             ),
@@ -270,6 +277,8 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         uid: str,
         recurrence_id: str | None = None,
         recurrence_range: str | None = None,
+        *,
+        as_shown: bool = True,
     ) -> None:
         """Delete a series, a single occurrence, or an occurrence onwards."""
         await self.async_write(
@@ -278,7 +287,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
                 uid,
                 recurrence_id,
                 recurrence_range == RANGE_THIS_AND_FUTURE,
-                expected_etag=self.coordinator.etags.get(uid),
+                expected_etag=self.coordinator.etags.get(uid) if as_shown else None,
                 addresses=self.runtime_data.address_set,
             ),
             "delete",

@@ -150,6 +150,9 @@
     }
   },
   "exceptions": {
+    "alarm_needs_date": {
+      "message": "Un promemoria ha bisogno di una data di inizio o di scadenza da cui contare."
+    },
     "allday_timed_switch": {
       "message": "Una serie ricorrente non può passare da evento di tutto il giorno a evento con orario, né viceversa."
     },
@@ -213,6 +216,12 @@
     "occurrence_not_found": {
       "message": "Questa serie non ha alcuna occorrenza il {recurrence_id}."
     },
+    "parent_cycle": {
+      "message": "Un'attività non può essere una sottoattività di se stessa né di una delle proprie sottoattività."
+    },
+    "parent_not_found": {
+      "message": "In questo elenco non c'è alcuna attività {parent} a cui collegarla."
+    },
     "ranged_override": {
       "message": "Questa serie contiene un'eccezione valida da un'occorrenza in poi. Modificala nell'applicazione che l'ha creata."
     },
@@ -228,11 +237,17 @@
     "rrule_mismatch": {
       "message": "Il nuovo inizio non è una data prodotta dalla regola di ricorrenza."
     },
+    "rrule_needs_date": {
+      "message": "Un'attività ricorrente ha bisogno di una data di inizio o di scadenza."
+    },
     "rrule_too_dense": {
       "message": "La regola di ricorrenza produce troppe occorrenze per poterle elaborare."
     },
     "same_calendar": {
       "message": "L'evento è già in {name}. Scegli un altro calendario."
+    },
+    "same_todo_list": {
+      "message": "L'attività è già in {name}. Scegli un altro elenco."
     },
     "server_error": {
       "message": "La chiamata al server CalDAV non è riuscita ({action}). I dettagli sono nel log."
@@ -251,6 +266,9 @@
     },
     "unknown_todo_item": {
       "message": "In questo elenco non c'è alcuna attività {uid}."
+    },
+    "unknown_todo_list": {
+      "message": "{entity_id} non è un elenco di attività di un account CalDAV caricato."
     },
     "unreadable_lines": {
       "message": "Il documento contiene righe che non si possono leggere: {lines}"
@@ -303,6 +321,23 @@
     "recurrence_range": {
       "options": {
         "thisandfuture": "Questa e tutte le successive"
+      }
+    },
+    "todo_status": {
+      "options": {
+        "needs_action": "Non iniziata",
+        "in_process": "In corso",
+        "completed": "Completata",
+        "cancelled": "Annullata"
+      }
+    },
+    "todo_search_field": {
+      "options": {
+        "summary": "Nome",
+        "description": "Descrizione",
+        "location": "Luogo",
+        "category": "Categoria",
+        "uid": "UID"
       }
     }
   },
@@ -548,6 +583,214 @@
         "keep_original": {
           "name": "Mantieni l'originale",
           "description": "Copia invece di spostare, l'evento resta nel calendario di partenza."
+        }
+      }
+    },
+    "create_todo": {
+      "name": "Crea attività",
+      "description": "Crea un'attività con le proprietà che l'azione standard delle attività non può impostare, anche come sottoattività.",
+      "fields": {
+        "item": {
+          "name": "Nome dell'attività",
+          "description": "Il nome dell'attività."
+        },
+        "due_date": {
+          "name": "Data di scadenza",
+          "description": "Il giorno in cui scade l'attività."
+        },
+        "due_datetime": {
+          "name": "Data e ora di scadenza",
+          "description": "Il momento in cui scade l'attività."
+        },
+        "start_date": {
+          "name": "Data di inizio",
+          "description": "Il giorno in cui inizia l'attività. Una scadenza accanto deve allora essere anch'essa un giorno."
+        },
+        "start_datetime": {
+          "name": "Data e ora di inizio",
+          "description": "Quando inizia l'attività. Una scadenza accanto deve allora avere anch'essa un orario."
+        },
+        "description": {
+          "name": "Descrizione",
+          "description": "Le note dell'attività."
+        },
+        "parent": {
+          "name": "Sottoattività di",
+          "description": "Il nome o l'UID dell'attività di cui questa è una sottoattività."
+        },
+        "rrule": {
+          "name": "Regola di ricorrenza",
+          "description": "Una RRULE secondo RFC 5545, senza il nome della proprietà. Richiede una data di inizio o di scadenza."
+        },
+        "status": {
+          "name": "Stato",
+          "description": "Se l'attività è non iniziata, in corso, completata o annullata."
+        },
+        "percent_complete": {
+          "name": "Percentuale completata",
+          "description": "A che punto è l'attività, da 0 a 100. Imposta lo stato corrispondente se non ne viene indicato uno."
+        },
+        "priority": {
+          "name": "Priorità",
+          "description": "0 per indefinita, 1 è la più alta e 9 la più bassa."
+        },
+        "categories": {
+          "name": "Categorie",
+          "description": "Un elenco di nomi di categoria."
+        },
+        "location": {
+          "name": "Luogo",
+          "description": "Dove si svolge l'attività."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Un collegamento legato all'attività."
+        },
+        "classification": {
+          "name": "Riservatezza",
+          "description": "Quanto è privata l'attività."
+        },
+        "organizer": {
+          "name": "Organizzatore",
+          "description": "L'indirizzo email che organizza l'attività."
+        },
+        "attendees": {
+          "name": "Partecipanti",
+          "description": "A chi è assegnata l'attività: indirizzi email, oppure oggetti con email, name, role, status e rsvp."
+        },
+        "alarms": {
+          "name": "Promemoria",
+          "description": "Minuti prima dell'inizio, o prima della scadenza se manca, oppure oggetti con minutes_before, action, related e description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Avanzate",
+          "description": "Proprietà oltre al nome e alla scadenza."
+        }
+      }
+    },
+    "update_todo": {
+      "name": "Modifica attività",
+      "description": "Cambia qualsiasi proprietà di un'attività, comprese quelle fuori dalla portata dell'azione standard delle attività. Un campo indicato vuoto viene cancellato.",
+      "fields": {
+        "item": {
+          "name": "Nome o UID dell'attività",
+          "description": "Il nome dell'attività da modificare, o il suo UID se più attività hanno lo stesso nome."
+        },
+        "rename": {
+          "name": "Rinomina",
+          "description": "Il nuovo nome dell'attività."
+        },
+        "due_date": {
+          "name": "Data di scadenza",
+          "description": "Il giorno in cui scade l'attività."
+        },
+        "due_datetime": {
+          "name": "Data e ora di scadenza",
+          "description": "Il momento in cui scade l'attività."
+        },
+        "start_date": {
+          "name": "Data di inizio",
+          "description": "Il giorno in cui inizia l'attività. Una scadenza accanto deve allora essere anch'essa un giorno."
+        },
+        "start_datetime": {
+          "name": "Data e ora di inizio",
+          "description": "Quando inizia l'attività. Una scadenza accanto deve allora avere anch'essa un orario."
+        },
+        "description": {
+          "name": "Descrizione",
+          "description": "Le note dell'attività."
+        },
+        "parent": {
+          "name": "Sottoattività di",
+          "description": "Il nome o l'UID dell'attività di cui questa diventa una sottoattività. Vuoto la rende un'attività di primo livello."
+        },
+        "rrule": {
+          "name": "Regola di ricorrenza",
+          "description": "Una RRULE secondo RFC 5545, senza il nome della proprietà. Richiede una data di inizio o di scadenza."
+        },
+        "status": {
+          "name": "Stato",
+          "description": "Se l'attività è non iniziata, in corso, completata o annullata."
+        },
+        "percent_complete": {
+          "name": "Percentuale completata",
+          "description": "A che punto è l'attività, da 0 a 100. Imposta lo stato corrispondente se non ne viene indicato uno."
+        },
+        "priority": {
+          "name": "Priorità",
+          "description": "0 per indefinita, 1 è la più alta e 9 la più bassa."
+        },
+        "categories": {
+          "name": "Categorie",
+          "description": "Un elenco di nomi di categoria."
+        },
+        "location": {
+          "name": "Luogo",
+          "description": "Dove si svolge l'attività."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Un collegamento legato all'attività."
+        },
+        "classification": {
+          "name": "Riservatezza",
+          "description": "Quanto è privata l'attività."
+        },
+        "organizer": {
+          "name": "Organizzatore",
+          "description": "L'indirizzo email che organizza l'attività."
+        },
+        "attendees": {
+          "name": "Partecipanti",
+          "description": "A chi è assegnata l'attività: indirizzi email, oppure oggetti con email, name, role, status e rsvp."
+        },
+        "alarms": {
+          "name": "Promemoria",
+          "description": "Minuti prima dell'inizio, o prima della scadenza se manca, oppure oggetti con minutes_before, action, related e description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Avanzate",
+          "description": "Proprietà oltre al nome e alla scadenza."
+        }
+      }
+    },
+    "search_todos": {
+      "name": "Cerca attività",
+      "description": "Restituisce le attività dell'elenco con tutte le proprietà salvate e con l'attività di cui ciascuna è una sottoattività.",
+      "fields": {
+        "text": {
+          "name": "Testo",
+          "description": "Restituisce solo le attività che contengono questo testo. Lascia vuoto per tutte."
+        },
+        "field": {
+          "name": "Campo",
+          "description": "In quale proprietà cercare."
+        },
+        "status": {
+          "name": "Stato",
+          "description": "Restituisce solo le attività in uno di questi stati."
+        }
+      }
+    },
+    "move_todo": {
+      "name": "Sposta attività",
+      "description": "Sposta un'attività e le sue sottoattività in un altro elenco di attività.",
+      "fields": {
+        "item": {
+          "name": "Nome o UID dell'attività",
+          "description": "L'attività da spostare."
+        },
+        "target_entity_id": {
+          "name": "Elenco di destinazione",
+          "description": "L'elenco di attività in cui spostare l'attività."
+        },
+        "keep_original": {
+          "name": "Mantieni l'originale",
+          "description": "Copia invece di spostare, l'attività resta nell'elenco di partenza."
         }
       }
     },

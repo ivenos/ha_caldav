@@ -31,7 +31,12 @@ def _registered() -> dict[str, dict]:
                 (name, schema)
             ),
         )
-        service_module.async_register_services(Mock())
+        hass = Mock()
+        service_module.async_register_services(hass)
+    registered += [
+        (call.args[1], call.kwargs["schema"])
+        for call in hass.services.async_register.call_args_list
+    ]
     return {name: _markers(schema) for name, schema in registered}
 
 
@@ -164,6 +169,9 @@ def test_declared_defaults_match_the_schema(service: str) -> None:
             "components",
             (const.COMPONENT_EVENT, const.COMPONENT_TODO),
         ),
+        (const.SERVICE_CREATE_TODO, "classification", const.EVENT_CLASSIFICATIONS),
+        (const.SERVICE_UPDATE_TODO, "classification", const.EVENT_CLASSIFICATIONS),
+        (const.SERVICE_SEARCH_TODOS, "field", const.TODO_SEARCH_FIELDS),
     ],
 )
 def test_selector_options_match_the_constants(service, field, options) -> None:
@@ -172,6 +180,25 @@ def test_selector_options_match_the_constants(service, field, options) -> None:
     selector = _fields(service)[field]["selector"]["select"]
 
     assert selector["options"] == [value.lower() for value in options]
+
+
+@pytest.mark.parametrize(
+    "service",
+    [
+        const.SERVICE_CREATE_TODO,
+        const.SERVICE_UPDATE_TODO,
+        const.SERVICE_SEARCH_TODOS,
+    ],
+)
+def test_a_to_do_status_is_offered_the_way_core_spells_it(service: str) -> None:
+    """todo.update_item takes needs_action, where RFC 5545 writes NEEDS-ACTION."""
+    selector = _fields(service)["status"]["selector"]["select"]
+
+    assert selector["options"] == [
+        value.lower().replace("-", "_") for value in const.TODO_STATUSES
+    ]
+    for option in selector["options"]:
+        assert vol.Schema(service_module.TODO_FIELDS)({"status": option})
 
 
 @pytest.mark.parametrize("service", sorted(SCHEMAS))

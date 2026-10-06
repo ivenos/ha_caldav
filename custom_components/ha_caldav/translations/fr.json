@@ -150,6 +150,9 @@
     }
   },
   "exceptions": {
+    "alarm_needs_date": {
+      "message": "Un rappel a besoin d'une date de début ou d'échéance à partir de laquelle compter."
+    },
     "allday_timed_switch": {
       "message": "Une série récurrente ne peut pas passer du mode « sur toute la journée » au mode horaire, ni l'inverse."
     },
@@ -213,6 +216,12 @@
     "occurrence_not_found": {
       "message": "Cette série n'a aucune occurrence le {recurrence_id}."
     },
+    "parent_cycle": {
+      "message": "Une tâche ne peut pas être une sous-tâche d'elle-même ni de l'une de ses propres sous-tâches."
+    },
+    "parent_not_found": {
+      "message": "Il n'y a aucune tâche {parent} dans cette liste à laquelle la rattacher."
+    },
     "ranged_override": {
       "message": "Cette série comporte une exception qui s'applique à partir d'une occurrence. Modifiez-la dans l'application qui l'a créée."
     },
@@ -228,11 +237,17 @@
     "rrule_mismatch": {
       "message": "Le nouveau début n'est pas une date produite par la règle de récurrence."
     },
+    "rrule_needs_date": {
+      "message": "Une tâche récurrente a besoin d'une date de début ou d'échéance."
+    },
     "rrule_too_dense": {
       "message": "La règle de récurrence produit trop d'occurrences pour pouvoir toutes les parcourir."
     },
     "same_calendar": {
       "message": "L'événement est déjà dans {name}. Choisissez un autre calendrier."
+    },
+    "same_todo_list": {
+      "message": "La tâche est déjà dans {name}. Choisissez une autre liste."
     },
     "server_error": {
       "message": "L'appel au serveur CalDAV a échoué ({action}). Les détails sont dans le journal."
@@ -251,6 +266,9 @@
     },
     "unknown_todo_item": {
       "message": "Il n'y a aucune tâche {uid} dans cette liste."
+    },
+    "unknown_todo_list": {
+      "message": "{entity_id} n'est pas une liste de tâches d'un compte CalDAV chargé."
     },
     "unreadable_lines": {
       "message": "Le document contient des lignes illisibles : {lines}"
@@ -303,6 +321,23 @@
     "recurrence_range": {
       "options": {
         "thisandfuture": "Celle-ci et toutes les suivantes"
+      }
+    },
+    "todo_status": {
+      "options": {
+        "needs_action": "Non commencée",
+        "in_process": "En cours",
+        "completed": "Terminée",
+        "cancelled": "Annulée"
+      }
+    },
+    "todo_search_field": {
+      "options": {
+        "summary": "Nom",
+        "description": "Description",
+        "location": "Lieu",
+        "category": "Catégorie",
+        "uid": "UID"
       }
     }
   },
@@ -548,6 +583,214 @@
         "keep_original": {
           "name": "Conserver l'original",
           "description": "Copier au lieu de déplacer, l'événement reste dans le calendrier source."
+        }
+      }
+    },
+    "create_todo": {
+      "name": "Créer une tâche",
+      "description": "Crée une tâche avec les propriétés que l'action de tâches standard ne peut pas définir, y compris comme sous-tâche.",
+      "fields": {
+        "item": {
+          "name": "Nom de la tâche",
+          "description": "Le nom de la tâche."
+        },
+        "due_date": {
+          "name": "Date d'échéance",
+          "description": "Le jour où la tâche arrive à échéance."
+        },
+        "due_datetime": {
+          "name": "Date et heure d'échéance",
+          "description": "Le moment où la tâche arrive à échéance."
+        },
+        "start_date": {
+          "name": "Date de début",
+          "description": "Le jour où la tâche commence. Une échéance à côté doit alors être un jour aussi."
+        },
+        "start_datetime": {
+          "name": "Date et heure de début",
+          "description": "Quand la tâche commence. Une échéance à côté doit alors comporter une heure aussi."
+        },
+        "description": {
+          "name": "Description",
+          "description": "Les notes de la tâche."
+        },
+        "parent": {
+          "name": "Sous-tâche de",
+          "description": "Le nom ou l'UID de la tâche dont celle-ci est une sous-tâche."
+        },
+        "rrule": {
+          "name": "Règle de récurrence",
+          "description": "Une RRULE selon RFC 5545, sans le nom de la propriété. Nécessite une date de début ou d'échéance."
+        },
+        "status": {
+          "name": "Statut",
+          "description": "Si la tâche est non commencée, en cours, terminée ou annulée."
+        },
+        "percent_complete": {
+          "name": "Pourcentage accompli",
+          "description": "L'avancement de la tâche, de 0 à 100. Définit le statut correspondant si aucun n'est indiqué."
+        },
+        "priority": {
+          "name": "Priorité",
+          "description": "0 pour indéfinie, 1 est la plus élevée, 9 la plus basse."
+        },
+        "categories": {
+          "name": "Catégories",
+          "description": "Une liste de noms de catégories."
+        },
+        "location": {
+          "name": "Lieu",
+          "description": "Où la tâche a lieu."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Un lien lié à la tâche."
+        },
+        "classification": {
+          "name": "Confidentialité",
+          "description": "À quel point la tâche est privée."
+        },
+        "organizer": {
+          "name": "Organisateur",
+          "description": "L'adresse e-mail qui organise la tâche."
+        },
+        "attendees": {
+          "name": "Participants",
+          "description": "À qui la tâche est attribuée : adresses e-mail, ou objets avec email, name, role, status et rsvp."
+        },
+        "alarms": {
+          "name": "Rappels",
+          "description": "Minutes avant le début, ou avant l'échéance s'il n'y en a pas, ou objets avec minutes_before, action, related et description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Avancé",
+          "description": "Propriétés au-delà du nom et de l'échéance."
+        }
+      }
+    },
+    "update_todo": {
+      "name": "Modifier une tâche",
+      "description": "Modifie tout ou partie des propriétés d'une tâche, y compris celles hors de portée de l'action de tâches standard. Un champ indiqué vide est effacé.",
+      "fields": {
+        "item": {
+          "name": "Nom ou UID de la tâche",
+          "description": "Le nom de la tâche à modifier, ou son UID si plusieurs portent le même nom."
+        },
+        "rename": {
+          "name": "Renommer",
+          "description": "Le nouveau nom de la tâche."
+        },
+        "due_date": {
+          "name": "Date d'échéance",
+          "description": "Le jour où la tâche arrive à échéance."
+        },
+        "due_datetime": {
+          "name": "Date et heure d'échéance",
+          "description": "Le moment où la tâche arrive à échéance."
+        },
+        "start_date": {
+          "name": "Date de début",
+          "description": "Le jour où la tâche commence. Une échéance à côté doit alors être un jour aussi."
+        },
+        "start_datetime": {
+          "name": "Date et heure de début",
+          "description": "Quand la tâche commence. Une échéance à côté doit alors comporter une heure aussi."
+        },
+        "description": {
+          "name": "Description",
+          "description": "Les notes de la tâche."
+        },
+        "parent": {
+          "name": "Sous-tâche de",
+          "description": "Le nom ou l'UID de la tâche dont celle-ci devient une sous-tâche. Vide en fait une tâche de premier niveau."
+        },
+        "rrule": {
+          "name": "Règle de récurrence",
+          "description": "Une RRULE selon RFC 5545, sans le nom de la propriété. Nécessite une date de début ou d'échéance."
+        },
+        "status": {
+          "name": "Statut",
+          "description": "Si la tâche est non commencée, en cours, terminée ou annulée."
+        },
+        "percent_complete": {
+          "name": "Pourcentage accompli",
+          "description": "L'avancement de la tâche, de 0 à 100. Définit le statut correspondant si aucun n'est indiqué."
+        },
+        "priority": {
+          "name": "Priorité",
+          "description": "0 pour indéfinie, 1 est la plus élevée, 9 la plus basse."
+        },
+        "categories": {
+          "name": "Catégories",
+          "description": "Une liste de noms de catégories."
+        },
+        "location": {
+          "name": "Lieu",
+          "description": "Où la tâche a lieu."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Un lien lié à la tâche."
+        },
+        "classification": {
+          "name": "Confidentialité",
+          "description": "À quel point la tâche est privée."
+        },
+        "organizer": {
+          "name": "Organisateur",
+          "description": "L'adresse e-mail qui organise la tâche."
+        },
+        "attendees": {
+          "name": "Participants",
+          "description": "À qui la tâche est attribuée : adresses e-mail, ou objets avec email, name, role, status et rsvp."
+        },
+        "alarms": {
+          "name": "Rappels",
+          "description": "Minutes avant le début, ou avant l'échéance s'il n'y en a pas, ou objets avec minutes_before, action, related et description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Avancé",
+          "description": "Propriétés au-delà du nom et de l'échéance."
+        }
+      }
+    },
+    "search_todos": {
+      "name": "Rechercher des tâches",
+      "description": "Renvoie les tâches de la liste avec toutes les propriétés enregistrées et la tâche dont chacune est une sous-tâche.",
+      "fields": {
+        "text": {
+          "name": "Texte",
+          "description": "Ne renvoyer que les tâches contenant ce texte. Laisser vide pour toutes."
+        },
+        "field": {
+          "name": "Champ",
+          "description": "La propriété dans laquelle chercher."
+        },
+        "status": {
+          "name": "Statut",
+          "description": "Ne renvoyer que les tâches dans l'un de ces états."
+        }
+      }
+    },
+    "move_todo": {
+      "name": "Déplacer une tâche",
+      "description": "Déplace une tâche et ses sous-tâches vers une autre liste de tâches.",
+      "fields": {
+        "item": {
+          "name": "Nom ou UID de la tâche",
+          "description": "La tâche à déplacer."
+        },
+        "target_entity_id": {
+          "name": "Liste cible",
+          "description": "La liste de tâches vers laquelle déplacer la tâche."
+        },
+        "keep_original": {
+          "name": "Conserver l'original",
+          "description": "Copier au lieu de déplacer, la tâche reste dans la liste source."
         }
       }
     },

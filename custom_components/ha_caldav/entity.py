@@ -13,7 +13,7 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import set_calendar_name
-from .coordinator import HaCaldavCoordinator, ManagedCalendar
+from .coordinator import HaCaldavCoordinator, HaCaldavRuntimeData, ManagedCalendar
 from .errors import Refused, as_reported
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
     _attr_has_entity_name = True
     # Which half of the collection this entity reads.
     _half: str
+    runtime_data: HaCaldavRuntimeData
     _name_in_registry: str | None = None
     _name_noted = False
 

@@ -150,6 +150,9 @@
     }
   },
   "exceptions": {
+    "alarm_needs_date": {
+      "message": "A reminder needs a start or a due date to count from."
+    },
     "allday_timed_switch": {
       "message": "A recurring event cannot be switched between all-day and timed."
     },
@@ -213,6 +216,12 @@
     "occurrence_not_found": {
       "message": "This series has no occurrence on {recurrence_id}."
     },
+    "parent_cycle": {
+      "message": "A to-do cannot be a subtask of itself or of one of its own subtasks."
+    },
+    "parent_not_found": {
+      "message": "There is no to-do item {parent} on this list to put it under."
+    },
     "ranged_override": {
       "message": "This series holds an exception that applies from one occurrence onwards. Edit it in the app that created it."
     },
@@ -228,11 +237,17 @@
     "rrule_mismatch": {
       "message": "The new start is not a date the recurrence rule produces."
     },
+    "rrule_needs_date": {
+      "message": "A repeating to-do needs a start or a due date."
+    },
     "rrule_too_dense": {
       "message": "The recurrence rule produces too many occurrences to work through."
     },
     "same_calendar": {
       "message": "The event is already on {name}. Pick a different calendar."
+    },
+    "same_todo_list": {
+      "message": "The to-do is already on {name}. Pick a different list."
     },
     "server_error": {
       "message": "The call to the CalDAV server failed ({action}). The log has the details."
@@ -251,6 +266,9 @@
     },
     "unknown_todo_item": {
       "message": "There is no to-do item {uid} on this list."
+    },
+    "unknown_todo_list": {
+      "message": "{entity_id} is not a to-do list of a loaded CalDAV account."
     },
     "unreadable_lines": {
       "message": "The document has lines that cannot be read: {lines}"
@@ -303,6 +321,23 @@
     "recurrence_range": {
       "options": {
         "thisandfuture": "This and all later occurrences"
+      }
+    },
+    "todo_status": {
+      "options": {
+        "needs_action": "Not started",
+        "in_process": "In progress",
+        "completed": "Completed",
+        "cancelled": "Canceled"
+      }
+    },
+    "todo_search_field": {
+      "options": {
+        "summary": "Name",
+        "description": "Description",
+        "location": "Location",
+        "category": "Category",
+        "uid": "UID"
       }
     }
   },
@@ -548,6 +583,214 @@
         "keep_original": {
           "name": "Keep the original",
           "description": "Copy instead of move, leaving the event on the source calendar."
+        }
+      }
+    },
+    "create_todo": {
+      "name": "Create to-do",
+      "description": "Creates a to-do item with the properties the standard to-do action cannot set, subtasks included.",
+      "fields": {
+        "item": {
+          "name": "Item name",
+          "description": "The name of the to-do."
+        },
+        "due_date": {
+          "name": "Due date",
+          "description": "The day the to-do is due."
+        },
+        "due_datetime": {
+          "name": "Due date and time",
+          "description": "The moment the to-do is due."
+        },
+        "start_date": {
+          "name": "Start date",
+          "description": "The day the to-do starts. A due date beside it has to be a day too."
+        },
+        "start_datetime": {
+          "name": "Start date and time",
+          "description": "When the to-do starts. A due date beside it has to carry a time too."
+        },
+        "description": {
+          "name": "Description",
+          "description": "The notes of the to-do."
+        },
+        "parent": {
+          "name": "Subtask of",
+          "description": "The name or UID of the to-do this one is a subtask of."
+        },
+        "rrule": {
+          "name": "Recurrence rule",
+          "description": "An RFC 5545 RRULE, without the property name. Needs a start or a due date."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Whether the to-do is not started, in progress, completed or canceled."
+        },
+        "percent_complete": {
+          "name": "Percent complete",
+          "description": "How far along the to-do is, 0 to 100. Sets the matching status unless one is given."
+        },
+        "priority": {
+          "name": "Priority",
+          "description": "0 for undefined, 1 is highest, 9 is lowest."
+        },
+        "categories": {
+          "name": "Categories",
+          "description": "A list of category names."
+        },
+        "location": {
+          "name": "Location",
+          "description": "Where the to-do takes place."
+        },
+        "url": {
+          "name": "URL",
+          "description": "A link that belongs to the to-do."
+        },
+        "classification": {
+          "name": "Classification",
+          "description": "How private the to-do is."
+        },
+        "organizer": {
+          "name": "Organizer",
+          "description": "The email address organizing the to-do."
+        },
+        "attendees": {
+          "name": "Attendees",
+          "description": "Who the to-do is assigned to: email addresses, or objects with email, name, role, status and rsvp."
+        },
+        "alarms": {
+          "name": "Alarms",
+          "description": "Reminders, as minutes before the start, or before the due date without one, or objects with minutes_before, action, related and description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Advanced",
+          "description": "Properties beyond a name and a due date."
+        }
+      }
+    },
+    "update_todo": {
+      "name": "Update to-do",
+      "description": "Changes any subset of a to-do item's properties, the ones the standard to-do action cannot reach included. A field given empty is cleared.",
+      "fields": {
+        "item": {
+          "name": "Item name or UID",
+          "description": "The name of the to-do to change, or its UID where several share a name."
+        },
+        "rename": {
+          "name": "Rename item",
+          "description": "The new name of the to-do."
+        },
+        "due_date": {
+          "name": "Due date",
+          "description": "The day the to-do is due."
+        },
+        "due_datetime": {
+          "name": "Due date and time",
+          "description": "The moment the to-do is due."
+        },
+        "start_date": {
+          "name": "Start date",
+          "description": "The day the to-do starts. A due date beside it has to be a day too."
+        },
+        "start_datetime": {
+          "name": "Start date and time",
+          "description": "When the to-do starts. A due date beside it has to carry a time too."
+        },
+        "description": {
+          "name": "Description",
+          "description": "The notes of the to-do."
+        },
+        "parent": {
+          "name": "Subtask of",
+          "description": "The name or UID of the to-do this one becomes a subtask of. Empty makes it a top-level item."
+        },
+        "rrule": {
+          "name": "Recurrence rule",
+          "description": "An RFC 5545 RRULE, without the property name. Needs a start or a due date."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Whether the to-do is not started, in progress, completed or canceled."
+        },
+        "percent_complete": {
+          "name": "Percent complete",
+          "description": "How far along the to-do is, 0 to 100. Sets the matching status unless one is given."
+        },
+        "priority": {
+          "name": "Priority",
+          "description": "0 for undefined, 1 is highest, 9 is lowest."
+        },
+        "categories": {
+          "name": "Categories",
+          "description": "A list of category names."
+        },
+        "location": {
+          "name": "Location",
+          "description": "Where the to-do takes place."
+        },
+        "url": {
+          "name": "URL",
+          "description": "A link that belongs to the to-do."
+        },
+        "classification": {
+          "name": "Classification",
+          "description": "How private the to-do is."
+        },
+        "organizer": {
+          "name": "Organizer",
+          "description": "The email address organizing the to-do."
+        },
+        "attendees": {
+          "name": "Attendees",
+          "description": "Who the to-do is assigned to: email addresses, or objects with email, name, role, status and rsvp."
+        },
+        "alarms": {
+          "name": "Alarms",
+          "description": "Reminders, as minutes before the start, or before the due date without one, or objects with minutes_before, action, related and description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Advanced",
+          "description": "Properties beyond a name and a due date."
+        }
+      }
+    },
+    "search_todos": {
+      "name": "Search to-dos",
+      "description": "Returns the to-dos of the list with every property stored on them and the to-do each is a subtask of.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "Only return to-dos containing this text. Leave empty for all of them."
+        },
+        "field": {
+          "name": "Field",
+          "description": "Which property to look in."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Only return to-dos in one of these states."
+        }
+      }
+    },
+    "move_todo": {
+      "name": "Move to-do",
+      "description": "Moves a to-do and its subtasks to another to-do list.",
+      "fields": {
+        "item": {
+          "name": "Item name or UID",
+          "description": "The to-do to move."
+        },
+        "target_entity_id": {
+          "name": "Target list",
+          "description": "The to-do list to move the to-do to."
+        },
+        "keep_original": {
+          "name": "Keep the original",
+          "description": "Copy instead of move, leaving the to-do on the source list."
         }
       }
     },

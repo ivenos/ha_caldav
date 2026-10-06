@@ -38,6 +38,10 @@ SERVICE_SET_CALENDAR_COLOR = "set_calendar_color"
 SERVICE_CREATE_CALENDAR = "create_calendar"
 SERVICE_DELETE_CALENDAR = "delete_calendar"
 SERVICE_RESPOND_TO_INVITATION = "respond_to_invitation"
+SERVICE_CREATE_TODO = "create_todo"
+SERVICE_UPDATE_TODO = "update_todo"
+SERVICE_SEARCH_TODOS = "search_todos"
+SERVICE_MOVE_TODO = "move_todo"
 
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 ATTR_ALARMS = "alarms"
@@ -58,6 +62,11 @@ ATTR_NAME = "name"
 ATTR_COMPONENTS = "components"
 ATTR_TEXT = "text"
 ATTR_FIELD = "field"
+ATTR_ITEM = "item"
+ATTR_RENAME = "rename"
+ATTR_PARENT = "parent"
+ATTR_PARENT_UID = "parent_uid"
+ATTR_PERCENT_COMPLETE = "percent_complete"
 
 # What the upcoming event publishes beyond core's fields; kept out of the recorder.
 EVENT_ATTRIBUTES = (
@@ -76,6 +85,7 @@ EVENT_ATTRIBUTES = (
 EVENT_STATUSES = ("TENTATIVE", "CONFIRMED", "CANCELLED")
 EVENT_CLASSIFICATIONS = ("PUBLIC", "PRIVATE", "CONFIDENTIAL")
 EVENT_TRANSPARENCIES = ("OPAQUE", "TRANSPARENT")
+TODO_STATUSES = ("NEEDS-ACTION", "IN-PROCESS", "COMPLETED", "CANCELLED")
 
 PARTSTAT_BY_RESPONSE = {
     "accept": "ACCEPTED",
@@ -89,6 +99,14 @@ SEARCH_FIELDS = (
     "location",
     "category",
     "status",
+    "uid",
+)
+
+TODO_SEARCH_FIELDS = (
+    "summary",
+    "description",
+    "location",
+    "category",
     "uid",
 )
 

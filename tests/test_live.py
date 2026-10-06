@@ -11,6 +11,7 @@ from custom_components.ha_caldav.api import (
     create_event,
     create_todo,
     delete_todos,
+    move_todo,
     object_by_uid,
     update_todo,
 )
@@ -339,6 +340,202 @@ def test_update_todo_clears_due_and_description(calendar) -> None:
     item = todos(calendar)["Task"]
     assert item.due is None
     assert item.description is None
+
+
+def stored_todos(calendar) -> dict:
+    from custom_components.ha_caldav.services import _found_todos
+
+    return {
+        todo["summary"]: todo for todo in _found_todos(calendar, None, "summary", None)
+    }
+
+
+def subtask(calendar, summary: str, parent: str, **fields) -> None:
+    create_todo(
+        calendar,
+        {"summary": summary, "parent_uid": parent, **fields},
+        as_shown=False,
+    )
+
+
+def test_a_subtask_reads_back_under_its_parent(calendar) -> None:
+    create_todo(calendar, {"summary": "Groceries"})
+    parent = todos(calendar)["Groceries"].uid
+
+    subtask(calendar, "Milk", parent)
+
+    stored = stored_todos(calendar)
+    assert stored["Milk"]["parent_uid"] == parent
+    assert "parent_uid" not in stored["Groceries"]
+
+
+def test_a_todo_keeps_every_property_an_action_sets(calendar) -> None:
+    create_todo(
+        calendar,
+        {
+            "summary": "File taxes",
+            "start": date(2026, 7, 6),
+            "due": date(2026, 7, 31),
+            "description": "Receipts are in the blue folder",
+            "location": "Desk",
+            "rrule": "FREQ=YEARLY",
+            "percent_complete": 40,
+            "priority": 1,
+            "categories": ["money", "home"],
+            "url": "https://example.com/taxes",
+            "classification": "PRIVATE",
+            "alarms": [{"minutes_before": 60}],
+        },
+        as_shown=False,
+    )
+
+    todo = stored_todos(calendar)["File taxes"]
+
+    assert todo["status"] == "in_process"
+    assert todo["start"] == "2026-07-06"
+    assert todo["due"] == "2026-07-31"
+    assert todo["description"] == "Receipts are in the blue folder"
+    assert todo["location"] == "Desk"
+    assert todo["rrule"] == "FREQ=YEARLY"
+    assert todo["percent_complete"] == 40
+    assert todo["priority"] == 1
+    assert sorted(todo["categories"]) == ["home", "money"]
+    assert todo["url"] == "https://example.com/taxes"
+    assert todo["classification"] == "PRIVATE"
+    assert todo["alarms"][0]["minutes_before"] == 60
+
+
+def test_an_action_changes_only_the_fields_it_names(calendar) -> None:
+    create_todo(
+        calendar,
+        {"summary": "Task", "due": date(2026, 7, 10), "description": "notes"},
+    )
+    uid = todos(calendar)["Task"].uid
+
+    update_todo(calendar, uid, {"status": "IN-PROCESS"}, as_shown=False)
+
+    todo = stored_todos(calendar)["Task"]
+    assert todo["status"] == "in_process"
+    assert todo["due"] == "2026-07-10"
+    assert todo["description"] == "notes"
+
+
+def test_completing_a_parent_completes_its_open_subtasks(calendar) -> None:
+    create_todo(calendar, {"summary": "Groceries"})
+    parent = todos(calendar)["Groceries"].uid
+    subtask(calendar, "Milk", parent)
+    subtask(calendar, "Eggs", parent, status="CANCELLED")
+    subtask(calendar, "Oat milk", todos(calendar)["Milk"].uid)
+
+    update_todo(calendar, parent, {"summary": "Groceries", "status": "COMPLETED"})
+
+    stored = stored_todos(calendar)
+    assert stored["Groceries"]["status"] == "completed"
+    assert stored["Milk"]["status"] == "completed"
+    assert stored["Oat milk"]["status"] == "completed"
+    assert stored["Eggs"]["status"] == "cancelled"
+
+
+def test_reopening_a_subtask_reopens_the_parents_above_it(calendar) -> None:
+    create_todo(calendar, {"summary": "Groceries"})
+    parent = todos(calendar)["Groceries"].uid
+    subtask(calendar, "Milk", parent)
+    child = todos(calendar)["Milk"].uid
+    update_todo(calendar, parent, {"summary": "Groceries", "status": "COMPLETED"})
+
+    update_todo(calendar, child, {"summary": "Milk", "status": "NEEDS-ACTION"})
+
+    stored = stored_todos(calendar)
+    assert stored["Milk"]["status"] == "needs_action"
+    assert stored["Groceries"]["status"] == "needs_action"
+
+
+def test_a_new_subtask_reopens_the_parent_it_is_put_under(calendar) -> None:
+    create_todo(calendar, {"summary": "Groceries", "status": "COMPLETED"})
+    parent = todos(calendar)["Groceries"].uid
+
+    subtask(calendar, "Milk", parent)
+
+    assert stored_todos(calendar)["Groceries"]["status"] == "needs_action"
+
+
+def test_a_subtask_cannot_be_put_under_its_own_subtask(calendar) -> None:
+    create_todo(calendar, {"summary": "Groceries"})
+    parent = todos(calendar)["Groceries"].uid
+    subtask(calendar, "Milk", parent)
+    child = todos(calendar)["Milk"].uid
+
+    with pytest.raises(Refused, match="parent_cycle"):
+        update_todo(calendar, parent, {"parent_uid": child}, as_shown=False)
+    with pytest.raises(Refused, match="parent_not_found"):
+        update_todo(calendar, child, {"parent_uid": "nowhere"}, as_shown=False)
+
+    update_todo(calendar, child, {"parent_uid": None}, as_shown=False)
+    assert "parent_uid" not in stored_todos(calendar)["Milk"]
+
+
+def test_deleting_a_parent_deletes_its_subtasks(calendar) -> None:
+    create_todo(calendar, {"summary": "Groceries"})
+    create_todo(calendar, {"summary": "Laundry"})
+    parent = todos(calendar)["Groceries"].uid
+    subtask(calendar, "Milk", parent)
+    subtask(calendar, "Oat milk", todos(calendar)["Milk"].uid)
+
+    delete_todos(calendar, [parent], {})
+
+    assert set(todos(calendar)) == {"Laundry"}
+
+
+def test_moving_a_todo_takes_its_subtasks_along(calendar) -> None:
+    principal = calendar.client.principal()
+    target_name = f"{CALENDAR_NAME}_target"
+    for existing in principal.calendars():
+        if existing.name == target_name:
+            existing.delete()
+    target = principal.make_calendar(name=target_name)
+    try:
+        create_todo(calendar, {"summary": "Trip"})
+        trip = todos(calendar)["Trip"].uid
+        subtask(calendar, "Groceries", trip)
+        moved = todos(calendar)["Groceries"].uid
+        subtask(calendar, "Milk", moved)
+
+        move_todo(calendar, target, moved, keep_original=False)
+
+        assert set(todos(calendar)) == {"Trip"}
+        there = stored_todos(target)
+        assert set(there) == {"Groceries", "Milk"}
+        assert "parent_uid" not in there["Groceries"]
+        assert there["Milk"]["parent_uid"] == moved
+    finally:
+        enable_sockets()
+        target.delete()
+
+
+def test_a_todo_assigned_to_someone_is_accepted(calendar) -> None:
+    create_todo(
+        calendar,
+        {
+            "summary": "Review the draft",
+            "due": datetime(2026, 7, 10, 15, 30, tzinfo=UTC),
+            "organizer": "me@example.com",
+            "attendees": [{"email": "ann@example.com", "name": "Ann"}],
+            "alarms": [15],
+        },
+        as_shown=False,
+    )
+
+    todo = stored_todos(calendar)["Review the draft"]
+
+    assert [attendee["email"] for attendee in todo["attendees"]] == ["ann@example.com"]
+    assert todo["alarms"] == [
+        {
+            "minutes_before": 15,
+            "related": "END",
+            "action": "DISPLAY",
+            "description": "Reminder",
+        }
+    ]
 
 
 def test_todo_with_due_datetime(calendar) -> None:

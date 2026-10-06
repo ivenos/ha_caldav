@@ -66,6 +66,9 @@ class FakeTodoCalendar:
     def todo_by_uid(self, uid: str) -> FakeTodo:
         return self.todo
 
+    def search(self, **kwargs) -> list[FakeTodo]:
+        return [self.todo]
+
 
 COMPLETE = {
     "summary": "Water plants",

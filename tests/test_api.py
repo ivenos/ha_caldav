@@ -899,9 +899,10 @@ def test_a_bulk_delete_checks_every_etag_before_deleting_anything() -> None:
     for uid, tag in (("a", '"a1"'), ("b", '"b1"'), ("c", '"c1"')):
         item = Mock()
         item.props = {"{DAV:}getetag": tag}
+        item.icalendar_component = {"UID": uid}
         items[uid] = item
     calendar = Mock()
-    calendar.todo_by_uid.side_effect = items.__getitem__
+    calendar.search.return_value = list(items.values())
 
     with pytest.raises(Refused, match="etag_conflict"):
         delete_todos(
@@ -958,6 +959,7 @@ def test_ticking_a_canceled_todo_does_not_call_it_done() -> None:
 def test_completing_an_outstanding_todo_still_records_it() -> None:
     todo = _todo("SUMMARY:Paint\r\nSTATUS:NEEDS-ACTION")
     calendar = Mock()
+    calendar.search.return_value = []
     calendar.todo_by_uid.return_value = todo
 
     update_todo(calendar, "uid-1", {"summary": "Paint", "status": "COMPLETED"})
@@ -1059,6 +1061,7 @@ def test_ticking_a_todo_does_not_write_into_the_event_beside_it() -> None:
     todo.icalendar_component = next(iter(instance.walk("VEVENT")))
     written_through(todo)
     calendar = Mock()
+    calendar.search.return_value = []
     calendar.todo_by_uid.return_value = todo
 
     update_todo(calendar, "u", {"summary": "Prepare slides", "status": "COMPLETED"})
@@ -1084,6 +1087,7 @@ def test_a_recurring_todo_with_a_zero_interval_can_still_be_completed() -> None:
     todo.icalendar_component = next(iter(instance.walk("VTODO")))
     written_through(todo)
     calendar = Mock()
+    calendar.search.return_value = []
     calendar.todo_by_uid.return_value = todo
 
     update_todo(calendar, "t", {"summary": "Water plants", "status": "COMPLETED"})
@@ -1140,6 +1144,7 @@ def test_a_todo_edit_moves_only_its_own_sequence() -> None:
     todo.icalendar_component = next(iter(instance.walk("VEVENT")))
     written_through(todo)
     calendar = Mock()
+    calendar.search.return_value = []
     calendar.todo_by_uid.return_value = todo
 
     update_todo(calendar, "u", {"summary": "Prepare slides", "status": "COMPLETED"})
@@ -1244,6 +1249,7 @@ def test_a_rule_naming_a_day_no_month_has_is_refused() -> None:
     todo.icalendar_component = next(iter(instance.walk("VTODO")))
     written_through(todo)
     calendar = Mock()
+    calendar.search.return_value = []
     calendar.todo_by_uid.return_value = todo
 
     update_todo(calendar, "t", {"summary": "Water plants", "status": "COMPLETED"})
@@ -1472,7 +1478,7 @@ def test_ticking_off_a_todo_leaves_the_event_sharing_its_resource() -> None:
     single uid does occur."""
     calendar = Mock()
     resource = _Resource(MIXED_RESOURCE)
-    calendar.todo_by_uid.return_value = resource
+    calendar.search.return_value = [resource]
 
     delete_todos(calendar, ["mixed-1"], {})
 
@@ -1508,14 +1514,12 @@ def test_deleting_the_last_component_removes_the_resource_itself() -> None:
     resource.save.assert_not_called()
 
 
-def test_clearing_a_selection_says_which_item_was_gone_rather_than_scanning() -> None:
+def test_clearing_a_selection_says_which_item_was_gone() -> None:
     calendar = Mock()
-    calendar.todo_by_uid.side_effect = NotFoundError("gone")
+    calendar.search.return_value = []
 
-    with pytest.raises(NotFoundError):
+    with pytest.raises(NotFoundError, match="todo-1"):
         delete_todos(calendar, ["todo-1", "todo-2"], {})
-
-    calendar.search.assert_not_called()
 
 
 def test_a_recurring_todo_with_no_date_at_all_is_simply_closed() -> None:
@@ -1790,6 +1794,7 @@ def test_completing_a_series_listed_behind_its_exception_rolls_the_series() -> N
         Mock(icalendar_instance=instance, icalendar_component=override)
     )
     calendar = Mock()
+    calendar.search.return_value = []
     calendar.todo_by_uid.return_value = todo
 
     update_todo(calendar, "uid-1", {"summary": "Water plants", "status": "COMPLETED"})
@@ -1888,7 +1893,7 @@ def test_deleting_an_object_the_url_missed_is_not_reported_as_done() -> None:
     calendar = Mock()
     todo = caldav.Todo(client=client, data=TODO_BODY, url="https://dav.test/cal/x.ics")
     todo.props[dav.GetEtag.tag] = '"1"'
-    calendar.todo_by_uid.return_value = todo
+    calendar.search.return_value = [todo]
     client.delete_status = 404
 
     with pytest.raises(NotFoundError):

@@ -19,9 +19,10 @@ CalDAV Complete is a Home Assistant integration that connects calendars and to-d
 
 - 🔁 Change a single occurrence, all following ones or the whole series
 - ⏰ Reminders, attendees, meeting links, categories, priority and free/busy
+- 📝 Subtasks, start dates, priority, progress and reminders on to-dos
 - ✅ Recurring to-dos move to their next due date when completed, and to-dos can be reordered
 - 🎨 Calendar colors from the server, unless set in Home Assistant
-- 🔎 Actions to search, import, export and move events and to manage calendars
+- 🔎 Actions to search, import, export and move events and to-dos and to manage calendars
 - 🛡️ Writes check for changes made on the server in the meantime, and read-only calendars stay read-only
 - ⚡ On servers that report changes, a calendar is fetched in full when something changed and otherwise once an hour
 
@@ -54,7 +55,7 @@ Each calendar gets a `calendar.<calendar>` entity for its events and a `todo.<ca
 
 ## Actions
 
-All actions except `create_calendar` and `delete_calendar` target a calendar entity.
+The event actions target a calendar entity and the to-do actions a to-do list entity. `import_ics`, `export_ics` and `set_calendar_color` target the calendar entity, or the to-do list entity of a calendar that holds no events. `create_calendar` and `delete_calendar` take the account.
 
 | Action | What it does |
 |---|---|
@@ -63,12 +64,17 @@ All actions except `create_calendar` and `delete_calendar` target a calendar ent
 | `ha_caldav.search_events` | Search by summary, description, location, category, status or uid, returns `events`, one per occurrence within a start and end |
 | `ha_caldav.get_free_busy` | Busy periods in a time window, returns `periods` |
 | `ha_caldav.move_event` | Move or copy an event to another calendar |
+| `ha_caldav.create_todo` / `update_todo` | Create or change a to-do with a parent, start, due date, recurrence, status, percent complete, priority, categories, location, URL, classification, attendees and alarms. Both take the fields of `todo.add_item` and `todo.update_item` and find an item by its name or UID |
+| `ha_caldav.search_todos` | The to-dos of a list with all of these properties and `parent_uid`, the UID of the to-do each is a subtask of, optionally filtered by text or status, returns `todos` |
+| `ha_caldav.move_todo` | Move or copy a to-do and its subtasks to another to-do list |
 | `ha_caldav.import_ics` / `export_ics` | Import or export iCalendar data, the export returns `ics` |
 | `ha_caldav.set_calendar_color` | Set the calendar color on the server |
 | `ha_caldav.respond_to_invitation` | Accept, decline or tentatively accept an invitation |
 | `ha_caldav.create_calendar` / `delete_calendar` | Create or delete a calendar, administrators only |
 
 The upcoming event has the attributes `url`, `status`, `transparency`, `classification`, `priority`, `categories`, `attendees`, `organizer` and `alarms`, which are not recorded in the history.
+
+A to-do list shows subtasks as items of their own. Completing or canceling a to-do does the same to its open subtasks, reopening one reopens the completed or canceled to-dos it is a subtask of, and deleting one deletes its subtasks. A to-do that is in progress shows as open and a canceled one as completed.
 
 ## Compatibility
 

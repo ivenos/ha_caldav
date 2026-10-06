@@ -150,6 +150,9 @@
     }
   },
   "exceptions": {
+    "alarm_needs_date": {
+      "message": "Eine Erinnerung braucht ein Start- oder Fälligkeitsdatum, von dem aus sie zählt."
+    },
     "allday_timed_switch": {
       "message": "Eine Serie lässt sich nicht zwischen ganztägig und zeitgebunden umstellen."
     },
@@ -213,6 +216,12 @@
     "occurrence_not_found": {
       "message": "Diese Serie hat keine Wiederholung am {recurrence_id}."
     },
+    "parent_cycle": {
+      "message": "Eine Aufgabe kann keine Unteraufgabe von sich selbst oder von einer ihrer eigenen Unteraufgaben sein."
+    },
+    "parent_not_found": {
+      "message": "Auf dieser Liste gibt es keine Aufgabe {parent}, unter die sie gehören könnte."
+    },
     "ranged_override": {
       "message": "Diese Serie enthält eine Ausnahme, die ab einer Wiederholung für alle folgenden gilt. Bearbeite sie in der App, die sie erstellt hat."
     },
@@ -228,11 +237,17 @@
     "rrule_mismatch": {
       "message": "Der neue Start fällt nicht auf einen Zeitpunkt, den die Wiederholungsregel erzeugt."
     },
+    "rrule_needs_date": {
+      "message": "Eine wiederkehrende Aufgabe braucht ein Start- oder Fälligkeitsdatum."
+    },
     "rrule_too_dense": {
       "message": "Die Wiederholungsregel erzeugt zu viele Wiederholungen, um sie durchzugehen."
     },
     "same_calendar": {
       "message": "Der Termin liegt bereits in {name}. Wähle einen anderen Kalender."
+    },
+    "same_todo_list": {
+      "message": "Die Aufgabe liegt bereits auf {name}. Wähle eine andere Liste."
     },
     "server_error": {
       "message": "Der Aufruf an den CalDAV-Server ist fehlgeschlagen ({action}). Einzelheiten stehen im Log."
@@ -251,6 +266,9 @@
     },
     "unknown_todo_item": {
       "message": "Auf dieser Liste gibt es keine Aufgabe {uid}."
+    },
+    "unknown_todo_list": {
+      "message": "{entity_id} ist keine To-do-Liste eines geladenen CalDAV-Kontos."
     },
     "unreadable_lines": {
       "message": "Das Dokument enthält Zeilen, die sich nicht lesen lassen: {lines}"
@@ -303,6 +321,23 @@
     "recurrence_range": {
       "options": {
         "thisandfuture": "Diese und alle folgenden Wiederholungen"
+      }
+    },
+    "todo_status": {
+      "options": {
+        "needs_action": "Offen",
+        "in_process": "In Arbeit",
+        "completed": "Erledigt",
+        "cancelled": "Abgebrochen"
+      }
+    },
+    "todo_search_field": {
+      "options": {
+        "summary": "Name",
+        "description": "Beschreibung",
+        "location": "Ort",
+        "category": "Kategorie",
+        "uid": "UID"
       }
     }
   },
@@ -548,6 +583,214 @@
         "keep_original": {
           "name": "Original behalten",
           "description": "Kopieren statt verschieben, der Termin bleibt im Quellkalender."
+        }
+      }
+    },
+    "create_todo": {
+      "name": "Aufgabe anlegen",
+      "description": "Legt eine Aufgabe mit den Eigenschaften an, die die Standard-To-do-Aktion nicht setzen kann, auch als Unteraufgabe.",
+      "fields": {
+        "item": {
+          "name": "Name der Aufgabe",
+          "description": "Der Name der Aufgabe."
+        },
+        "due_date": {
+          "name": "Fälligkeitsdatum",
+          "description": "Der Tag, an dem die Aufgabe fällig ist."
+        },
+        "due_datetime": {
+          "name": "Fälligkeitszeitpunkt",
+          "description": "Der Zeitpunkt, zu dem die Aufgabe fällig ist."
+        },
+        "start_date": {
+          "name": "Startdatum",
+          "description": "Der Tag, an dem die Aufgabe beginnt. Eine Fälligkeit daneben muss dann auch ein Tag sein."
+        },
+        "start_datetime": {
+          "name": "Startzeitpunkt",
+          "description": "Wann die Aufgabe beginnt. Eine Fälligkeit daneben muss dann auch eine Uhrzeit haben."
+        },
+        "description": {
+          "name": "Beschreibung",
+          "description": "Die Notizen zur Aufgabe."
+        },
+        "parent": {
+          "name": "Unteraufgabe von",
+          "description": "Name oder UID der Aufgabe, zu der diese als Unteraufgabe gehört."
+        },
+        "rrule": {
+          "name": "Wiederholungsregel",
+          "description": "Eine RRULE nach RFC 5545, ohne den Eigenschaftsnamen. Braucht ein Start- oder Fälligkeitsdatum."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Ob die Aufgabe offen, in Arbeit, erledigt oder abgebrochen ist."
+        },
+        "percent_complete": {
+          "name": "Fortschritt in Prozent",
+          "description": "Wie weit die Aufgabe ist, 0 bis 100. Setzt den passenden Status, wenn keiner angegeben ist."
+        },
+        "priority": {
+          "name": "Priorität",
+          "description": "0 für undefiniert, 1 ist die höchste, 9 die niedrigste."
+        },
+        "categories": {
+          "name": "Kategorien",
+          "description": "Eine Liste von Kategorienamen."
+        },
+        "location": {
+          "name": "Ort",
+          "description": "Wo die Aufgabe stattfindet."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Ein Link zur Aufgabe."
+        },
+        "classification": {
+          "name": "Vertraulichkeit",
+          "description": "Wie privat die Aufgabe ist."
+        },
+        "organizer": {
+          "name": "Organisator",
+          "description": "Die E-Mail-Adresse, die die Aufgabe organisiert."
+        },
+        "attendees": {
+          "name": "Teilnehmer",
+          "description": "Wem die Aufgabe zugewiesen ist: E-Mail-Adressen oder Objekte mit email, name, role, status und rsvp."
+        },
+        "alarms": {
+          "name": "Erinnerungen",
+          "description": "Minuten vor dem Start, ohne Start vor der Fälligkeit, oder Objekte mit minutes_before, action, related und description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Erweitert",
+          "description": "Eigenschaften über Name und Fälligkeit hinaus."
+        }
+      }
+    },
+    "update_todo": {
+      "name": "Aufgabe ändern",
+      "description": "Ändert beliebige Eigenschaften einer Aufgabe, auch solche, an die die Standard-To-do-Aktion nicht herankommt. Ein leer angegebenes Feld wird geleert.",
+      "fields": {
+        "item": {
+          "name": "Name oder UID der Aufgabe",
+          "description": "Der Name der zu ändernden Aufgabe, oder ihre UID, wenn mehrere gleich heißen."
+        },
+        "rename": {
+          "name": "Umbenennen",
+          "description": "Der neue Name der Aufgabe."
+        },
+        "due_date": {
+          "name": "Fälligkeitsdatum",
+          "description": "Der Tag, an dem die Aufgabe fällig ist."
+        },
+        "due_datetime": {
+          "name": "Fälligkeitszeitpunkt",
+          "description": "Der Zeitpunkt, zu dem die Aufgabe fällig ist."
+        },
+        "start_date": {
+          "name": "Startdatum",
+          "description": "Der Tag, an dem die Aufgabe beginnt. Eine Fälligkeit daneben muss dann auch ein Tag sein."
+        },
+        "start_datetime": {
+          "name": "Startzeitpunkt",
+          "description": "Wann die Aufgabe beginnt. Eine Fälligkeit daneben muss dann auch eine Uhrzeit haben."
+        },
+        "description": {
+          "name": "Beschreibung",
+          "description": "Die Notizen zur Aufgabe."
+        },
+        "parent": {
+          "name": "Unteraufgabe von",
+          "description": "Name oder UID der Aufgabe, zu der diese als Unteraufgabe wechselt. Leer macht sie zu einer Aufgabe der obersten Ebene."
+        },
+        "rrule": {
+          "name": "Wiederholungsregel",
+          "description": "Eine RRULE nach RFC 5545, ohne den Eigenschaftsnamen. Braucht ein Start- oder Fälligkeitsdatum."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Ob die Aufgabe offen, in Arbeit, erledigt oder abgebrochen ist."
+        },
+        "percent_complete": {
+          "name": "Fortschritt in Prozent",
+          "description": "Wie weit die Aufgabe ist, 0 bis 100. Setzt den passenden Status, wenn keiner angegeben ist."
+        },
+        "priority": {
+          "name": "Priorität",
+          "description": "0 für undefiniert, 1 ist die höchste, 9 die niedrigste."
+        },
+        "categories": {
+          "name": "Kategorien",
+          "description": "Eine Liste von Kategorienamen."
+        },
+        "location": {
+          "name": "Ort",
+          "description": "Wo die Aufgabe stattfindet."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Ein Link zur Aufgabe."
+        },
+        "classification": {
+          "name": "Vertraulichkeit",
+          "description": "Wie privat die Aufgabe ist."
+        },
+        "organizer": {
+          "name": "Organisator",
+          "description": "Die E-Mail-Adresse, die die Aufgabe organisiert."
+        },
+        "attendees": {
+          "name": "Teilnehmer",
+          "description": "Wem die Aufgabe zugewiesen ist: E-Mail-Adressen oder Objekte mit email, name, role, status und rsvp."
+        },
+        "alarms": {
+          "name": "Erinnerungen",
+          "description": "Minuten vor dem Start, ohne Start vor der Fälligkeit, oder Objekte mit minutes_before, action, related und description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Erweitert",
+          "description": "Eigenschaften über Name und Fälligkeit hinaus."
+        }
+      }
+    },
+    "search_todos": {
+      "name": "Aufgaben suchen",
+      "description": "Gibt die Aufgaben der Liste mit allen gespeicherten Eigenschaften zurück und mit der Aufgabe, zu der jede als Unteraufgabe gehört.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "Nur Aufgaben zurückgeben, die diesen Text enthalten. Leer lassen für alle."
+        },
+        "field": {
+          "name": "Feld",
+          "description": "In welcher Eigenschaft gesucht wird."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Nur Aufgaben in einem dieser Zustände zurückgeben."
+        }
+      }
+    },
+    "move_todo": {
+      "name": "Aufgabe verschieben",
+      "description": "Verschiebt eine Aufgabe samt ihren Unteraufgaben auf eine andere To-do-Liste.",
+      "fields": {
+        "item": {
+          "name": "Name oder UID der Aufgabe",
+          "description": "Die zu verschiebende Aufgabe."
+        },
+        "target_entity_id": {
+          "name": "Zielliste",
+          "description": "Die To-do-Liste, auf die die Aufgabe verschoben wird."
+        },
+        "keep_original": {
+          "name": "Original behalten",
+          "description": "Kopieren statt verschieben, die Aufgabe bleibt auf der Quellliste."
         }
       }
     },

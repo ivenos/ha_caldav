@@ -25,7 +25,12 @@ from icalendar import (
     vRecur,
 )
 
-from .const import EVENT_ATTRIBUTES, SORT_ORDER_PROPERTY
+from .const import (
+    ATTR_PARENT_UID,
+    ATTR_PERCENT_COMPLETE,
+    EVENT_ATTRIBUTES,
+    SORT_ORDER_PROPERTY,
+)
 from .errors import NETWORK_ERRORS, WRITE_ERRORS, Refused, rejected
 from .event import (
     apply_extras,
@@ -38,7 +43,15 @@ from .event import (
     rule_from,
     shifted,
     start_of,
-    to_utc,
+)
+from .task import (
+    Tree,
+    apply_fields,
+    closed,
+    parent_uid,
+    set_parent,
+    set_status,
+    status_asked,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -175,15 +188,33 @@ def create_event(
     save_document(calendar, _zoned(instance, vevent), as_todo=False)
 
 
-def create_todo(calendar: caldav.Calendar, data: dict[str, Any]) -> None:
-    """Create a new to-do item."""
-    status = data.pop("status", None)
-    ics = vcal.create_ical(objtype="VTODO", uid=str(uuid4()), **data)
+def create_todo(
+    calendar: caldav.Calendar,
+    data: dict[str, Any],
+    own_address: str | None = None,
+    as_shown: bool = True,
+) -> None:
+    """Create a new to-do item, as a subtask if it names a parent.
+
+    As shown is core's item, which knows two of the four states.
+    """
+    ics = vcal.create_ical(
+        objtype="VTODO", uid=str(uuid4()), summary=data.get("summary") or ""
+    )
     instance = ICalCalendar.from_ical(ics)
     vtodo = next(iter(instance.walk("VTODO")))
-    if status:
-        # An item created as done needs the completion properties too.
-        _set_status(vtodo, status)
+    apply_fields(
+        vtodo,
+        {key: value for key, value in data.items() if key != "summary"},
+        own_address,
+        as_shown,
+    )
+    if (parent := parent_uid(vtodo)) is not None:
+        by_uid, tree = _todo_tree(calendar)
+        if parent not in tree.parents:
+            raise Refused("parent_not_found", parent=parent)
+        if not closed(vtodo):
+            _reopen(by_uid, [parent, *tree.ancestors(parent)])
     save_document(calendar, _zoned(instance, vtodo), as_todo=True)
 
 
@@ -195,73 +226,112 @@ def _zoned(instance: ICalCalendar, component: Any) -> ICalCalendar:
     return _document([component], {}, instance.get("PRODID"))
 
 
+# What rolling a recurring to-do forward decides by itself.
+_ROLLED = frozenset({"due", "start", "status", ATTR_PERCENT_COMPLETE})
+
+
 def update_todo(
     calendar: caldav.Calendar,
     uid: str,
     data: dict[str, Any],
     expected_etag: str | None = None,
+    own_address: str | None = None,
+    as_shown: bool = True,
 ) -> None:
-    """Apply changed fields to an existing to-do item."""
+    """Apply changed fields to an existing to-do item.
+
+    As shown is core's whole item, so a field it left out was cleared.
+    Closing an item closes its open subtasks and reopening it reopens the
+    closed parents above it, those first: a call that failed halfway
+    finishes when it is made again.
+    """
+    if as_shown:
+        data = {"summary": "", "due": None, "description": None, **data}
     todo = object_by_uid(calendar, uid, todo=True)
     tag = held_etag(todo, expected_etag)
     vtodo = collapse_repeated(vtodo_of(todo))
+    was_closed = closed(vtodo)
     # Only on the move to done: core sends the status along with every edit.
-    settled = str(vtodo.get("STATUS", "")).upper() in _SETTLED
-    if (
-        data.get("status") == "COMPLETED"
-        and not settled
-        and "RRULE" in vtodo
-        and _roll_todo(vtodo)
-    ):
-        # The roll owns DUE and DTSTART.
-        _set_text(vtodo, data)
-        stamp(vtodo)
-        _save_todo(todo, tag)
-        return
-    _set_text(vtodo, data)
-    if status := data.get("status"):
-        _set_status(vtodo, status)
-    # Not through caldav's set_due, which writes onto the first component
-    # that is not a timezone, event or not.
-    if (due := data.get("due")) is not None:
-        # RFC 5545 forbids DURATION alongside DUE.
-        replace(vtodo, "duration", None)
-        _set_due(vtodo, due)
-    else:
-        vtodo.pop("DUE", None)
-    _check_todo_span(vtodo)
+    closing = status_asked(data) == "COMPLETED" and not was_closed
+    if closing and "RRULE" in vtodo and _roll_todo(vtodo):
+        data = {key: value for key, value in data.items() if key not in _ROLLED}
+    reparented = ATTR_PARENT_UID in data and data[ATTR_PARENT_UID] != parent_uid(vtodo)
+    apply_fields(vtodo, data, own_address, as_shown)
+    closing = closing or (closed(vtodo) and not was_closed)
+    reopening = was_closed and not closed(vtodo)
+    if reparented or closing or reopening:
+        by_uid, tree = _todo_tree(calendar)
+        parent = parent_uid(vtodo)
+        if reparented and parent is not None:
+            if parent not in tree.parents:
+                raise Refused("parent_not_found", parent=parent)
+            if parent == uid or parent in tree.descendants(uid):
+                raise Refused("parent_cycle")
+            if (
+                not (closing or closed(vtodo))
+                and _status(by_uid[parent]) == "COMPLETED"
+            ):
+                closing = True
+                if not ("RRULE" in vtodo and _roll_todo(vtodo)):
+                    set_status(vtodo, "COMPLETED")
+        if closing:
+            canceled = str(vtodo.get("STATUS", "")).upper() == "CANCELLED"
+            _close_below(by_uid, tree, uid, "CANCELLED" if canceled else "COMPLETED")
+        elif reopening and parent in tree.parents:
+            _reopen(by_uid, [parent, *tree.ancestors(parent)])
     stamp(vtodo)
     _save_todo(todo, tag)
 
 
-def _set_due(vtodo: Any, due: Any) -> None:
-    """Write a due time in the zone, or the floating form, already stored.
+def _todo_tree(calendar: caldav.Calendar) -> tuple[dict[str, Any], Tree]:
+    """Read a whole to-do list: the resource of every uid, and how they nest."""
+    by_uid: dict[str, Any] = {}
+    parents: dict[str, str | None] = {}
+    for item, uid in _scan(calendar, todo=True):
+        by_uid[uid] = item
+        try:
+            parents[uid] = parent_uid(vtodo_of(item))
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Leaving an unreadable to-do out of the tree: %s", err)
+    return by_uid, Tree(parents)
 
-    Core hands every time back in its own zone.
+
+def _status(resource: Any) -> str:
+    return str(vtodo_of(resource).get("STATUS", "")).upper()
+
+
+def _close_below(by_uid: dict[str, Any], tree: Tree, uid: str, status: str) -> None:
+    """Close the open subtasks of an item, and theirs, the deepest first.
+
+    What sits below a subtask that was closed already is left as it is.
     """
-    old = vtodo["DUE"].dt if "DUE" in vtodo else None
-    if isinstance(old, datetime) and isinstance(due, datetime):
-        if to_utc(old) == to_utc(due):
+    kept: set[str] = set()
+    open_ones = []
+    for each in tree.descendants(uid):
+        vtodo = collapse_repeated(vtodo_of(by_uid[each]))
+        if tree.parents[each] in kept or closed(vtodo):
+            kept.add(each)
+        else:
+            open_ones.append((by_uid[each], vtodo))
+    for resource, vtodo in reversed(open_ones):
+        tag = held_etag(resource, None)
+        if not (status == "COMPLETED" and "RRULE" in vtodo and _roll_todo(vtodo)):
+            set_status(vtodo, status)
+        stamp(vtodo)
+        _save_todo(resource, tag)
+
+
+def _reopen(by_uid: dict[str, Any], uids: list[str]) -> None:
+    """Reopen the closed parents above an item, up to the first open one."""
+    for uid in uids:
+        resource = by_uid[uid]
+        vtodo = collapse_repeated(vtodo_of(resource))
+        if not closed(vtodo):
             return
-        if old.tzinfo is None:
-            due = dt_util.as_local(due).replace(tzinfo=None)
-        elif str(due.tzinfo) != str(old.tzinfo):
-            due = due.astimezone(old.tzinfo)
-    replace(vtodo, "due", due)
-
-
-def _check_todo_span(vtodo: Any) -> None:
-    """RFC 5545: DUE is later in time than DTSTART, and shares its value type.
-
-    Another client may have set a DTSTART that core never shows.
-    """
-    if "DTSTART" not in vtodo or "DUE" not in vtodo:
-        return
-    start, due = vtodo["DTSTART"].dt, vtodo["DUE"].dt
-    if isinstance(start, datetime) != isinstance(due, datetime):
-        raise Refused("mixed_time_types")
-    if to_utc(due) < to_utc(start):
-        raise Refused("end_before_start")
+        tag = held_etag(resource, None)
+        set_status(vtodo, "NEEDS-ACTION")
+        stamp(vtodo)
+        _save_todo(resource, tag)
 
 
 def vtodo_of(resource: Any) -> Any:
@@ -307,37 +377,6 @@ def _save_todo(todo: Any, tag: str | None) -> None:
     # A due date may reference a zone the stored item never defined.
     todo.icalendar_instance = zoned_document(todo.icalendar_instance)
     put_resource(todo, tag)
-
-
-def _set_text(vtodo: Any, data: dict[str, Any]) -> None:
-    vtodo["SUMMARY"] = data.get("summary") or ""
-    if description := data.get("description"):
-        vtodo["DESCRIPTION"] = description
-    else:
-        vtodo.pop("DESCRIPTION", None)
-
-
-# RFC 5545 knows four states where Home Assistant has two.
-_SETTLED = frozenset({"COMPLETED", "CANCELLED"})
-
-
-def _set_status(vtodo: Any, status: str) -> None:
-    """Set the status and the completion properties RFC 5545 pairs with it.
-
-    Only when it moves between the two states core has; a rename carries the
-    folded value back.
-    """
-    current = str(vtodo.get("STATUS", "NEEDS-ACTION")).upper()
-    if (current in _SETTLED) == (status in _SETTLED):
-        return
-    vtodo["STATUS"] = status
-    if status == "COMPLETED":
-        if "COMPLETED" not in vtodo:
-            vtodo.add("COMPLETED", datetime.now(tz=UTC))
-        vtodo["PERCENT-COMPLETE"] = 100
-        return
-    for done in ("COMPLETED", "PERCENT-COMPLETE"):
-        vtodo.pop(done, None)
 
 
 def reorder_todos(calendar: caldav.Calendar, uids: list[str]) -> None:
@@ -456,34 +495,70 @@ def delete_components(resource: Any, kind: str, tag: str | None = None) -> None:
 def delete_todos(
     calendar: caldav.Calendar, uids: list[str], etags: dict[str, str]
 ) -> None:
-    """Delete several to-do items in one pass, every etag checked first."""
-    found = _todos_by_uid(calendar, uids)
-    tags = {uid: held_etag(todo, etags.get(uid)) for uid, todo in found.items()}
-    for uid, todo in found.items():
-        delete_components(todo, "VTODO", tags[uid])
-
-
-def _todos_by_uid(calendar: caldav.Calendar, uids: list[str]) -> dict[str, Any]:
-    """Return a resource per uid, read in one go past a few or once refused."""
-    found: dict[str, Any] = {}
-    if len(uids) <= _SCAN_THRESHOLD:
-        for uid in uids:
-            try:
-                found[uid] = _filtered(calendar, uid, todo=True)
-            except Exception as err:
-                if not _uid_search_refused(err):
-                    raise
-                break
-        else:
-            return found
-    scanned = {stored: item for item, stored in _scan(calendar, todo=True)}
+    """Delete to-do items and their subtasks, every etag checked first."""
+    by_uid, tree = _todo_tree(calendar)
+    doomed: dict[str, None] = {}
     for uid in uids:
-        if uid in found:
-            continue
-        if uid not in scanned:
+        if uid not in by_uid:
             raise NotFoundError(f"{uid} not found on server")
-        found[uid] = scanned[uid]
-    return found
+        # The deepest first, so what a failure leaves behind still has its parent.
+        doomed.update(dict.fromkeys([*reversed(tree.descendants(uid)), uid]))
+    tags = {uid: held_etag(by_uid[uid], etags.get(uid)) for uid in doomed}
+    for uid in doomed:
+        delete_components(by_uid[uid], "VTODO", tags[uid])
+
+
+def move_todo(
+    source: caldav.Calendar,
+    target: caldav.Calendar,
+    uid: str,
+    keep_original: bool,
+) -> None:
+    """Copy a to-do and its subtasks to another list, optionally removing them here.
+
+    The parent it had stays behind, so there it is a top-level item.
+    """
+    by_uid, tree = _todo_tree(source)
+    if uid not in by_uid:
+        raise NotFoundError(f"{uid} not found on server")
+    moved = [uid, *tree.descendants(uid)]
+    tags = {each: held_etag(by_uid[each], None) for each in moved}
+    # RFC 4791 gives one uid one resource, and caldav names it after the uid.
+    if clashing := sorted(_already_there(target, set(moved))):
+        raise Refused("uid_clash", uids=", ".join(clashing[:5]))
+    copies: dict[str, Any] = {}
+    try:
+        for each in moved:
+            instance = ICalCalendar.from_ical(by_uid[each].data)
+            vtodos = instance.walk("VTODO")
+            if not vtodos:
+                raise Refused("no_todo_in_object")
+            if each == uid:
+                for vtodo in vtodos:
+                    set_parent(vtodo, None)
+            zones = {
+                str(zone.get("TZID", "")): zone for zone in instance.walk("VTIMEZONE")
+            }
+            copies[each] = save_document(
+                target, _document(vtodos, zones, instance.get("PRODID")), as_todo=True
+            )
+    except Exception:
+        for copy in copies.values():
+            _undo(copy)
+        raise
+    if keep_original:
+        return
+    pending = list(moved)
+    try:
+        while pending:
+            delete_components(by_uid[pending[-1]], "VTODO", tags[pending[-1]])
+            pending.pop()
+    except WRITE_ERRORS:
+        # The server may have deleted it before the timeout.
+        for each in pending:
+            if _still_there(source, each, todo=True):
+                _undo(copies[each])
+        raise
 
 
 def _comparable_etag(value: Any) -> str:
@@ -608,10 +683,10 @@ def move_event(
         raise
 
 
-def _still_there(calendar: caldav.Calendar, uid: str) -> bool:
+def _still_there(calendar: caldav.Calendar, uid: str, todo: bool = False) -> bool:
     """Return whether the uid is certainly still on the calendar."""
     try:
-        object_by_uid(calendar, uid)
+        object_by_uid(calendar, uid, todo)
     except NETWORK_ERRORS:
         return False
     return True

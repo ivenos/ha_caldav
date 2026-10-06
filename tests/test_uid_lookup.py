@@ -310,7 +310,7 @@ def test_deleting_several_todos_forwards_each_etag() -> None:
     wanted.props = {}
     wanted.load.side_effect = lambda: wanted.props.update({dav.GetEtag.tag: '"fresh"'})
     calendar = _calendar(None)
-    calendar.todo_by_uid.return_value = wanted
+    calendar.search.return_value = [wanted]
 
     with pytest.raises(Refused) as refusal:
         delete_todos(calendar, ["evt-1"], {"evt-1": '"stale"'})

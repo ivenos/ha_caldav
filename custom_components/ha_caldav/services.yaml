@@ -279,11 +279,263 @@ move_event:
       selector:
         boolean:
 
-import_ics:
+create_todo:
   target:
     entity:
       integration: ha_caldav
-      domain: calendar
+      domain: todo
+  fields:
+    item:
+      required: true
+      example: Milk
+      selector:
+        text:
+    due_date:
+      example: "2026-08-06"
+      selector:
+        date:
+    due_datetime:
+      example: "2026-08-06 18:00:00"
+      selector:
+        datetime:
+    start_date:
+      example: "2026-08-05"
+      selector:
+        date:
+    start_datetime:
+      example: "2026-08-06 09:00:00"
+      selector:
+        datetime:
+    description:
+      selector:
+        text:
+          multiline: true
+    parent:
+      example: Groceries
+      selector:
+        text:
+    rrule:
+      example: FREQ=WEEKLY;BYDAY=MO
+      selector:
+        text:
+    advanced:
+      collapsed: true
+      fields:
+        status:
+          selector:
+            select:
+              translation_key: todo_status
+              options:
+                - needs_action
+                - in_process
+                - completed
+                - cancelled
+        percent_complete:
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+        priority:
+          selector:
+            number:
+              min: 0
+              max: 9
+              mode: box
+        categories:
+          example: '["home", "errands"]'
+          selector:
+            text:
+              multiple: true
+        location:
+          selector:
+            text:
+        url:
+          example: https://example.com/recipe
+          selector:
+            text:
+        classification:
+          selector:
+            select:
+              translation_key: classification
+              options:
+                - public
+                - private
+                - confidential
+        organizer:
+          example: me@example.com
+          selector:
+            text:
+        attendees:
+          example: '[{"email": "a@example.com", "name": "Ann"}]'
+          selector:
+            object:
+        alarms:
+          example: '[{"minutes_before": 15}]'
+          selector:
+            object:
+
+update_todo:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: todo
+  fields:
+    item:
+      required: true
+      example: Milk
+      selector:
+        text:
+    rename:
+      example: Oat milk
+      selector:
+        text:
+    due_date:
+      example: "2026-08-06"
+      selector:
+        date:
+    due_datetime:
+      example: "2026-08-06 18:00:00"
+      selector:
+        datetime:
+    start_date:
+      example: "2026-08-05"
+      selector:
+        date:
+    start_datetime:
+      example: "2026-08-06 09:00:00"
+      selector:
+        datetime:
+    description:
+      selector:
+        text:
+          multiline: true
+    parent:
+      example: Groceries
+      selector:
+        text:
+    rrule:
+      example: FREQ=WEEKLY;BYDAY=MO
+      selector:
+        text:
+    advanced:
+      collapsed: true
+      fields:
+        status:
+          selector:
+            select:
+              translation_key: todo_status
+              options:
+                - needs_action
+                - in_process
+                - completed
+                - cancelled
+        percent_complete:
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+        priority:
+          selector:
+            number:
+              min: 0
+              max: 9
+              mode: box
+        categories:
+          example: '["home", "errands"]'
+          selector:
+            text:
+              multiple: true
+        location:
+          selector:
+            text:
+        url:
+          example: https://example.com/recipe
+          selector:
+            text:
+        classification:
+          selector:
+            select:
+              translation_key: classification
+              options:
+                - public
+                - private
+                - confidential
+        organizer:
+          example: me@example.com
+          selector:
+            text:
+        attendees:
+          example: '[{"email": "a@example.com", "name": "Ann"}]'
+          selector:
+            object:
+        alarms:
+          example: '[{"minutes_before": 15}]'
+          selector:
+            object:
+
+search_todos:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: todo
+  fields:
+    text:
+      example: milk
+      selector:
+        text:
+    field:
+      default: summary
+      selector:
+        select:
+          translation_key: todo_search_field
+          options:
+            - summary
+            - description
+            - location
+            - category
+            - uid
+    status:
+      selector:
+        select:
+          multiple: true
+          translation_key: todo_status
+          options:
+            - needs_action
+            - in_process
+            - completed
+            - cancelled
+
+move_todo:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: todo
+  fields:
+    item:
+      required: true
+      example: Groceries
+      selector:
+        text:
+    target_entity_id:
+      required: true
+      selector:
+        entity:
+          integration: ha_caldav
+          domain: todo
+    keep_original:
+      default: false
+      selector:
+        boolean:
+
+import_ics:
+  target:
+    entity:
+      - integration: ha_caldav
+        domain: calendar
+      - integration: ha_caldav
+        domain: todo
   fields:
     ics:
       required: true
@@ -294,8 +546,10 @@ import_ics:
 export_ics:
   target:
     entity:
-      integration: ha_caldav
-      domain: calendar
+      - integration: ha_caldav
+        domain: calendar
+      - integration: ha_caldav
+        domain: todo
   fields:
     uid:
       selector:
@@ -304,8 +558,10 @@ export_ics:
 set_calendar_color:
   target:
     entity:
-      integration: ha_caldav
-      domain: calendar
+      - integration: ha_caldav
+        domain: calendar
+      - integration: ha_caldav
+        domain: todo
   fields:
     color:
       required: true

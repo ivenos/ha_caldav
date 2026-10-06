@@ -150,6 +150,9 @@
     }
   },
   "exceptions": {
+    "alarm_needs_date": {
+      "message": "Un recordatorio necesita una fecha de inicio o de vencimiento desde la que contar."
+    },
     "allday_timed_switch": {
       "message": "Una serie recurrente no puede pasar de ser de todo el día a tener hora, ni al revés."
     },
@@ -213,6 +216,12 @@
     "occurrence_not_found": {
       "message": "Esta serie no tiene ninguna ocurrencia el {recurrence_id}."
     },
+    "parent_cycle": {
+      "message": "Una tarea no puede ser subtarea de sí misma ni de una de sus propias subtareas."
+    },
+    "parent_not_found": {
+      "message": "En esta lista no hay ninguna tarea {parent} de la que pueda depender."
+    },
     "ranged_override": {
       "message": "Esta serie tiene una excepción que se aplica a partir de una ocurrencia. Edítala en la aplicación que la creó."
     },
@@ -228,11 +237,17 @@
     "rrule_mismatch": {
       "message": "El nuevo inicio no es una de las fechas que genera la regla de recurrencia."
     },
+    "rrule_needs_date": {
+      "message": "Una tarea periódica necesita una fecha de inicio o de vencimiento."
+    },
     "rrule_too_dense": {
       "message": "La regla de recurrencia genera demasiadas ocurrencias para recorrerlas."
     },
     "same_calendar": {
       "message": "El evento ya está en {name}. Elige otro calendario."
+    },
+    "same_todo_list": {
+      "message": "La tarea ya está en {name}. Elige otra lista."
     },
     "server_error": {
       "message": "La llamada al servidor CalDAV ha fallado ({action}). El registro tiene los detalles."
@@ -251,6 +266,9 @@
     },
     "unknown_todo_item": {
       "message": "En esta lista no hay ninguna tarea {uid}."
+    },
+    "unknown_todo_list": {
+      "message": "{entity_id} no es una lista de tareas de una cuenta CalDAV cargada."
     },
     "unreadable_lines": {
       "message": "El documento contiene líneas que no se pueden leer: {lines}"
@@ -303,6 +321,23 @@
     "recurrence_range": {
       "options": {
         "thisandfuture": "Esta y todas las posteriores"
+      }
+    },
+    "todo_status": {
+      "options": {
+        "needs_action": "Sin empezar",
+        "in_process": "En curso",
+        "completed": "Completada",
+        "cancelled": "Cancelada"
+      }
+    },
+    "todo_search_field": {
+      "options": {
+        "summary": "Nombre",
+        "description": "Descripción",
+        "location": "Ubicación",
+        "category": "Categoría",
+        "uid": "UID"
       }
     }
   },
@@ -548,6 +583,214 @@
         "keep_original": {
           "name": "Conservar el original",
           "description": "Copiar en vez de mover, el evento permanece en el calendario de origen."
+        }
+      }
+    },
+    "create_todo": {
+      "name": "Crear tarea",
+      "description": "Crea una tarea con las propiedades que la acción de tareas estándar no puede establecer, también como subtarea.",
+      "fields": {
+        "item": {
+          "name": "Nombre de la tarea",
+          "description": "El nombre de la tarea."
+        },
+        "due_date": {
+          "name": "Fecha de vencimiento",
+          "description": "El día en que vence la tarea."
+        },
+        "due_datetime": {
+          "name": "Fecha y hora de vencimiento",
+          "description": "El momento en que vence la tarea."
+        },
+        "start_date": {
+          "name": "Fecha de inicio",
+          "description": "El día en que empieza la tarea. Un vencimiento junto a ella también tiene que ser un día."
+        },
+        "start_datetime": {
+          "name": "Fecha y hora de inicio",
+          "description": "Cuándo empieza la tarea. Un vencimiento junto a ella también tiene que llevar hora."
+        },
+        "description": {
+          "name": "Descripción",
+          "description": "Las notas de la tarea."
+        },
+        "parent": {
+          "name": "Subtarea de",
+          "description": "El nombre o el UID de la tarea de la que esta es subtarea."
+        },
+        "rrule": {
+          "name": "Regla de recurrencia",
+          "description": "Una RRULE según RFC 5545, sin el nombre de la propiedad. Necesita una fecha de inicio o de vencimiento."
+        },
+        "status": {
+          "name": "Estado",
+          "description": "Si la tarea está sin empezar, en curso, completada o cancelada."
+        },
+        "percent_complete": {
+          "name": "Porcentaje completado",
+          "description": "Cuánto se ha avanzado en la tarea, de 0 a 100. Establece el estado correspondiente si no se indica ninguno."
+        },
+        "priority": {
+          "name": "Prioridad",
+          "description": "0 para indefinida, 1 es la más alta y 9 la más baja."
+        },
+        "categories": {
+          "name": "Categorías",
+          "description": "Una lista de nombres de categoría."
+        },
+        "location": {
+          "name": "Ubicación",
+          "description": "Dónde tiene lugar la tarea."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Un enlace de la tarea."
+        },
+        "classification": {
+          "name": "Confidencialidad",
+          "description": "Hasta qué punto es privada la tarea."
+        },
+        "organizer": {
+          "name": "Organizador",
+          "description": "La dirección de correo que organiza la tarea."
+        },
+        "attendees": {
+          "name": "Asistentes",
+          "description": "A quién está asignada la tarea: direcciones de correo, u objetos con email, name, role, status y rsvp."
+        },
+        "alarms": {
+          "name": "Recordatorios",
+          "description": "Minutos antes del inicio, o antes del vencimiento si no lo hay, u objetos con minutes_before, action, related y description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Avanzado",
+          "description": "Propiedades más allá del nombre y el vencimiento."
+        }
+      }
+    },
+    "update_todo": {
+      "name": "Modificar tarea",
+      "description": "Cambia cualquier propiedad de una tarea, incluidas las que la acción de tareas estándar no alcanza. Un campo indicado vacío se borra.",
+      "fields": {
+        "item": {
+          "name": "Nombre o UID de la tarea",
+          "description": "El nombre de la tarea a modificar, o su UID si varias se llaman igual."
+        },
+        "rename": {
+          "name": "Renombrar",
+          "description": "El nuevo nombre de la tarea."
+        },
+        "due_date": {
+          "name": "Fecha de vencimiento",
+          "description": "El día en que vence la tarea."
+        },
+        "due_datetime": {
+          "name": "Fecha y hora de vencimiento",
+          "description": "El momento en que vence la tarea."
+        },
+        "start_date": {
+          "name": "Fecha de inicio",
+          "description": "El día en que empieza la tarea. Un vencimiento junto a ella también tiene que ser un día."
+        },
+        "start_datetime": {
+          "name": "Fecha y hora de inicio",
+          "description": "Cuándo empieza la tarea. Un vencimiento junto a ella también tiene que llevar hora."
+        },
+        "description": {
+          "name": "Descripción",
+          "description": "Las notas de la tarea."
+        },
+        "parent": {
+          "name": "Subtarea de",
+          "description": "El nombre o el UID de la tarea de la que esta pasa a ser subtarea. Vacío la convierte en una tarea de primer nivel."
+        },
+        "rrule": {
+          "name": "Regla de recurrencia",
+          "description": "Una RRULE según RFC 5545, sin el nombre de la propiedad. Necesita una fecha de inicio o de vencimiento."
+        },
+        "status": {
+          "name": "Estado",
+          "description": "Si la tarea está sin empezar, en curso, completada o cancelada."
+        },
+        "percent_complete": {
+          "name": "Porcentaje completado",
+          "description": "Cuánto se ha avanzado en la tarea, de 0 a 100. Establece el estado correspondiente si no se indica ninguno."
+        },
+        "priority": {
+          "name": "Prioridad",
+          "description": "0 para indefinida, 1 es la más alta y 9 la más baja."
+        },
+        "categories": {
+          "name": "Categorías",
+          "description": "Una lista de nombres de categoría."
+        },
+        "location": {
+          "name": "Ubicación",
+          "description": "Dónde tiene lugar la tarea."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Un enlace de la tarea."
+        },
+        "classification": {
+          "name": "Confidencialidad",
+          "description": "Hasta qué punto es privada la tarea."
+        },
+        "organizer": {
+          "name": "Organizador",
+          "description": "La dirección de correo que organiza la tarea."
+        },
+        "attendees": {
+          "name": "Asistentes",
+          "description": "A quién está asignada la tarea: direcciones de correo, u objetos con email, name, role, status y rsvp."
+        },
+        "alarms": {
+          "name": "Recordatorios",
+          "description": "Minutos antes del inicio, o antes del vencimiento si no lo hay, u objetos con minutes_before, action, related y description."
+        }
+      },
+      "sections": {
+        "advanced": {
+          "name": "Avanzado",
+          "description": "Propiedades más allá del nombre y el vencimiento."
+        }
+      }
+    },
+    "search_todos": {
+      "name": "Buscar tareas",
+      "description": "Devuelve las tareas de la lista con todas las propiedades guardadas y con la tarea de la que cada una es subtarea.",
+      "fields": {
+        "text": {
+          "name": "Texto",
+          "description": "Devolver solo las tareas que contienen este texto. Déjalo vacío para todas."
+        },
+        "field": {
+          "name": "Campo",
+          "description": "En qué propiedad buscar."
+        },
+        "status": {
+          "name": "Estado",
+          "description": "Devolver solo las tareas en uno de estos estados."
+        }
+      }
+    },
+    "move_todo": {
+      "name": "Mover tarea",
+      "description": "Mueve una tarea y sus subtareas a otra lista de tareas.",
+      "fields": {
+        "item": {
+          "name": "Nombre o UID de la tarea",
+          "description": "La tarea a mover."
+        },
+        "target_entity_id": {
+          "name": "Lista de destino",
+          "description": "La lista de tareas a la que mover la tarea."
+        },
+        "keep_original": {
+          "name": "Conservar el original",
+          "description": "Copiar en vez de mover, la tarea permanece en la lista de origen."
         }
       }
     },

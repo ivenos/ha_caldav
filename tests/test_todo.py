@@ -141,6 +141,7 @@ def test_completing_stamps_the_completion_properties() -> None:
     from custom_components.ha_caldav.api import update_todo
 
     calendar = Mock()
+    calendar.search.return_value = []
     todo = _dav_todo("SUMMARY:Buy milk\r\nSTATUS:NEEDS-ACTION")
     with patch("custom_components.ha_caldav.api.object_by_uid", return_value=todo):
         update_todo(calendar, "uid-1", {"summary": "Buy milk", "status": "COMPLETED"})
@@ -155,6 +156,7 @@ def test_reopening_clears_the_completion_properties() -> None:
     from custom_components.ha_caldav.api import update_todo
 
     calendar = Mock()
+    calendar.search.return_value = []
     todo = _dav_todo(
         "SUMMARY:Buy milk\r\nSTATUS:COMPLETED\r\n"
         "COMPLETED:20260101T120000Z\r\nPERCENT-COMPLETE:100"
@@ -413,6 +415,7 @@ async def test_completing_a_recurring_task_keeps_a_rename_from_the_same_call(
         "DUE;VALUE=DATE:20260710\r\nRRULE:FREQ=WEEKLY\r\n"
     )
     calendar = Mock()
+    calendar.search.return_value = []
     calendar.todo_by_uid.return_value = todo
 
     update_todo(

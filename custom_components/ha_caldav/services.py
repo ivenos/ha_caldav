@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.auth.permissions.const import POLICY_CONTROL
-from homeassistant.components.calendar import DOMAIN as CALENDAR_DOMAIN
+from homeassistant.components.calendar import DOMAIN as CALENDAR_DOMAIN, CalendarEntity
 from homeassistant.components.todo import DOMAIN as TODO_DOMAIN
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import (
+    HassJob,
+    HassJobType,
     HomeAssistant,
     ServiceCall,
     ServiceResponse,
@@ -19,9 +21,11 @@ from homeassistant.core import (
 )
 from homeassistant.exceptions import ServiceValidationError, Unauthorized, UnknownUser
 from homeassistant.helpers import config_validation as cv, entity_registry as er
+from homeassistant.helpers.entity_platform import async_get_platforms
 from homeassistant.helpers.service import (
     async_register_admin_service,
     async_register_platform_entity_service,
+    entity_service_call,
 )
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
@@ -32,6 +36,7 @@ from .api import (
     export_ics,
     import_ics,
     move_event,
+    move_todo,
     respond_to_invitation,
     set_calendar_color,
 )
@@ -48,10 +53,15 @@ from .const import (
     ATTR_EVENT_STATUS,
     ATTR_FIELD,
     ATTR_ICS,
+    ATTR_ITEM,
     ATTR_KEEP_ORIGINAL,
     ATTR_NAME,
     ATTR_ORGANIZER,
+    ATTR_PARENT,
+    ATTR_PARENT_UID,
+    ATTR_PERCENT_COMPLETE,
     ATTR_PRIORITY,
+    ATTR_RENAME,
     ATTR_RESPONSE,
     ATTR_TARGET_ENTITY_ID,
     ATTR_TEXT,
@@ -71,16 +81,22 @@ from .const import (
     SEARCH_FIELDS,
     SERVICE_CREATE_CALENDAR,
     SERVICE_CREATE_EVENT,
+    SERVICE_CREATE_TODO,
     SERVICE_DELETE_CALENDAR,
     SERVICE_DELETE_EVENT,
     SERVICE_EXPORT_ICS,
     SERVICE_GET_FREE_BUSY,
     SERVICE_IMPORT_ICS,
     SERVICE_MOVE_EVENT,
+    SERVICE_MOVE_TODO,
     SERVICE_RESPOND_TO_INVITATION,
     SERVICE_SEARCH_EVENTS,
+    SERVICE_SEARCH_TODOS,
     SERVICE_SET_CALENDAR_COLOR,
     SERVICE_UPDATE_EVENT,
+    SERVICE_UPDATE_TODO,
+    TODO_SEARCH_FIELDS,
+    TODO_STATUSES,
 )
 from .coordinator import (
     HaCaldavConfigEntry,
@@ -88,15 +104,20 @@ from .coordinator import (
     calendar_unique_id,
     master_of,
     occurrences,
+    sort_order,
     to_event,
+    to_todo,
     todo_unique_id,
 )
 from .errors import as_reported
 from .event import read_extras
 from .options import account_settings
+from .task import read_todo_extras, status_of
 
 if TYPE_CHECKING:
     from .calendar import HaCaldavCalendarEntity
+    from .entity import HaCaldavEntity
+    from .todo import HaCaldavTodoListEntity
 
 
 def _local_datetime(value: Any) -> datetime:
@@ -280,6 +301,72 @@ MOVE_EVENT_SCHEMA = {
     vol.Optional(ATTR_KEEP_ORIGINAL, default=False): cv.boolean,
 }
 
+# Core's own to-do actions spell the two-word statuses with an underscore.
+_TODO_STATUS = vol.All(
+    vol.Lower,
+    lambda value: value.replace("_", "-"),
+    vol.In(tuple(status.lower() for status in TODO_STATUSES)),
+    vol.Upper,
+)
+
+# The names todo.add_item and todo.update_item give these fields, so a call
+# to either carries over.
+TODO_FIELDS = {
+    vol.Optional("due_date"): _blank_as_none(_date_only),
+    vol.Optional("due_datetime"): _blank_as_none(_local_datetime),
+    vol.Optional("start_date"): _blank_as_none(_date_only),
+    vol.Optional("start_datetime"): _blank_as_none(_local_datetime),
+    vol.Optional("description"): _blank_as_none(cv.string),
+    vol.Optional(ATTR_PARENT): _blank_as_none(cv.string),
+    vol.Optional("rrule"): _blank_as_none(cv.string),
+    vol.Optional("status"): _TODO_STATUS,
+    vol.Optional(ATTR_PERCENT_COMPLETE): vol.All(
+        vol.Coerce(int), vol.Range(min=0, max=100)
+    ),
+    vol.Optional("location"): _blank_as_none(cv.string),
+    **{
+        key: validator
+        for key, validator in EXTRA_FIELDS.items()
+        if str(key) not in (ATTR_EVENT_STATUS, ATTR_TRANSPARENCY)
+    },
+}
+
+_ONE_DUE = cv.has_at_most_one_key("due_date", "due_datetime")
+_ONE_TODO_START = cv.has_at_most_one_key("start_date", "start_datetime")
+
+CREATE_TODO_SCHEMA = vol.All(
+    cv.make_entity_service_schema(
+        {vol.Required(ATTR_ITEM): vol.All(cv.string, vol.Length(min=1)), **TODO_FIELDS}
+    ),
+    _ONE_DUE,
+    _ONE_TODO_START,
+)
+
+UPDATE_TODO_SCHEMA = vol.All(
+    cv.make_entity_service_schema(
+        {
+            vol.Required(ATTR_ITEM): vol.All(cv.string, vol.Length(min=1)),
+            vol.Optional(ATTR_RENAME): vol.All(cv.string, vol.Length(min=1)),
+            **TODO_FIELDS,
+        }
+    ),
+    _ONE_DUE,
+    _ONE_TODO_START,
+    cv.has_at_least_one_key(ATTR_RENAME, *(str(key) for key in TODO_FIELDS)),
+)
+
+SEARCH_TODOS_SCHEMA = {
+    vol.Optional(ATTR_TEXT): cv.string,
+    vol.Optional(ATTR_FIELD, default="summary"): vol.In(TODO_SEARCH_FIELDS),
+    vol.Optional("status"): vol.All(cv.ensure_list, [_TODO_STATUS]),
+}
+
+MOVE_TODO_SCHEMA = {
+    vol.Required(ATTR_ITEM): vol.All(cv.string, vol.Length(min=1)),
+    vol.Required(ATTR_TARGET_ENTITY_ID): cv.entity_id,
+    vol.Optional(ATTR_KEEP_ORIGINAL, default=False): cv.boolean,
+}
+
 IMPORT_SCHEMA = {vol.Required(ATTR_ICS): cv.string}
 
 EXPORT_SCHEMA = {vol.Optional("uid"): cv.string}
@@ -320,27 +407,48 @@ DELETE_CALENDAR_SCHEMA = vol.Schema(
 def async_register_services(hass: HomeAssistant) -> None:
     """Register the services, up front so they exist while an entry retries."""
     ONLY, NONE = SupportsResponse.ONLY, SupportsResponse.NONE
+    cal, todo = CALENDAR_DOMAIN, TODO_DOMAIN
     # Not feature-gated: _require_writable names the option the user set.
-    for name, schema, func, response in (
-        (SERVICE_SEARCH_EVENTS, SEARCH_SCHEMA, _async_search_events, ONLY),
-        (SERVICE_GET_FREE_BUSY, FREE_BUSY_SCHEMA, _async_get_free_busy, ONLY),
-        (SERVICE_CREATE_EVENT, CREATE_EVENT_SCHEMA, _async_create_event, NONE),
-        (SERVICE_UPDATE_EVENT, UPDATE_EVENT_SCHEMA, _async_update_event, NONE),
-        (SERVICE_DELETE_EVENT, DELETE_EVENT_SCHEMA, _async_delete_event, NONE),
-        (SERVICE_MOVE_EVENT, MOVE_EVENT_SCHEMA, _async_move_event, NONE),
-        (SERVICE_IMPORT_ICS, IMPORT_SCHEMA, _async_import_ics, NONE),
-        (SERVICE_EXPORT_ICS, EXPORT_SCHEMA, _async_export_ics, ONLY),
-        (SERVICE_SET_CALENDAR_COLOR, COLOR_SCHEMA, _async_set_color, NONE),
-        (SERVICE_RESPOND_TO_INVITATION, INVITATION_SCHEMA, _async_respond, NONE),
+    for name, schema, func, response, domain in (
+        (SERVICE_SEARCH_EVENTS, SEARCH_SCHEMA, _async_search_events, ONLY, cal),
+        (SERVICE_GET_FREE_BUSY, FREE_BUSY_SCHEMA, _async_get_free_busy, ONLY, cal),
+        (SERVICE_CREATE_EVENT, CREATE_EVENT_SCHEMA, _async_create_event, NONE, cal),
+        (SERVICE_UPDATE_EVENT, UPDATE_EVENT_SCHEMA, _async_update_event, NONE, cal),
+        (SERVICE_DELETE_EVENT, DELETE_EVENT_SCHEMA, _async_delete_event, NONE, cal),
+        (SERVICE_MOVE_EVENT, MOVE_EVENT_SCHEMA, _async_move_event, NONE, cal),
+        (SERVICE_RESPOND_TO_INVITATION, INVITATION_SCHEMA, _async_respond, NONE, cal),
+        (SERVICE_CREATE_TODO, CREATE_TODO_SCHEMA, _async_create_todo, NONE, todo),
+        (SERVICE_UPDATE_TODO, UPDATE_TODO_SCHEMA, _async_update_todo, NONE, todo),
+        (SERVICE_SEARCH_TODOS, SEARCH_TODOS_SCHEMA, _async_search_todos, ONLY, todo),
+        (SERVICE_MOVE_TODO, MOVE_TODO_SCHEMA, _async_move_todo, NONE, todo),
     ):
         async_register_platform_entity_service(
             hass,
             DOMAIN,
             name,
-            entity_domain=CALENDAR_DOMAIN,
+            entity_domain=domain,
             func=func,
             schema=schema,
             supports_response=response,
+        )
+    for name, schema, func, response in (
+        (SERVICE_IMPORT_ICS, IMPORT_SCHEMA, _async_import_ics, NONE),
+        (SERVICE_EXPORT_ICS, EXPORT_SCHEMA, _async_export_ics, ONLY),
+        (SERVICE_SET_CALENDAR_COLOR, COLOR_SCHEMA, _async_set_color, NONE),
+    ):
+        # The platform helper binds an action to the entities of one domain.
+        hass.services.async_register(
+            DOMAIN,
+            name,
+            partial(
+                entity_service_call,
+                hass,
+                partial(_collection_entities, hass),
+                HassJob(func),
+            ),
+            schema=cv.make_entity_service_schema(schema),
+            supports_response=response,
+            job_type=HassJobType.Coroutinefunction,
         )
     # Admin only: a plain service gets no permission check at all.
     async_register_admin_service(
@@ -359,7 +467,24 @@ def async_register_services(hass: HomeAssistant) -> None:
     )
 
 
-def _require_writable(entity: HaCaldavCalendarEntity) -> None:
+def _collection_entities(hass: HomeAssistant) -> dict[str, Any]:
+    """Return the entity each collection is addressed by as a whole.
+
+    Its calendar, or its to-do list where it holds no events. With both
+    taken, a call naming an area or a label would run twice on one collection.
+    """
+    found: dict[str, Any] = {}
+    for platform in async_get_platforms(hass, DOMAIN):
+        for entity_id, entity in platform.entities.items():
+            if (
+                platform.domain == CALENDAR_DOMAIN
+                or not entity.managed.capability.supports_events
+            ):
+                found[entity_id] = entity
+    return found
+
+
+def _require_writable(entity: HaCaldavEntity) -> None:
     """Refuse a write the entity's own controls would not offer either."""
     if not entity.managed.writable:
         raise ServiceValidationError(
@@ -568,7 +693,9 @@ async def _async_move_event(entity: HaCaldavCalendarEntity, call: ServiceCall) -
     if not call.data[ATTR_KEEP_ORIGINAL]:
         _require_writable(entity)
     await _async_check_control(entity, call, call.data[ATTR_TARGET_ENTITY_ID])
-    target = _managed_target(entity, call.data[ATTR_TARGET_ENTITY_ID])
+    target = _managed_target(
+        entity, call.data[ATTR_TARGET_ENTITY_ID], calendar_unique_id, "unknown_target"
+    )
     # By identity: two accounts on different servers may share a path, and on
     # Nextcloud every account has /personal/.
     if target is entity.managed:
@@ -591,7 +718,7 @@ async def _async_move_event(entity: HaCaldavCalendarEntity, call: ServiceCall) -
 
 
 async def _async_check_control(
-    entity: HaCaldavCalendarEntity, call: ServiceCall, entity_id: str
+    entity: HaCaldavEntity, call: ServiceCall, entity_id: str
 ) -> None:
     """Refuse a caller who may not control the entity being written to.
 
@@ -611,25 +738,33 @@ async def _async_check_control(
         )
 
 
-def _managed_target(entity: HaCaldavCalendarEntity, entity_id: str) -> ManagedCalendar:
-    """Return the managed calendar behind a target entity id."""
+def _managed_target(
+    entity: HaCaldavEntity,
+    entity_id: str,
+    unique_id: Callable[[str, object], str],
+    unknown: str,
+) -> ManagedCalendar:
+    """Return the managed calendar behind a target entity id.
+
+    The unique id says which of its two entities the target has to be.
+    """
     registry = er.async_get(entity.hass)
     record = registry.async_get(entity_id)
     if record is None or record.platform != DOMAIN:
         raise ServiceValidationError(
             translation_domain=DOMAIN,
-            translation_key="unknown_target",
+            translation_key=unknown,
             translation_placeholders={"entity_id": entity_id},
         )
     entry = entity.hass.config_entries.async_get_entry(record.config_entry_id or "")
     if entry is None or entry.state is not ConfigEntryState.LOADED:
         raise ServiceValidationError(
             translation_domain=DOMAIN,
-            translation_key="unknown_target",
+            translation_key=unknown,
             translation_placeholders={"entity_id": entity_id},
         )
     for managed in entry.runtime_data.calendars:
-        if calendar_unique_id(entry.entry_id, managed.calendar.url) != record.unique_id:
+        if unique_id(entry.entry_id, managed.calendar.url) != record.unique_id:
             continue
         if not managed.writable:
             raise ServiceValidationError(
@@ -640,12 +775,166 @@ def _managed_target(entity: HaCaldavCalendarEntity, entity_id: str) -> ManagedCa
         return managed
     raise ServiceValidationError(
         translation_domain=DOMAIN,
-        translation_key="unknown_target",
+        translation_key=unknown,
         translation_placeholders={"entity_id": entity_id},
     )
 
 
-async def _async_import_ics(entity: HaCaldavCalendarEntity, call: ServiceCall) -> None:
+async def _async_create_todo(entity: HaCaldavTodoListEntity, call: ServiceCall) -> None:
+    """Create a to-do item with the full set of properties."""
+    _require_writable(entity)
+    data = _todo_fields(entity, call.data)
+    data["summary"] = call.data[ATTR_ITEM]
+    await entity.async_create_full_item(
+        {key: value for key, value in data.items() if value is not None}
+    )
+
+
+async def _async_update_todo(entity: HaCaldavTodoListEntity, call: ServiceCall) -> None:
+    """Change any subset of a to-do item's properties."""
+    _require_writable(entity)
+    data = _todo_fields(entity, call.data)
+    if ATTR_RENAME in call.data:
+        data["summary"] = call.data[ATTR_RENAME]
+    await entity.async_update_full_item(_item_uid(entity, call.data[ATTR_ITEM]), data)
+
+
+def _item_uid(entity: HaCaldavTodoListEntity, item: str) -> str:
+    """Return the uid of an item named by uid or by summary, as core names one.
+
+    A name the list does not show is taken for the uid of an item it has
+    yet to read.
+    """
+    items = entity.todo_items or []
+    if any(found.uid == item for found in items):
+        return item
+    return next(
+        (found.uid for found in items if found.summary == item and found.uid), item
+    )
+
+
+_TODO_DATES = {
+    "due_date": "due",
+    "due_datetime": "due",
+    "start_date": "start",
+    "start_datetime": "start",
+}
+
+
+def _todo_fields(
+    entity: HaCaldavTodoListEntity, data: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return the to-do fields present in a call, as the write path names them.
+
+    A field given as nothing clears it.
+    """
+    fields: dict[str, Any] = {}
+    for key in TODO_FIELDS:
+        name = str(key)
+        if name not in data:
+            continue
+        if name == ATTR_PARENT:
+            parent = data[name]
+            fields[ATTR_PARENT_UID] = parent and _item_uid(entity, parent)
+        else:
+            fields[_TODO_DATES.get(name, name)] = data[name]
+    for name in (ATTR_URL, ATTR_ORGANIZER):
+        if fields.get(name) == "":
+            fields[name] = None
+    return fields
+
+
+async def _async_search_todos(
+    entity: HaCaldavTodoListEntity, call: ServiceCall
+) -> ServiceResponse:
+    """Return the items of the list with everything stored on them."""
+    todos = await _async_account_job(
+        entity.hass,
+        partial(
+            _found_todos,
+            entity.calendar,
+            call.data.get(ATTR_TEXT),
+            call.data[ATTR_FIELD],
+            call.data.get("status"),
+        ),
+        SERVICE_SEARCH_TODOS,
+    )
+    return {"todos": todos}
+
+
+def _found_todos(
+    calendar: Any, text: str | None, field: str, statuses: list[str] | None
+) -> list[dict[str, Any]]:
+    """Return the items of a list in the order it shows them, mapped. Blocking.
+
+    Read whole and filtered here, the way the list itself is read.
+    """
+    found = []
+    for item in calendar.search(todo=True, include_completed=True):
+        vtodo = master_of(item, "vtodo")
+        if vtodo is None or (shown := to_todo(vtodo)) is None:
+            continue
+        status = status_of(vtodo)
+        if statuses and status not in statuses:
+            continue
+        todo: dict[str, Any] = {
+            "uid": shown.uid,
+            "summary": shown.summary,
+            # Spelled the way todo.get_items spells it.
+            "status": status.lower().replace("-", "_"),
+        }
+        for key, value in (("due", shown.due), ("completed", shown.completed)):
+            if value is not None:
+                todo[key] = value.isoformat()
+        if shown.description:
+            todo["description"] = shown.description
+        todo.update(read_todo_extras(vtodo))
+        if text and not _matches(todo, field, text):
+            continue
+        found.append((sort_order(vtodo), todo))
+    return [todo for _, todo in sorted(found, key=lambda pair: pair[0])]
+
+
+def _matches(todo: dict[str, Any], field: str, text: str) -> bool:
+    if field == "uid":
+        return todo["uid"] == text
+    values = (
+        todo.get(ATTR_CATEGORIES, [])
+        if field == "category"
+        else [todo.get(field) or ""]
+    )
+    return any(text.casefold() in str(value).casefold() for value in values)
+
+
+async def _async_move_todo(entity: HaCaldavTodoListEntity, call: ServiceCall) -> None:
+    """Move a to-do and its subtasks to another list, on this account or another."""
+    if not call.data[ATTR_KEEP_ORIGINAL]:
+        _require_writable(entity)
+    await _async_check_control(entity, call, call.data[ATTR_TARGET_ENTITY_ID])
+    target = _managed_target(
+        entity, call.data[ATTR_TARGET_ENTITY_ID], todo_unique_id, "unknown_todo_list"
+    )
+    if target is entity.managed:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="same_todo_list",
+            translation_placeholders={"name": target.name},
+        )
+    await entity.async_write(
+        partial(
+            move_todo,
+            entity.calendar,
+            target.calendar,
+            _item_uid(entity, call.data[ATTR_ITEM]),
+            call.data[ATTR_KEEP_ORIGINAL],
+        ),
+        SERVICE_MOVE_TODO,
+        forget=entity.every_etag(),
+    )
+    await target.coordinator.async_refresh()
+
+
+async def _async_import_ics(entity: HaCaldavEntity, call: ServiceCall) -> None:
     _require_writable(entity)
     await entity.async_write(
         partial(import_ics, entity.calendar, call.data[ATTR_ICS]),
@@ -654,7 +943,7 @@ async def _async_import_ics(entity: HaCaldavCalendarEntity, call: ServiceCall) -
 
 
 async def _async_export_ics(
-    entity: HaCaldavCalendarEntity, call: ServiceCall
+    entity: HaCaldavEntity, call: ServiceCall
 ) -> ServiceResponse:
     ics = await _async_account_job(
         entity.hass,
@@ -664,15 +953,16 @@ async def _async_export_ics(
     return {"ics": ics}
 
 
-async def _async_set_color(entity: HaCaldavCalendarEntity, call: ServiceCall) -> None:
+async def _async_set_color(entity: HaCaldavEntity, call: ServiceCall) -> None:
     _require_writable(entity)
     await entity.async_write(
         partial(set_calendar_color, entity.calendar, call.data[ATTR_COLOR]),
         SERVICE_SET_CALENDAR_COLOR,
     )
-    # Pushing a color releases the hold a local pick puts on the sync.
-    entity.async_follow_server_color()
-    await entity.colors.async_request_refresh()
+    if isinstance(entity, CalendarEntity):
+        # Pushing a color releases the hold a local pick puts on the sync.
+        entity.async_follow_server_color()
+    await entity.runtime_data.colors.async_request_refresh()
 
 
 async def _async_respond(entity: HaCaldavCalendarEntity, call: ServiceCall) -> None:

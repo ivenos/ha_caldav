@@ -53,6 +53,7 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
     ) -> None:
         """Initialize the to-do list entity."""
         super().__init__(managed)
+        self.runtime_data = entry.runtime_data
         self._attr_supported_features = (
             TodoListEntityFeature.CREATE_TODO_ITEM
             | TodoListEntityFeature.UPDATE_TODO_ITEM
@@ -71,10 +72,27 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
         """Return the to-do items."""
         return self.coordinator.data.todos if self.coordinator.data else None
 
+    @property
+    def _own_address(self) -> str | None:
+        addresses = self.runtime_data.address_set
+        return addresses[0] if addresses else None
+
+    def every_etag(self) -> tuple[str, tuple[str, ...]]:
+        """Return what a write that reaches subtasks and parents makes stale."""
+        return ("todo_etags", tuple(self.coordinator.todo_etags))
+
     async def async_create_todo_item(self, item: TodoItem) -> None:
         """Add an item to the list."""
         await self.async_write(
             partial(create_todo, self.calendar, _item_data(item)), "create"
+        )
+
+    async def async_create_full_item(self, data: dict[str, Any]) -> None:
+        """Add an item including the properties only an action can set."""
+        await self.async_write(
+            partial(create_todo, self.calendar, data, self._own_address, False),
+            "create",
+            forget=self.every_etag(),
         )
 
     async def async_update_todo_item(self, item: TodoItem) -> None:
@@ -87,17 +105,30 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
                 self.coordinator.todo_etags.get(item.uid or ""),
             ),
             "update",
-            forget=("todo_etags", (item.uid or "",)),
+            forget=self.every_etag(),
+        )
+
+    async def async_update_full_item(self, uid: str, data: dict[str, Any]) -> None:
+        """Update an item from an already-mapped field set.
+
+        Only an edit of what the list showed is held to the version last read.
+        """
+        await self.async_write(
+            lambda: update_todo(
+                self.calendar, uid, data, None, self._own_address, as_shown=False
+            ),
+            "update",
+            forget=self.every_etag(),
         )
 
     async def async_delete_todo_items(self, uids: list[str]) -> None:
-        """Delete items from the list."""
+        """Delete items from the list, their subtasks with them."""
         await self.async_write(
             lambda: delete_todos(
                 self.calendar, uids, dict(self.coordinator.todo_etags)
             ),
             "delete",
-            forget=("todo_etags", tuple(uids)),
+            forget=self.every_etag(),
         )
 
     async def async_move_todo_item(

@@ -2348,6 +2348,63 @@ async def test_invitations_need_a_scheduling_server(hass: HomeAssistant) -> None
     assert refusal.value.translation_key == "no_scheduling"
 
 
+@pytest.mark.parametrize(
+    ("action", "data", "answers"),
+    [
+        ("get_invitations", {}, True),
+        ("respond_to_invitation", {"uid": "uid-1", "response": "accept"}, False),
+        (
+            "get_free_busy",
+            {
+                "start": "2026-07-06 00:00:00",
+                "end": "2026-07-07 00:00:00",
+                "attendees": ["ann@example.com"],
+            },
+            True,
+        ),
+    ],
+)
+async def test_an_address_without_an_outbox_is_no_scheduling_server(
+    hass: HomeAssistant, action: str, data: dict, answers: bool
+) -> None:
+    from lxml import etree
+
+    calendar = _calendar("Personal")
+    calendar.freebusy_request.return_value = _busy()
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        principal = client.return_value.principal.return_value
+        principal.calendars.return_value = [calendar]
+        principal.calendar_user_address_set.return_value = ["/iven/"]
+        principal.get_properties.return_value = Mock(
+            tree=etree.XML(
+                b'<d:multistatus xmlns:d="DAV:"'
+                b' xmlns:c="urn:ietf:params:xml:ns:caldav">'
+                b"<d:response><d:propstat><d:prop><c:schedule-outbox-URL/></d:prop>"
+                b"<d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>"
+                b"</d:response></d:multistatus>"
+            )
+        )
+        entry = MockConfigEntry(
+            domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x"
+        )
+        entry.add_to_hass(hass)
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    assert entry.runtime_data.address_set
+    assert entry.runtime_data.scheduling is False
+
+    with pytest.raises(ServiceValidationError) as refusal:
+        await hass.services.async_call(
+            DOMAIN,
+            action,
+            {"entity_id": "calendar.personal", **data},
+            blocking=True,
+            return_response=answers,
+        )
+
+    assert refusal.value.translation_key == "no_scheduling"
+
+
 async def test_a_reply_forwards_the_occurrence_it_names(hass: HomeAssistant) -> None:
     entry = await _setup(hass)
     entry.runtime_data.address_set = ["mailto:iven@example.com"]

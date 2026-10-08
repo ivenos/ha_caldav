@@ -632,6 +632,15 @@ def _require_writable(entity: HaCaldavEntity) -> None:
         )
 
 
+def _scheduling_addresses(entity: HaCaldavEntity) -> list[str]:
+    """Return the addresses invitations go to, on a server that does scheduling."""
+    if not entity.runtime_data.scheduling or not (addresses := entity.addresses):
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="no_scheduling"
+        )
+    return addresses
+
+
 async def _async_search_events(
     entity: HaCaldavCalendarEntity, call: ServiceCall
 ) -> ServiceResponse:
@@ -690,10 +699,7 @@ async def _async_get_invitations(
     entity: HaCaldavCalendarEntity, call: ServiceCall
 ) -> ServiceResponse:
     """Return the events on a calendar that still wait for the account's answer."""
-    if not (addresses := entity.addresses):
-        raise ServiceValidationError(
-            translation_domain=DOMAIN, translation_key="no_scheduling"
-        )
+    addresses = _scheduling_addresses(entity)
     start = call.data.get("start") or dt_util.now()
     _check_window(start, call.data.get("end"))
     invitations = await _async_account_job(
@@ -736,7 +742,7 @@ async def _async_get_free_busy(
     _check_window(start, end)
     attendees = call.data.get(ATTR_ATTENDEES)
     addresses = entity.runtime_data.address_set
-    if attendees and not addresses:
+    if attendees and not (entity.runtime_data.scheduling and addresses):
         raise ServiceValidationError(
             translation_domain=DOMAIN, translation_key="no_scheduling"
         )
@@ -1298,11 +1304,7 @@ async def _async_set_color(entity: HaCaldavEntity, call: ServiceCall) -> None:
 
 async def _async_respond(entity: HaCaldavCalendarEntity, call: ServiceCall) -> None:
     _require_writable(entity)
-    addresses = entity.addresses
-    if not addresses:
-        raise ServiceValidationError(
-            translation_domain=DOMAIN, translation_key="no_scheduling"
-        )
+    addresses = _scheduling_addresses(entity)
     await entity.async_write(
         partial(
             respond_to_invitation,

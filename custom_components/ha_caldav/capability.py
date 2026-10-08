@@ -286,6 +286,23 @@ def _absolute(client: caldav.DAVClient, address: str) -> str:
         return address
 
 
+def supports_scheduling(client: caldav.DAVClient) -> bool:
+    """Return whether the account has a scheduling outbox (RFC 6638 2.1).
+
+    Radicale names an address without one. Only an answer without an outbox
+    counts as a no.
+    """
+    try:
+        response = client.principal().get_properties(
+            [cdav.ScheduleOutboxURL()], parse_response_xml=False
+        )
+        holders = list(response.tree.iter(cdav.ScheduleOutboxURL.tag))
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Could not ask for the scheduling outbox: %s", err)
+        return True
+    return not holders or any(holder.findtext(dav.Href.tag) for holder in holders)
+
+
 def supports_sync_collection(calendar: caldav.Calendar) -> bool:
     """Return whether the calendar advertises the RFC 6578 sync REPORT.
 

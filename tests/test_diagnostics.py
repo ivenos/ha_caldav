@@ -99,6 +99,23 @@ async def test_diagnostics_redacts_secrets_and_lists_calendars(
     assert "cloud.example.com" not in json.dumps(diag)
 
 
+async def test_diagnostics_report_scheduling_only_with_an_address_and_an_outbox(
+    hass: HomeAssistant,
+) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    entry.runtime_data = _runtime(_client([]))
+    entry.runtime_data.address_set = ["mailto:iven@example.com"]
+
+    assert (await async_get_config_entry_diagnostics(hass, entry))["scheduling"] is True
+
+    entry.runtime_data.scheduling = False
+
+    assert (await async_get_config_entry_diagnostics(hass, entry))[
+        "scheduling"
+    ] is False
+
+
 async def test_diagnostics_error_reports_type_not_url(hass: HomeAssistant) -> None:
     entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id="y")
     entry.add_to_hass(hass)

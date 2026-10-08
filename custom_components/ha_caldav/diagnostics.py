@@ -42,7 +42,7 @@ async def async_get_config_entry_diagnostics(
     scheduling = False
     if data is not None:
         calendars = await hass.async_add_executor_job(_calendars, data)
-        scheduling = bool(data.address_set)
+        scheduling = data.scheduling and bool(data.address_set)
     return {
         "data": async_redact_data(entry.data, TO_REDACT),
         "options": _options(entry),

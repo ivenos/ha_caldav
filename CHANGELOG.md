@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file, in the format o
 
 ## [Unreleased]
 
+### Fixed
+
+- Listing invitations on Radicale gave nothing instead of a clear message.
+
 ## [1.5.0] - 2026-10-08
 
 ### Added

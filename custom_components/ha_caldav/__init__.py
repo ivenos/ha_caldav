@@ -23,6 +23,7 @@ from .capability import (
     capability_for,
     fetch_address_set,
     fetch_capabilities,
+    supports_scheduling,
     supports_sync_collection,
 )
 from .connection import (
@@ -155,6 +156,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
         _LOGGER.debug("Could not read calendar capabilities: %s", err)
         capabilities = {}
     address_set = await hass.async_add_executor_job(fetch_address_set, client)
+    scheduling = await hass.async_add_executor_job(supports_scheduling, client)
     # A property of the server, so one calendar is enough to ask.
     sync_collection = True
     if calendars:
@@ -210,6 +212,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
         colors=colors,
         calendars=managed,
         address_set=address_set,
+        scheduling=scheduling,
         sync_collection=sync_collection,
         delegations=delegations,
     )

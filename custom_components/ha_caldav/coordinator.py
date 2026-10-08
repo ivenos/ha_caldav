@@ -107,6 +107,7 @@ class HaCaldavRuntimeData:
     colors: HaCaldavColorCoordinator
     calendars: list[ManagedCalendar]
     address_set: list[str]
+    scheduling: bool = True
     sync_collection: bool = True
     delegations: list[Any] = field(default_factory=list)
 

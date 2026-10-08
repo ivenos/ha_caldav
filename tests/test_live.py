@@ -142,6 +142,18 @@ def series(calendar, rrule: str = "FREQ=WEEKLY;COUNT=4") -> str:
     return uid_of(calendar)
 
 
+def scheduling_addresses(client) -> list[str]:
+    from custom_components.ha_caldav.capability import (
+        fetch_address_set,
+        supports_scheduling,
+    )
+
+    addresses = fetch_address_set(client)
+    if not addresses or not supports_scheduling(client):
+        pytest.skip("server does not do CalDAV scheduling")
+    return addresses
+
+
 def test_create_update_delete_single_event(calendar) -> None:
     create_event(
         calendar,
@@ -813,12 +825,9 @@ def test_writing_a_calendar_name_back(calendar) -> None:
 
 
 def test_responding_to_an_invitation_sets_our_partstat(calendar) -> None:
-    from custom_components.ha_caldav.capability import fetch_address_set
     from custom_components.ha_caldav.recurrence import respond_to_invitation
 
-    addresses = fetch_address_set(calendar.client)
-    if not addresses:
-        pytest.skip("server does not do CalDAV scheduling")
+    addresses = scheduling_addresses(calendar.client)
     create_event(
         calendar,
         {
@@ -1142,12 +1151,9 @@ def test_a_series_is_split_at_a_date_added_by_hand(calendar) -> None:
 
 
 def test_one_occurrence_of_an_invitation_is_answered_alone(calendar) -> None:
-    from custom_components.ha_caldav.capability import fetch_address_set
     from custom_components.ha_caldav.recurrence import respond_to_invitation
 
-    addresses = fetch_address_set(calendar.client)
-    if not addresses:
-        pytest.skip("server does not do CalDAV scheduling")
+    addresses = scheduling_addresses(calendar.client)
     create_event(
         calendar,
         {

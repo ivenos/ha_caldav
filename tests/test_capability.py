@@ -18,6 +18,7 @@ from custom_components.ha_caldav.capability import (
     capability_for,
     fetch_address_set,
     fetch_capabilities,
+    supports_scheduling,
     supports_sync_collection,
 )
 from custom_components.ha_caldav.connection import build_client, display_name
@@ -130,6 +131,48 @@ def test_address_set_is_empty_when_the_server_has_none() -> None:
     )
 
     assert fetch_address_set(client) == []
+
+
+def _outbox_answer(propstat: str) -> Mock:
+    client = Mock()
+    client.principal.return_value.get_properties.return_value = _multistatus(
+        '<?xml version="1.0"?>'
+        '<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+        f"<d:response><d:href>/principals/iven/</d:href>{propstat}</d:response>"
+        "</d:multistatus>"
+    )
+    return client
+
+
+def test_an_account_with_an_outbox_does_scheduling() -> None:
+    client = _outbox_answer(
+        "<d:propstat><d:prop><c:schedule-outbox-URL>"
+        "<d:href>/calendars/iven/outbox/</d:href></c:schedule-outbox-URL></d:prop>"
+        "<d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
+    )
+
+    assert supports_scheduling(client) is True
+
+
+def test_an_account_answered_without_an_outbox_does_no_scheduling() -> None:
+    """Radicale names the principal as an address and has no outbox."""
+    client = _outbox_answer(
+        "<d:propstat><d:prop><c:schedule-outbox-URL/></d:prop>"
+        "<d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>"
+    )
+
+    assert supports_scheduling(client) is False
+
+
+def test_scheduling_is_left_to_the_addresses_when_the_outbox_goes_unanswered() -> None:
+    silent = _outbox_answer(
+        "<d:propstat><d:prop/><d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
+    )
+    broken = Mock()
+    broken.principal.return_value.get_properties.side_effect = AssertionError("xml")
+
+    assert supports_scheduling(silent) is True
+    assert supports_scheduling(broken) is True
 
 
 def _report_set(reports: str) -> DAVResponse:

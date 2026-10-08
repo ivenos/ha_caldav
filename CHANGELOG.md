@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file, in the format o
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-08
+
 ### Added
 
 - Subtasks for to-dos, and more fields such as start, priority, progress, categories and reminders (#24).
@@ -283,7 +285,8 @@ All notable changes to this project are documented in this file, in the format o
 - Options for calendar selection, poll interval, days ahead, all-day events and read-only.
 - English and German translations.
 
-[Unreleased]: https://github.com/ivenos/ha_caldav/compare/v1.4.2...HEAD
+[Unreleased]: https://github.com/ivenos/ha_caldav/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/ivenos/ha_caldav/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/ivenos/ha_caldav/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/ivenos/ha_caldav/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/ivenos/ha_caldav/compare/v1.3.1...v1.4.0

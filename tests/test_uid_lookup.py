@@ -34,6 +34,7 @@ def _calendar(refusal: Exception | None, found: list[Mock] | None = None) -> Moc
     else:
         calendar.event_by_uid.side_effect = refusal
         calendar.todo_by_uid.side_effect = refusal
+        calendar.journal_by_uid.side_effect = refusal
         calendar.object_by_uid.side_effect = refusal
     calendar.search.return_value = found or []
     return calendar
@@ -189,7 +190,7 @@ def test_a_server_that_will_not_filter_is_scanned_once_for_a_whole_import() -> N
         "END:VCALENDAR\r\n",
     )
 
-    assert calendar.search.call_count == 2
+    assert calendar.search.call_count == 3
 
 
 def test_a_todo_write_does_not_ask_the_server_for_the_uid_again() -> None:
@@ -272,7 +273,7 @@ def test_a_large_import_reads_the_collection_once_instead_of_asking_per_uid() ->
 
     import_ics(calendar, _doc(*((f"u{n}", "VEVENT") for n in range(12))))
 
-    assert calendar.search.call_count == 2
+    assert calendar.search.call_count == 3
     assert calendar.event_by_uid.call_count == 0
 
 

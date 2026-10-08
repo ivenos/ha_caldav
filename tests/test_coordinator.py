@@ -461,3 +461,66 @@ def test_the_rule_is_read_off_the_master_not_whichever_component_came_first() ->
     )
 
     assert master_of(item).rrule.value == "FREQ=WEEKLY"
+
+
+@pytest.mark.parametrize(
+    ("line", "status"),
+    [
+        ("STATUS:TENTATIVE\n", "tentative"),
+        ("STATUS:confirmed\n", "confirmed"),
+        ("STATUS:CANCELLED\n", None),
+        ("", None),
+    ],
+)
+def test_to_event_hands_core_the_status_it_has_a_value_for(
+    line: str, status: str | None
+) -> None:
+    """Home Assistant grew the field after 2026.3."""
+    v = vevent(f"DTSTART:20260706T090000Z\nDTEND:20260706T100000Z\n{line}SUMMARY:x")
+
+    event = to_event(v)
+
+    if hasattr(event, "status"):
+        assert event.status == status
+
+
+def test_each_occurrence_under_a_ranged_exception_carries_the_id_of_its_own_slot() -> (
+    None
+):
+    """The expansion gives every one of them the id of the exception, which
+    would send an edit of a later occurrence to the first."""
+    item = stored(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
+        "BEGIN:VEVENT\nUID:timed-1\nDTSTAMP:20260101T000000Z\n"
+        "DTSTART:20260706T090000Z\nDTEND:20260706T100000Z\n"
+        "RRULE:FREQ=WEEKLY\nSUMMARY:Standup\nEND:VEVENT\n"
+        "BEGIN:VEVENT\nUID:timed-1\nDTSTAMP:20260101T000000Z\n"
+        "RECURRENCE-ID;RANGE=THISANDFUTURE:20260713T090000Z\n"
+        "DTSTART:20260713T110000Z\nDTEND:20260713T120000Z\n"
+        "SUMMARY:Standup moved\nEND:VEVENT\nEND:VCALENDAR\n"
+    )
+
+    found = occurrences(
+        item, datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 7, 28, tzinfo=UTC)
+    )
+
+    assert [
+        (
+            v.dtstart.value,
+            v.recurrence_id.value if hasattr(v, "recurrence_id") else None,
+        )
+        for v in sorted(found, key=sort_key)
+    ][1:] == [
+        (
+            datetime(2026, 7, 13, 11, 0, tzinfo=UTC),
+            datetime(2026, 7, 13, 9, 0, tzinfo=UTC),
+        ),
+        (
+            datetime(2026, 7, 20, 11, 0, tzinfo=UTC),
+            datetime(2026, 7, 20, 9, 0, tzinfo=UTC),
+        ),
+        (
+            datetime(2026, 7, 27, 11, 0, tzinfo=UTC),
+            datetime(2026, 7, 27, 9, 0, tzinfo=UTC),
+        ),
+    ]

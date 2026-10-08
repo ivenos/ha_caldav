@@ -153,9 +153,6 @@
     "alarm_needs_date": {
       "message": "A reminder needs a start or a due date to count from."
     },
-    "allday_timed_switch": {
-      "message": "A recurring event cannot be switched between all-day and timed."
-    },
     "ambiguous_calendar": {
       "message": "This account has more than one calendar called {name}; rename one of them first."
     },
@@ -166,7 +163,7 @@
       "message": "Cannot connect to the CalDAV server ({error})."
     },
     "document_empty": {
-      "message": "The document has no event and no to-do item in it."
+      "message": "The document has no event, to-do item or journal entry in it."
     },
     "document_no_uid": {
       "message": "The document has a component without a UID."
@@ -222,12 +219,6 @@
     "parent_not_found": {
       "message": "There is no to-do item {parent} on this list to put it under."
     },
-    "ranged_override": {
-      "message": "This series holds an exception that applies from one occurrence onwards. Edit it in the app that created it."
-    },
-    "rdate_split": {
-      "message": "This occurrence was added to the series by hand, and a series cannot be split there."
-    },
     "read_only": {
       "message": "{name} is read-only, so nothing can be written to it."
     },
@@ -272,6 +263,36 @@
     },
     "unreadable_lines": {
       "message": "The document has lines that cannot be read: {lines}"
+    },
+    "email_alarm_needs_recipient": {
+      "message": "An email reminder needs attendees to send it to."
+    },
+    "attachment_not_found": {
+      "message": "There is no embedded attachment called {name} on this item."
+    },
+    "attachment_unreadable": {
+      "message": "The file {path} could not be read."
+    },
+    "path_not_allowed": {
+      "message": "Home Assistant is not allowed to read {path}. Add its folder to allowlist_external_dirs."
+    },
+    "no_journals": {
+      "message": "{name} does not hold journal entries."
+    },
+    "no_journal_in_object": {
+      "message": "This item is not stored as a journal entry, so it cannot be changed here."
+    },
+    "sharing_unsupported": {
+      "message": "This server has no calendar sharing that can be reached from here."
+    },
+    "sharee_not_found": {
+      "message": "The server knows no account {user} to share with."
+    },
+    "not_shared_with": {
+      "message": "This calendar is not shared with {user}."
+    },
+    "unknown_time_zone": {
+      "message": "{time_zone} is not a time zone. Use a name such as America/New_York."
     }
   },
   "selector": {
@@ -295,7 +316,8 @@
     "calendar_components": {
       "options": {
         "vevent": "Events",
-        "vtodo": "To-do items"
+        "vtodo": "To-do items",
+        "vjournal": "Journal entries"
       }
     },
     "event_status": {
@@ -339,6 +361,27 @@
         "category": "Category",
         "uid": "UID"
       }
+    },
+    "journal_status": {
+      "options": {
+        "draft": "Draft",
+        "final": "Final",
+        "cancelled": "Canceled"
+      }
+    },
+    "journal_search_field": {
+      "options": {
+        "summary": "Summary",
+        "description": "Description",
+        "category": "Category",
+        "uid": "UID"
+      }
+    },
+    "share_access": {
+      "options": {
+        "read": "Read",
+        "read_write": "Read and write"
+      }
     }
   },
   "services": {
@@ -348,7 +391,7 @@
       "fields": {
         "text": {
           "name": "Text",
-          "description": "The text to look for. Servers match on substrings."
+          "description": "The text to look for. Servers match on substrings. Leave empty for every event."
         },
         "field": {
           "name": "Field",
@@ -375,6 +418,24 @@
         "end": {
           "name": "End",
           "description": "End of the window."
+        },
+        "attendees": {
+          "name": "Attendees",
+          "description": "Email addresses of other people to ask the server about. Their busy periods come back under attendees, null for someone it cannot answer for. Needs a server that does CalDAV scheduling."
+        }
+      }
+    },
+    "get_invitations": {
+      "name": "Get invitations",
+      "description": "Returns the events on the calendar that still wait for your answer. Needs a server that does CalDAV scheduling.",
+      "fields": {
+        "start": {
+          "name": "Start",
+          "description": "Only invitations ending after this moment. Now unless given."
+        },
+        "end": {
+          "name": "End",
+          "description": "Only invitations starting before this moment."
         }
       }
     },
@@ -401,6 +462,10 @@
         "end_date": {
           "name": "End date",
           "description": "For an all-day event. The day after the last one."
+        },
+        "time_zone": {
+          "name": "Time zone",
+          "description": "The time zone the start and end are in, such as America/New_York. Home Assistant's own unless given."
         },
         "description": {
           "name": "Description",
@@ -448,7 +513,11 @@
         },
         "alarms": {
           "name": "Alarms",
-          "description": "Reminders, as minutes before the start or objects with minutes_before, action, related and description."
+          "description": "Reminders, as minutes before the start or objects with minutes_before or at, action, related and description, and summary and attendees for an email."
+        },
+        "attachments": {
+          "name": "Attachments",
+          "description": "Links, or objects with url, name and media_type. An object with path embeds that file."
         }
       },
       "sections": {
@@ -494,6 +563,10 @@
           "name": "End date",
           "description": "For an all-day event. The day after the last one."
         },
+        "time_zone": {
+          "name": "Time zone",
+          "description": "Moves the event into this time zone, such as America/New_York. A start or end given beside it is read in it."
+        },
         "description": {
           "name": "Description",
           "description": "The body text of the event."
@@ -540,7 +613,11 @@
         },
         "alarms": {
           "name": "Alarms",
-          "description": "Reminders, as minutes before the start or objects with minutes_before, action, related and description."
+          "description": "Reminders, as minutes before the start or objects with minutes_before or at, action, related and description, and summary and attendees for an email."
+        },
+        "attachments": {
+          "name": "Attachments",
+          "description": "Links, or objects with url, name and media_type. An object with path embeds that file."
         }
       },
       "sections": {
@@ -660,7 +737,11 @@
         },
         "alarms": {
           "name": "Alarms",
-          "description": "Reminders, as minutes before the start, or before the due date without one, or objects with minutes_before, action, related and description."
+          "description": "Reminders, as minutes before the start, or before the due date without one, or objects with minutes_before or at, action, related and description, and summary and attendees for an email."
+        },
+        "attachments": {
+          "name": "Attachments",
+          "description": "Links, or objects with url, name and media_type. An object with path embeds that file."
         }
       },
       "sections": {
@@ -748,7 +829,11 @@
         },
         "alarms": {
           "name": "Alarms",
-          "description": "Reminders, as minutes before the start, or before the due date without one, or objects with minutes_before, action, related and description."
+          "description": "Reminders, as minutes before the start, or before the due date without one, or objects with minutes_before or at, action, related and description, and summary and attendees for an email."
+        },
+        "attachments": {
+          "name": "Attachments",
+          "description": "Links, or objects with url, name and media_type. An object with path embeds that file."
         }
       },
       "sections": {
@@ -794,9 +879,129 @@
         }
       }
     },
+    "create_journal": {
+      "name": "Create journal entry",
+      "description": "Creates a journal entry on a calendar that holds them.",
+      "fields": {
+        "summary": {
+          "name": "Summary",
+          "description": "The title of the entry."
+        },
+        "description": {
+          "name": "Description",
+          "description": "The text of the entry."
+        },
+        "start_date": {
+          "name": "Date",
+          "description": "The day the entry belongs to."
+        },
+        "start_date_time": {
+          "name": "Date and time",
+          "description": "The moment the entry belongs to."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Whether the entry is a draft, final or canceled."
+        },
+        "classification": {
+          "name": "Classification",
+          "description": "How private the entry is."
+        },
+        "categories": {
+          "name": "Categories",
+          "description": "A list of category names."
+        },
+        "url": {
+          "name": "URL",
+          "description": "A link that belongs to the entry."
+        },
+        "attachments": {
+          "name": "Attachments",
+          "description": "Links, or objects with url, name and media_type. An object with path embeds that file."
+        }
+      }
+    },
+    "update_journal": {
+      "name": "Update journal entry",
+      "description": "Changes any subset of a journal entry's properties. A field given empty is cleared.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "The UID of the entry to change."
+        },
+        "summary": {
+          "name": "Summary",
+          "description": "The title of the entry."
+        },
+        "description": {
+          "name": "Description",
+          "description": "The text of the entry."
+        },
+        "start_date": {
+          "name": "Date",
+          "description": "The day the entry belongs to."
+        },
+        "start_date_time": {
+          "name": "Date and time",
+          "description": "The moment the entry belongs to."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Whether the entry is a draft, final or canceled."
+        },
+        "classification": {
+          "name": "Classification",
+          "description": "How private the entry is."
+        },
+        "categories": {
+          "name": "Categories",
+          "description": "A list of category names."
+        },
+        "url": {
+          "name": "URL",
+          "description": "A link that belongs to the entry."
+        },
+        "attachments": {
+          "name": "Attachments",
+          "description": "Links, or objects with url, name and media_type. An object with path embeds that file."
+        }
+      }
+    },
+    "delete_journal": {
+      "name": "Delete journal entry",
+      "description": "Deletes a journal entry.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "The UID of the entry to delete."
+        }
+      }
+    },
+    "search_journals": {
+      "name": "Search journal entries",
+      "description": "Returns the journal entries of the calendar, those with a date first.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "Only return entries containing this text. Leave empty for all of them."
+        },
+        "field": {
+          "name": "Field",
+          "description": "Which property to look in."
+        },
+        "start": {
+          "name": "Start",
+          "description": "Only entries dated after this moment. A window leaves out the entries without a date."
+        },
+        "end": {
+          "name": "End",
+          "description": "Only entries dated before this moment."
+        }
+      }
+    },
     "import_ics": {
       "name": "Import iCalendar",
-      "description": "Writes the events and to-do items of an iCalendar document into the calendar.",
+      "description": "Writes the events, to-do items and journal entries of an iCalendar document into the calendar.",
       "fields": {
         "ics": {
           "name": "iCalendar document",
@@ -810,7 +1015,7 @@
       "fields": {
         "uid": {
           "name": "UID",
-          "description": "Export only this item, event or to-do. Leave empty for the whole calendar."
+          "description": "Export only this item, whatever kind it is. Leave empty for the whole calendar."
         }
       }
     },
@@ -824,6 +1029,34 @@
         }
       }
     },
+    "share_calendar": {
+      "name": "Share calendar",
+      "description": "Shares the calendar with another account on the server, administrators only. Works with Nextcloud and with servers built on sabre/dav, such as Baikal.",
+      "fields": {
+        "user": {
+          "name": "User",
+          "description": "The user name of the account, or its email address on sabre/dav."
+        },
+        "access": {
+          "name": "Access",
+          "description": "Whether the account may only read or also write."
+        }
+      }
+    },
+    "unshare_calendar": {
+      "name": "Stop sharing calendar",
+      "description": "Stops sharing the calendar with an account, administrators only.",
+      "fields": {
+        "user": {
+          "name": "User",
+          "description": "The account to stop sharing with, as the list of shares names it."
+        }
+      }
+    },
+    "get_calendar_shares": {
+      "name": "Get calendar shares",
+      "description": "Returns the accounts the calendar is shared with and what each may do."
+    },
     "respond_to_invitation": {
       "name": "Respond to invitation",
       "description": "Answers an event you were invited to. Needs a server that does CalDAV scheduling.",
@@ -831,6 +1064,10 @@
         "uid": {
           "name": "UID",
           "description": "The UID of the event to answer."
+        },
+        "recurrence_id": {
+          "name": "Recurrence ID",
+          "description": "Answer only this occurrence of a recurring series."
         },
         "response": {
           "name": "Response",

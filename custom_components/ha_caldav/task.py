@@ -16,6 +16,7 @@ from icalendar.prop import vRecur
 
 from .const import (
     ATTR_ALARMS,
+    ATTR_ATTACHMENTS,
     ATTR_ATTENDEES,
     ATTR_CATEGORIES,
     ATTR_CLASSIFICATION,
@@ -42,6 +43,7 @@ _SHARED = (
     ATTR_ATTENDEES,
     ATTR_ORGANIZER,
     ATTR_ALARMS,
+    ATTR_ATTACHMENTS,
 )
 
 
@@ -263,17 +265,24 @@ def _anchored(vtodo: Any, alarms: list[Any]) -> list[Any]:
     """Return the alarms counting from a date the to-do has.
 
     RFC 5545 3.8.6.3: an offset counts from DTSTART, and from DUE only with
-    RELATED=END.
+    RELATED=END. One at a fixed time counts from nothing.
     """
     if "DTSTART" in vtodo:
         return alarms
-    if "DUE" not in vtodo:
-        raise Refused("alarm_needs_date")
     specs = [
         {"minutes_before": alarm} if isinstance(alarm, int) else dict(alarm)
         for alarm in alarms
     ]
-    return [{**spec, "related": spec.get("related") or "END"} for spec in specs]
+    if all(spec.get("at") is not None for spec in specs):
+        return specs
+    if "DUE" not in vtodo:
+        raise Refused("alarm_needs_date")
+    return [
+        spec
+        if spec.get("at") is not None
+        else {**spec, "related": spec.get("related") or "END"}
+        for spec in specs
+    ]
 
 
 class Tree:

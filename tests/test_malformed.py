@@ -32,7 +32,6 @@ from custom_components.ha_caldav.api import (
     import_ics,
     move_event,
     reorder_todos,
-    respond_to_invitation,
     update_todo,
 )
 from custom_components.ha_caldav.capability import (
@@ -61,7 +60,11 @@ from custom_components.ha_caldav.coordinator import (
 )
 from custom_components.ha_caldav.errors import Refused
 from custom_components.ha_caldav.event import apply_extras, read_extras, rule_from
-from custom_components.ha_caldav.recurrence import delete_event, update_event
+from custom_components.ha_caldav.recurrence import (
+    delete_event,
+    respond_to_invitation,
+    update_event,
+)
 
 ENTRY_DATA = {
     CONF_URL: "https://cloud.example.com/remote.php/dav",
@@ -203,6 +206,7 @@ def dav_calendar() -> Mock:
     calendar.name = "Personal"
     calendar.event_by_uid.side_effect = NotFoundError("nope")
     calendar.todo_by_uid.side_effect = NotFoundError("nope")
+    calendar.journal_by_uid.side_effect = NotFoundError("nope")
     calendar.search.return_value = []
     return calendar
 

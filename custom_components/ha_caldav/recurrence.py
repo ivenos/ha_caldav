@@ -8,13 +8,15 @@ them floating, a zoned one puts them in UTC.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import suppress
 from copy import deepcopy
 from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
-from itertools import islice
+from heapq import merge
+from itertools import chain, islice
 import logging
+from operator import itemgetter
 from typing import Any
 
 import caldav
@@ -39,12 +41,13 @@ from .api import (
     stamp,
     zoned_document,
 )
-from .const import ATTR_ORGANIZER
+from .const import ATTR_ORGANIZER, ATTR_TIME_ZONE
 from .errors import NETWORK_ERRORS, WRITE_ERRORS, Refused
 from .event import (
     apply_extras,
     as_datetime,
     check_rule,
+    comparable_address,
     date_values,
     framed_rule,
     holders,
@@ -94,7 +97,6 @@ def update_event(
         _update_series(ical, master, data, own_address, save, addresses)
         return
 
-    _check_no_ranged_override(ical)
     # Aligned once: to_utc reads a bare date as local midnight and an aware
     # id as its own instant.
     occurrence = _align(master, parse_recurrence_id(recurrence_id))
@@ -103,16 +105,7 @@ def update_event(
         raise Refused("not_recurring")
 
     if not this_and_future:
-        target = _override(ical, occurrence)
-        if target is None:
-            # An object of nothing but detached instances has no slots to add.
-            if "RECURRENCE-ID" in master:
-                raise Refused("occurrence_not_found", recurrence_id=recurrence_id)
-            if "RRULE" not in master and "RDATE" not in master:
-                raise Refused("not_recurring")
-            if not _is_occurrence(master, occurrence):
-                raise Refused("occurrence_not_found", recurrence_id=recurrence_id)
-            target = _new_override(ical, master, occurrence)
+        target = _exception(ical, master, occurrence, recurrence_id)
         _apply(target, _without_rrule(data), own_address)
         _share_organizer(ical, target)
         save(target)
@@ -139,14 +132,20 @@ def update_event(
     if not _has_occurrences_from(master, occurrence):
         return
 
-    # Splitting at an off-rule RDATE would re-anchor and reschedule the series.
+    # A date added by hand is no slot of the rule, and a series anchored on
+    # one would be rescheduled. It leaves as an event of its own.
+    detached: list[Any] = []
     if (
         master.get("RRULE") is not None
         and not _rule_rewritten(master, data)
         and not _ends_before(master, occurrence)
         and not _on_rule(master, occurrence)
+        and (following := _next_on_rule(master, occurrence)) is not None
     ):
-        raise Refused("rdate_split")
+        detached, data = _detach_dates(
+            calendar, ical, master, data, occurrence, following, own_address
+        )
+        occurrence = following
 
     # RFC 4791 allows one UID per object; a derived UID lets a retry overwrite
     # the tail instead of duplicating it.
@@ -167,7 +166,8 @@ def update_event(
     except WRITE_ERRORS:
         # The server may have committed the cap before the timeout.
         if _head_uncapped(calendar, uid, occurrence):
-            _discard(tail)
+            for written in (tail, *detached):
+                _discard(written)
         else:
             _LOGGER.warning(
                 "Keeping the split-off series; the head state could not be"
@@ -198,25 +198,25 @@ def _update_series(
     else:
         _share_organizer(ical, master)
     new_start = master["DTSTART"].dt
-    start_moved = to_utc(new_start) != to_utc(old_start)
-    delta = _wall(master, new_start) - _wall(master, old_start)
-    zone = _zone(master)
+    move = _mover(master, old_start)
+    start_moved = move is not None or to_utc(new_start) != to_utc(old_start)
     recur = master.get("RRULE")
     rule_changed = _rule_string(master) != old_text and not _same_rule(
-        old_rule, old_start, recur, new_start, delta, zone
+        old_rule, old_start, recur, new_start, move
     )
-    if delta and _rule_string(master) == old_text and recur and recur.get("UNTIL"):
+    if move and _rule_string(master) == old_text and recur and recur.get("UNTIL"):
         # A rule left as it was ends where it did relative to the series; one
         # at the end of time stays there.
         with suppress(OverflowError):
-            recur["UNTIL"] = [shifted(recur["UNTIL"][0], delta, zone)]
+            recur["UNTIL"] = [move(recur["UNTIL"][0])]
+            if _frame(new_start) != _frame(old_start):
+                replace(master, "rrule", framed_rule(recur, new_start))
     if start_moved and not rule_changed and not _self_anchored(master):
         raise Refused("rrule_mismatch")
     if rule_changed or start_moved:
         if "RECURRENCE-ID" in master and len(ical.walk("VEVENT")) > 1:
             # No series head: the other components are detached instances.
             raise Refused("not_recurring")
-        _check_no_ranged_override(ical)
         if rule_changed and recur is None:
             _drop_overrides(
                 ical, master, old_start, from_occurrence=False, all_overrides=True
@@ -225,17 +225,21 @@ def _update_series(
         else:
             # Moved before the new rule is checked: the editor re-spells the
             # rule whenever the start moves.
-            if delta:
+            if move:
                 for override in _overrides(ical):
                     if override is not master:
-                        _shift_override(override, delta, zone)
+                        _shift_override(override, move, master, old_start)
                         stamp(override, addresses)
-                _shift_dates(master, delta, zone)
+                _shift_dates(master, move)
             if rule_changed:
                 _filter_dates(master, "EXDATE", partial(_has_slot, master))
                 for override in _overrides(ical):
                     rid = override["RECURRENCE-ID"].dt
                     if override is not master and not _is_occurrence(master, rid):
+                        if _is_ranged(override):
+                            _extend_range(
+                                ical, master, override, _slots_after(master, rid)
+                            )
                         ical.subcomponents.remove(override)
     save(master)
 
@@ -245,10 +249,9 @@ def _same_rule(
     old_start: datetime | date,
     new: Any,
     new_start: datetime | date,
-    delta: timedelta,
-    zone: Any,
+    move: Callable[[Any], Any] | None,
 ) -> bool:
-    """Return whether a rule yields the old occurrences moved by the start's shift.
+    """Return whether a rule yields the old occurrences moved as the start was.
 
     The Home Assistant editor re-emits a rule in its own spelling whenever the
     start moves: BYDAY added, INTERVAL=1 dropped, UNTIL recomputed.
@@ -262,7 +265,7 @@ def _same_rule(
     # A bounded rule is compared to its end, so a moved end reads as a change.
     limit = _MAX_OCCURRENCES if _bounded(old) else _COMPARED
     moved = [
-        shifted(moment, delta, zone)
+        as_datetime(move(moment) if move else moment)
         for moment in islice(rule_from(old, old_start), limit)
     ]
     return moved == list(islice(rule_from(new, new_start), limit))
@@ -290,7 +293,6 @@ def delete_event(
 
     ical = _collapsed(dav_event.icalendar_instance)
     master = _master(ical)
-    _check_no_ranged_override(ical)
     occurrence = _align(master, parse_recurrence_id(recurrence_id))
 
     if this_and_future:
@@ -321,6 +323,8 @@ def delete_event(
     else:
         if "RRULE" not in master and "RDATE" not in master:
             raise Refused("not_recurring")
+        if (held := _override(ical, occurrence)) is not None:
+            _narrowed(ical, master, held)
         _add_exdate(master, occurrence)
         _drop_overrides(ical, master, occurrence, from_occurrence=False)
         if _series_empty(master) and not _overrides(ical):
@@ -328,6 +332,67 @@ def delete_event(
             return
 
     _save(dav_event, ical, master, addresses, tag)
+
+
+def respond_to_invitation(
+    calendar: caldav.Calendar,
+    uid: str,
+    partstat: str,
+    addresses: list[str],
+    recurrence_id: str | None = None,
+) -> None:
+    """Set our own participation status on an event, or on one occurrence of it."""
+    event = object_by_uid(calendar, uid)
+    tag = held_etag(event, None)
+    instance = event.icalendar_instance
+    wanted = {comparable_address(address) for address in addresses}
+    components = instance.walk("VEVENT")
+    if recurrence_id is not None:
+        master = _master(_collapsed(instance))
+        occurrence = _align(master, parse_recurrence_id(recurrence_id))
+        if _override(instance, occurrence) is None and not _invited(master, wanted):
+            raise Refused("not_an_attendee")
+        components = [_exception(instance, master, occurrence, recurrence_id)]
+    changed = False
+    for component in components:
+        for attendee in _invited(component, wanted):
+            attendee.params["PARTSTAT"] = partstat
+            # An RFC 6638 server relays the reply only once RSVP is off.
+            attendee.params["RSVP"] = "FALSE"
+            changed = True
+    if not changed:
+        raise Refused("not_an_attendee")
+    # The document, not its text, which caldav would run through vcal.fix.
+    event.icalendar_instance = instance
+    put_resource(event, tag)
+
+
+def _invited(component: Any, wanted: set[str]) -> list[Any]:
+    """Return the attendee lines of a component that name one of these addresses."""
+    attendees = component.get("ATTENDEE")
+    if attendees is None:
+        return []
+    return [
+        attendee
+        for attendee in (attendees if isinstance(attendees, list) else [attendees])
+        if comparable_address(str(attendee)) in wanted
+    ]
+
+
+def _exception(
+    ical: Any, master: Any, occurrence: datetime | date, recurrence_id: str
+) -> Any:
+    """Return the component that stands for one occurrence, adding it if needed."""
+    if (target := _override(ical, occurrence)) is not None:
+        return _narrowed(ical, master, target)
+    # An object of nothing but detached instances has no slots to add.
+    if "RECURRENCE-ID" in master:
+        raise Refused("occurrence_not_found", recurrence_id=recurrence_id)
+    if "RRULE" not in master and "RDATE" not in master:
+        raise Refused("not_recurring")
+    if not _is_occurrence(master, occurrence):
+        raise Refused("occurrence_not_found", recurrence_id=recurrence_id)
+    return _new_override(ical, master, occurrence)
 
 
 def parse_recurrence_id(value: str) -> datetime | date:
@@ -378,16 +443,101 @@ def _overrides(ical: Any) -> list[Any]:
     return [vevent for vevent in ical.walk("VEVENT") if "RECURRENCE-ID" in vevent]
 
 
-def _check_no_ranged_override(ical: Any) -> None:
-    """Refuse an object whose exception covers everything from a day onwards.
+def _is_ranged(override: Any) -> bool:
+    """Return whether an exception stands for its occurrence and every later one.
 
-    RFC 5545 RANGE=THISANDFUTURE is read nowhere here, so such an override
-    would be handled as a single day. Apple Calendar and Outlook write it.
+    RFC 5545 3.2.13. Apple Calendar and Outlook write it.
     """
+    params = getattr(override["RECURRENCE-ID"], "params", None) or {}
+    return str(params.get("RANGE", "")).upper() == "THISANDFUTURE"
+
+
+def _governing(ical: Any, master: Any, occurrence: datetime | date) -> Any | None:
+    """Return the ranged exception an occurrence takes its values from."""
+    target = to_utc(occurrence)
+    found = None
     for override in _overrides(ical):
-        params = getattr(override["RECURRENCE-ID"], "params", None) or {}
-        if str(params.get("RANGE", "")).upper() == "THISANDFUTURE":
-            raise Refused("ranged_override")
+        if override is master or not _is_ranged(override):
+            continue
+        moment = to_utc(override["RECURRENCE-ID"].dt)
+        if moment <= target and (
+            found is None or moment > to_utc(found["RECURRENCE-ID"].dt)
+        ):
+            found = override
+    return found
+
+
+def _follow(
+    component: Any, master: Any, ranged: Any, occurrence: datetime | date
+) -> None:
+    """Move a copy of a ranged exception as far off an occurrence as it is off its own.
+
+    RFC 5545 3.8.4.4: the later occurrences keep the exception's offset from
+    its slot, and its length.
+    """
+    delta = _wall(master, occurrence) - _wall(master, ranged["RECURRENCE-ID"].dt)
+    for key in ("DTSTART", "DTEND"):
+        if key in ranged:
+            replace(
+                component,
+                key.lower(),
+                shifted(ranged[key].dt, delta, _zone(master)),
+            )
+
+
+def _slots_after(master: Any, moment: datetime | date) -> Iterator[datetime | date]:
+    """Yield the occurrences of a series after a moment, the excluded ones left out."""
+    target = to_utc(moment)
+    excluded = {to_utc(value) for value in date_values(master, "EXDATE")}
+    added = sorted(
+        (
+            (to_utc(start_of(value)), start_of(value))
+            for value in date_values(master, "RDATE")
+        ),
+        key=itemgetter(0),
+    )
+    ruled: Iterable[tuple[datetime, Any]] = ()
+    if (recur := master.get("RRULE")) is not None:
+        rule = islice(rule_from(recur, master["DTSTART"].dt), _MAX_OCCURRENCES)
+        ruled = ((to_utc(value), value) for value in rule)
+    last = None
+    for instant, value in merge(added, ruled, key=itemgetter(0)):
+        if instant > target and instant not in excluded and instant != last:
+            last = instant
+            yield _align(master, value)
+
+
+def _extend_range(
+    ical: Any, master: Any, ranged: Any, slots: Iterable[datetime | date]
+) -> None:
+    """Give the first of these occurrences without an exception a copy of a ranged one.
+
+    Up to another ranged exception, which takes over from there anyway.
+    """
+    for slot in slots:
+        if (held := _override(ical, slot)) is None:
+            successor = ICalEvent.from_ical(ranged.to_ical())
+            del successor["RECURRENCE-ID"]
+            successor.add("RECURRENCE-ID", vDDDTypes(_align(master, slot)))
+            successor["RECURRENCE-ID"].params["RANGE"] = "THISANDFUTURE"
+            _follow(successor, master, ranged, slot)
+            ical.add_component(successor)
+            return
+        if _is_ranged(held):
+            return
+
+
+def _narrowed(ical: Any, master: Any, override: Any) -> Any:
+    """Return an exception that stands for its own occurrence alone.
+
+    A ranged one hands its range on to the occurrence after it first.
+    """
+    if _is_ranged(override):
+        _extend_range(
+            ical, master, override, _slots_after(master, override["RECURRENCE-ID"].dt)
+        )
+        del override["RECURRENCE-ID"].params["RANGE"]
+    return override
 
 
 def _override(ical: Any, occurrence: datetime | date) -> Any | None:
@@ -399,12 +549,17 @@ def _override(ical: Any, occurrence: datetime | date) -> Any | None:
 
 
 def _new_override(ical: Any, master: Any, occurrence: datetime | date) -> Any:
-    override = ICalEvent.from_ical(master.to_ical())
-    for key in _RECURRING:
+    """Add an exception for an occurrence, copied from what it shows as now."""
+    ranged = _governing(ical, master, occurrence)
+    override = ICalEvent.from_ical((master if ranged is None else ranged).to_ical())
+    for key in (*_RECURRING, "RECURRENCE-ID"):
         if key in override:
             del override[key]
     override.add("RECURRENCE-ID", vDDDTypes(_align(master, occurrence)))
-    _anchor_at(override, master, occurrence)
+    if ranged is None:
+        _anchor_at(override, master, occurrence)
+    else:
+        _follow(override, master, ranged, occurrence)
     ical.add_component(override)
     return override
 
@@ -538,6 +693,11 @@ def _tail_document(
     source = ICalCalendar.from_ical(ical.to_ical())
     vevent = _master(source)
     target = to_utc(_align(master, occurrence))
+    ranged = _governing(source, vevent, occurrence)
+    if ranged is not None and to_utc(ranged["RECURRENCE-ID"].dt) < target:
+        # What an earlier ranged exception gave these occurrences comes along.
+        slots = chain([_align(master, occurrence)], _slots_after(vevent, occurrence))
+        _extend_range(source, vevent, ranged, slots)
     rewritten = _rule_rewritten(master, data)
     removed = rewritten and not data["rrule"]
     # The frontend names the exception's start when the split point carries
@@ -556,16 +716,14 @@ def _tail_document(
         _without_rrule(_rebased(master, data, occurrence, baseline)),
         own_address,
     )
-    # A wall-clock delta keeps the shift stable across DST.
-    delta = _wall(master, data.get("dtstart", baseline)) - _wall(master, baseline)
-    zone = _zone(master)
+    move = _mover(vevent, slot)
     kept = _tail_rrule(master, occurrence)
     wanted = _wanted_rule(master, data, kept) if rewritten and not removed else None
     replaced = removed or (
         rewritten
         and (
             kept is None
-            or not _same_rule(kept, slot, wanted, vevent["DTSTART"].dt, delta, zone)
+            or not _same_rule(kept, slot, wanted, vevent["DTSTART"].dt, move)
         )
     )
     carried = [
@@ -593,10 +751,10 @@ def _tail_document(
             _clear_dates(vevent)
         else:
             check_rule(vevent["RRULE"], start)
-            if delta:
-                _shift_dates(vevent, delta, zone)
+            if move:
+                _shift_dates(vevent, move)
                 for override in carried:
-                    _shift_override(override, delta, zone)
+                    _shift_override(override, move, vevent, slot)
             _filter_dates(vevent, "EXDATE", partial(_has_slot, vevent))
             carried = [
                 override
@@ -607,14 +765,16 @@ def _tail_document(
         replace(vevent, "rrule", kept if wanted is None else framed_rule(wanted, start))
         if vevent.get("RRULE") is not None and not _self_anchored(vevent):
             raise Refused("rrule_mismatch")
-        if delta:
-            _shift_dates(vevent, delta, zone)
+        if move:
+            _shift_dates(vevent, move)
             # A rule given in the editor's spelling carries its own end.
             recur = vevent.get("RRULE")
             if wanted is None and recur is not None and (until := recur.get("UNTIL")):
-                recur["UNTIL"] = [shifted(until[0], delta, zone)]
+                recur["UNTIL"] = [move(until[0])]
+                if _frame(start) != _frame(slot):
+                    replace(vevent, "rrule", framed_rule(recur, start))
             for override in carried:
-                _shift_override(override, delta, zone)
+                _shift_override(override, move, vevent, slot)
     for override in carried:
         reset_replies(override)
     zones = [sub for sub in source.subcomponents if sub.name == "VTIMEZONE"]
@@ -655,6 +815,8 @@ def _rebased(
     """Return the span moved off the exception's own start onto its rule slot."""
     if baseline == occurrence or "dtstart" not in data:
         return data
+    if isinstance(data["dtstart"], datetime) != isinstance(baseline, datetime):
+        return data
     back = _wall(master, occurrence) - _wall(master, baseline)
     moved = dict(data)
     for key in ("dtstart", "dtend"):
@@ -663,15 +825,34 @@ def _rebased(
     return moved
 
 
-def _shift_override(override: Any, delta: timedelta, zone: Any) -> None:
-    """Move an exception with its series, RECURRENCE-ID included."""
+def _shift_override(
+    override: Any, move: Callable[[Any], Any], master: Any, old_start: datetime | date
+) -> None:
+    """Move an exception with its series, RECURRENCE-ID included.
+
+    Once the series changes between all-day and timed, the exception takes
+    the length of the series: its own was counted in the other unit.
+    """
+    reframed = _frame(master["DTSTART"].dt) != _frame(old_start)
     for key in ("RECURRENCE-ID", "DTSTART", "DTEND"):
         if key in override:
-            moved = shifted(override[key].dt, delta, zone)
+            moved = move(override[key].dt)
             params = override[key].params
             del override[key]
             override.add(key, moved)
-            override[key].params = params
+            if not reframed:
+                override[key].params = params
+            elif "RANGE" in params:
+                override[key].params["RANGE"] = params["RANGE"]
+    switched = isinstance(old_start, datetime) != isinstance(
+        master["DTSTART"].dt, datetime
+    )
+    if switched and "DTSTART" in override:
+        replace(override, "duration", None)
+        replace(override, "dtend", None)
+        if "DTEND" in master:
+            length = master["DTEND"].dt - master["DTSTART"].dt
+            override.add("DTEND", override["DTSTART"].dt + length)
 
 
 def _tail_uid(uid: str, occurrence: datetime | date) -> str:
@@ -735,6 +916,93 @@ def _wanted_rule(master: Any, data: dict[str, Any], kept: vRecur | None) -> vRec
     return wanted
 
 
+def _next_on_rule(master: Any, occurrence: datetime | date) -> datetime | date | None:
+    """Return the first occurrence the rule itself produces after a moment."""
+    target = to_utc(occurrence)
+    excluded = {to_utc(value) for value in date_values(master, "EXDATE")}
+    rule = rule_from(master["RRULE"], master["DTSTART"].dt)
+    for count, moment in enumerate(rule):
+        if count > _MAX_OCCURRENCES:
+            raise Refused("rrule_too_dense")
+        if to_utc(moment) > target and to_utc(moment) not in excluded:
+            return _align(master, moment)
+    return None
+
+
+def _detach_dates(
+    calendar: caldav.Calendar,
+    ical: Any,
+    master: Any,
+    data: dict[str, Any],
+    occurrence: datetime | date,
+    following: datetime | date,
+    own_address: str | None,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Write the added dates from a split up to the next rule slot as single events.
+
+    Returns what was written and the edit moved onto that slot, where the
+    series is then split. The dates and their exceptions leave the series.
+    """
+    split = _override(ical, occurrence)
+    baseline = split["DTSTART"].dt if split is not None else occurrence
+    delta = timedelta(0)
+    if isinstance(data.get("dtstart"), datetime) == isinstance(baseline, datetime):
+        delta = _wall(master, data.get("dtstart", baseline)) - _wall(master, baseline)
+    low, high = to_utc(occurrence), to_utc(following)
+
+    def leaving(value: Any) -> bool:
+        return low <= to_utc(start_of(value)) < high
+
+    moments = {
+        to_utc(start_of(value)): start_of(value)
+        for value in date_values(master, "RDATE")
+        if leaving(value)
+    }
+    written = []
+    for instant in sorted(moments):
+        document = _alone(ical, master, moments[instant])
+        vevent = _master(document)
+        if instant == low:
+            _apply(vevent, _without_rrule(data), own_address)
+        else:
+            _apply(vevent, _without_times(data), own_address)
+            for key in ("DTSTART", "DTEND"):
+                if delta and key in vevent:
+                    moved = shifted(vevent[key].dt, delta, _zone(master))
+                    replace(vevent, key.lower(), moved)
+        written.append(
+            save_document(
+                calendar, zoned_document(document), as_todo=False, overwrite=True
+            )
+        )
+    _filter_dates(master, "RDATE", lambda value: not leaving(value))
+    for override in _overrides(ical):
+        if override is not master and leaving(override["RECURRENCE-ID"].dt):
+            ical.subcomponents.remove(override)
+    return written, _rebased(master, data, following, baseline)
+
+
+def _alone(ical: Any, master: Any, moment: datetime | date) -> ICalCalendar:
+    """Return one occurrence of a series as a document of its own."""
+    source = ICalCalendar.from_ical(ical.to_ical())
+    vevent = _override(source, moment)
+    if vevent is None:
+        vevent = ICalEvent.from_ical(_master(source).to_ical())
+        _anchor_at(vevent, master, moment)
+    for key in (*_RECURRING, "RECURRENCE-ID"):
+        if key in vevent:
+            del vevent[key]
+    now = dt_util.utcnow()
+    replace(vevent, "uid", _tail_uid(str(master["UID"]), moment))
+    replace(vevent, "dtstamp", now)
+    replace(vevent, "last-modified", now)
+    replace(vevent, "sequence", None)
+    reset_replies(vevent)
+    zones = [sub for sub in source.subcomponents if sub.name == "VTIMEZONE"]
+    source.subcomponents = [*zones, vevent]
+    return source
+
+
 def _self_anchored(master: Any) -> bool:
     """Return whether DTSTART is itself an occurrence of the rule."""
     rrule = master.get("RRULE")
@@ -750,12 +1018,46 @@ def _zone(component: Any) -> Any:
     return dtstart.tzinfo if isinstance(dtstart, datetime) else None
 
 
+def _frame(start: datetime | date) -> str:
+    """Return what a start is written in: as a date, floating, or in a zone."""
+    if not isinstance(start, datetime):
+        return "date"
+    return "floating" if start.tzinfo is None else str(start.tzinfo)
+
+
+def _mover(master: Any, old_start: datetime | date) -> Callable[[Any], Any] | None:
+    """Return how a date of the series follows its start, None if it stays.
+
+    By wall clock, so the shift is stable across DST. A series that changed
+    between all-day and timed, or its zone, has its dates written anew in
+    the form of the new start: nine stays nine and a day stays the day.
+    """
+    new_start = master["DTSTART"].dt
+    if _frame(new_start) == _frame(old_start):
+        delta = _wall(master, new_start) - _wall(master, old_start)
+        zone = _zone(master)
+        return (lambda value: shifted(value, delta, zone)) if delta else None
+    delta = _wall_at(new_start, new_start) - _wall_at(old_start, old_start)
+
+    def move(value: Any) -> Any:
+        wall = _wall_at(old_start, start_of(value)) + delta
+        if not isinstance(new_start, datetime):
+            return wall.date()
+        return wall.replace(tzinfo=new_start.tzinfo)
+
+    return move
+
+
 def _wall(master: Any, value: datetime | date) -> datetime:
     """Return the value as wall-clock time in the DTSTART anchor."""
-    dtstart = master["DTSTART"].dt
+    return _wall_at(master["DTSTART"].dt, value)
+
+
+def _wall_at(dtstart: datetime | date, value: datetime | date) -> datetime:
+    """Return the value as wall-clock time in the anchor of a start."""
     if not isinstance(dtstart, datetime):
-        aligned = _align(master, value)
-        return datetime.combine(aligned, time.min)
+        day = value.date() if isinstance(value, datetime) else value
+        return datetime.combine(day, time.min)
     zone = dtstart.tzinfo or dt_util.get_default_time_zone()
     if isinstance(value, datetime) and str(value.tzinfo) == str(zone):
         # Straight off the value: a spring-forward hour comes back an hour
@@ -838,7 +1140,7 @@ def _cap_series(master: Any, occurrence: datetime | date) -> None:
     _keep_dates(master, "EXDATE", occurrence, before=True)
 
 
-def _shift_dates(component: Any, delta: timedelta, zone: Any) -> None:
+def _shift_dates(component: Any, move: Callable[[Any], Any]) -> None:
     for key in ("RDATE", "EXDATE"):
         if key not in component:
             continue
@@ -847,10 +1149,17 @@ def _shift_dates(component: Any, delta: timedelta, zone: Any) -> None:
             entries = [entries]
         moved = []
         for entry in entries:
-            rebuilt = vDDDLists(
-                [shifted(item.dt, delta, zone) for item in holders(entry)]
-            )
-            rebuilt.params = entry.params
+            values = [move(item.dt) for item in holders(entry)]
+            rebuilt = vDDDLists(values)
+            if all(
+                _frame(start_of(value)) == _frame(start_of(item.dt))
+                for value, item in zip(values, holders(entry), strict=True)
+            ):
+                rebuilt.params = entry.params
+            elif values and not isinstance(values[0], datetime):
+                # icalendar names the zone of a list by itself, but not that
+                # it holds dates.
+                rebuilt.params["VALUE"] = "DATE"
             moved.append(rebuilt)
         del component[key]
         component[key] = moved if len(moved) > 1 else moved[0]
@@ -913,16 +1222,22 @@ def _apply(
     takes an empty string for that, since None is what an absent one looks
     like upstream.
     """
+    zone = data.get(ATTR_TIME_ZONE)
     if "summary" in data:
         replace(component, "summary", data["summary"])
     if "dtstart" in data:
         if "dtend" not in data:
             _shift_end(component, data["dtstart"])
-        _set_time(component, "dtstart", data["dtstart"])
+        _set_time(component, "dtstart", data["dtstart"], zone)
     if "dtend" in data:
         # RFC 5545 forbids DURATION alongside DTEND.
         replace(component, "duration", None)
-        _set_time(component, "dtend", data["dtend"])
+        _set_time(component, "dtend", data["dtend"], zone)
+    if zone is not None:
+        for key in ("DTSTART", "DTEND"):
+            held = component[key].dt if key in component else None
+            if isinstance(held, datetime) and str(held.tzinfo) != str(zone):
+                replace(component, key.lower(), to_utc(held).astimezone(zone))
     if "description" in data:
         replace(component, "description", data["description"])
     if "location" in data:
@@ -980,19 +1295,16 @@ def _check_span(component: Any) -> None:
         raise Refused("end_before_start")
 
 
-def _set_time(component: Any, key: str, value: Any) -> None:
-    """Write a time in the anchor the component already uses.
+def _set_time(component: Any, key: str, value: Any, zone: Any = None) -> None:
+    """Write a time in the anchor the component already uses, or in a zone named.
 
     Written as received, a summary-only edit would re-anchor a UTC, TZID or
     floating series and shift its occurrences across DST.
     """
     old = component[key].dt if key in component else None
-    if (
-        old is not None
-        and isinstance(old, datetime) != isinstance(value, datetime)
-        and any(k in component for k in ("RRULE", "RDATE", "RECURRENCE-ID"))
-    ):
-        raise Refused("allday_timed_switch")
+    if zone is not None and isinstance(value, datetime):
+        replace(component, key, value)
+        return
     if (
         isinstance(old, datetime)
         and isinstance(value, datetime)

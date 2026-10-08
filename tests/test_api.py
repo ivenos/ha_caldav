@@ -8,6 +8,7 @@ from caldav.calendarobjectresource import Event as CaldavEvent
 from caldav.davclient import requests
 from caldav.elements import dav, ical
 from caldav.lib.error import AuthorizationError, NotFoundError, PutError, ReportError
+from caldav.lib.url import URL
 from conftest import RecordingClient, dav_calendar, written_through
 from icalendar import Calendar as ICalCalendar
 import pytest
@@ -15,6 +16,7 @@ from test_todo_recurrence import FakeTodoCalendar
 
 from custom_components.ha_caldav.api import (
     _SORT_GAP,
+    attendee_free_busy,
     create_calendar,
     create_event,
     create_todo,
@@ -24,14 +26,13 @@ from custom_components.ha_caldav.api import (
     import_ics,
     move_event,
     reorder_todos,
-    respond_to_invitation,
     set_calendar_color,
     update_todo,
 )
 from custom_components.ha_caldav.const import EVENT_ATTRIBUTES, SORT_ORDER_PROPERTY
 from custom_components.ha_caldav.errors import Refused
 from custom_components.ha_caldav.event import apply_extras
-from custom_components.ha_caldav.recurrence import delete_event
+from custom_components.ha_caldav.recurrence import delete_event, respond_to_invitation
 
 EVENT = (
     "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n"
@@ -46,6 +47,7 @@ def _missing_calendar() -> Mock:
     calendar = dav_calendar()
     calendar.event_by_uid.side_effect = NotFoundError("nope")
     calendar.todo_by_uid.side_effect = NotFoundError("nope")
+    calendar.journal_by_uid.side_effect = NotFoundError("nope")
     calendar.search.return_value = []
     return calendar
 
@@ -179,6 +181,7 @@ def test_move_carries_an_object_whose_first_component_is_an_exception() -> None:
     source.event_by_uid.return_value = event
     target.event_by_uid.side_effect = NotFoundError("uid-1 not found on server")
     target.todo_by_uid.side_effect = NotFoundError("uid-1 not found on server")
+    target.journal_by_uid.side_effect = NotFoundError("uid-1 not found on server")
 
     move_event(source, target, "uid-1", keep_original=False)
 
@@ -274,6 +277,7 @@ def _move_pair() -> tuple[Mock, Mock, Mock]:
     source.event_by_uid.return_value = event
     target.event_by_uid.side_effect = NotFoundError("uid-1 not found on server")
     target.todo_by_uid.side_effect = NotFoundError("uid-1 not found on server")
+    target.journal_by_uid.side_effect = NotFoundError("uid-1 not found on server")
     return event, source, target
 
 
@@ -787,6 +791,7 @@ def test_a_large_import_sees_a_clash_of_either_kind() -> None:
     assert [call.kwargs for call in calendar.search.call_args_list] == [
         {"event": True, "props": ANY},
         {"todo": True, "include_completed": True, "props": ANY},
+        {"journal": True, "props": ANY},
     ]
 
 
@@ -1594,6 +1599,7 @@ def test_the_clash_check_asks_for_each_kind_rather_than_for_any() -> None:
     calendar.object_by_uid.assert_not_called()
     calendar.event_by_uid.assert_called_once_with("uid-1")
     calendar.todo_by_uid.assert_called_once_with("uid-1")
+    calendar.journal_by_uid.assert_called_once_with("uid-1")
 
 
 @pytest.mark.parametrize(
@@ -1626,12 +1632,13 @@ def test_an_import_with_two_series_under_one_uid_is_refused() -> None:
         import_ics(_missing_calendar(), doubled)
 
 
-def test_setting_alarms_keeps_the_email_ones_it_cannot_write() -> None:
+def test_setting_alarms_keeps_only_the_ones_with_an_action_it_cannot_write() -> None:
     component = _component(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VEVENT\r\n"
         "UID:e-1\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:20260706T090000Z\r\n"
         "BEGIN:VALARM\r\nACTION:EMAIL\r\nTRIGGER:-P1D\r\nSUMMARY:x\r\n"
         "DESCRIPTION:Mail me\r\nATTENDEE:mailto:me@example.com\r\nEND:VALARM\r\n"
+        "BEGIN:VALARM\r\nACTION:X-SNOOZE\r\nTRIGGER:-PT5M\r\nEND:VALARM\r\n"
         "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nDESCRIPTION:x\r\n"
         "END:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
     )
@@ -1639,7 +1646,7 @@ def test_setting_alarms_keeps_the_email_ones_it_cannot_write() -> None:
     apply_extras(component, {"alarms": [10]})
 
     actions = sorted(str(alarm["ACTION"]) for alarm in component.walk("VALARM"))
-    assert actions == ["DISPLAY", "EMAIL"]
+    assert actions == ["DISPLAY", "X-SNOOZE"]
 
 
 def test_a_move_whose_delete_fails_takes_its_copy_back() -> None:
@@ -1699,7 +1706,7 @@ def test_the_export_names_the_lines_it_could_not_carry(caplog) -> None:
     item = Mock(url="https://dav.test/cal/uid-1.ics")
     item.icalendar_instance = ICalCalendar.from_ical(UNREADABLE_RULE)
     calendar = Mock()
-    calendar.search.side_effect = [[item], []]
+    calendar.search.side_effect = [[item], [], []]
 
     export_ics(calendar, None)
 
@@ -1898,3 +1905,160 @@ def test_deleting_an_object_the_url_missed_is_not_reported_as_done() -> None:
 
     with pytest.raises(NotFoundError):
         delete_todos(calendar, ["uid-1"], {})
+
+
+SCHEDULE_RESPONSE = """<?xml version="1.0" encoding="utf-8"?>
+<C:schedule-response xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <C:response>
+    <C:recipient><D:href>mailto:Ann@example.com</D:href></C:recipient>
+    <C:request-status>2.0;Success</C:request-status>
+    <C:calendar-data>BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//EN
+METHOD:REPLY
+BEGIN:VFREEBUSY
+DTSTART:20260706T000000Z
+DTEND:20260707T000000Z
+FREEBUSY;FBTYPE=BUSY:20260706T090000Z/20260706T100000Z
+END:VFREEBUSY
+END:VCALENDAR
+</C:calendar-data>
+  </C:response>
+  <C:response>
+    <C:recipient><D:href>mailto:nobody@example.com</D:href></C:recipient>
+    <C:request-status>3.7;Invalid calendar user</C:request-status>
+  </C:response>
+</C:schedule-response>
+"""
+
+
+OUTBOX = (
+    b"<c:schedule-outbox-URL><d:href>/calendars/me/outbox/</d:href>"
+    b"</c:schedule-outbox-URL>"
+)
+
+
+def _scheduling_client(
+    answer: str = SCHEDULE_RESPONSE, status: int = 200, outbox: bytes = OUTBOX
+) -> Mock:
+    from lxml import etree
+
+    client = Mock()
+    principal = client.principal.return_value
+    principal.url = URL("https://dav.test/principals/me/")
+    principal.get_properties.return_value = Mock(
+        tree=etree.XML(
+            b'<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+            b"<d:response><d:propstat><d:prop>" + outbox + b"</d:prop></d:propstat>"
+            b"</d:response></d:multistatus>"
+        )
+    )
+    client.post.return_value = Mock(
+        status=status, tree=etree.XML(answer.encode()) if answer else None
+    )
+    return client
+
+
+def test_free_busy_of_others_is_asked_of_the_outbox() -> None:
+    client = _scheduling_client()
+
+    busy = attendee_free_busy(
+        client,
+        datetime(2026, 7, 6, tzinfo=UTC),
+        datetime(2026, 7, 7, tzinfo=UTC),
+        ["ann@example.com", "nobody@example.com"],
+        ["mailto:me@example.com", "/principals/me/"],
+    )
+
+    assert busy == {
+        "ann@example.com": [
+            {"start": "2026-07-06T09:00:00+00:00", "end": "2026-07-06T10:00:00+00:00"}
+        ],
+        "nobody@example.com": None,
+    }
+    url, body, headers = client.post.call_args.args
+    assert url == "https://dav.test/calendars/me/outbox/"
+    assert headers["Content-Type"].startswith("text/calendar")
+    request = body.decode().replace("\r\n ", "")
+    assert "METHOD:REQUEST" in request
+    assert "ORGANIZER:mailto:me@example.com" in request
+    assert "ATTENDEE:mailto:ann@example.com" in request
+    assert "DTSTART:20260706T000000Z" in request
+
+
+def test_somebody_the_server_left_out_of_its_answer_is_not_reported_free() -> None:
+    client = _scheduling_client()
+
+    busy = attendee_free_busy(
+        client,
+        datetime(2026, 7, 6, tzinfo=UTC),
+        datetime(2026, 7, 7, tzinfo=UTC),
+        ["carl@example.com"],
+        ["mailto:me@example.com", "/principals/me/"],
+    )
+
+    assert busy == {"carl@example.com": None}
+
+
+def test_a_refused_free_busy_request_is_an_error() -> None:
+    client = _scheduling_client(answer="", status=403)
+
+    with pytest.raises(PutError):
+        attendee_free_busy(
+            client,
+            datetime(2026, 7, 6, tzinfo=UTC),
+            datetime(2026, 7, 7, tzinfo=UTC),
+            ["ann@example.com"],
+            ["mailto:me@example.com", "/principals/me/"],
+        )
+
+
+def test_a_server_without_an_outbox_does_no_scheduling() -> None:
+    client = _scheduling_client(outbox=b"<c:schedule-outbox-URL/>")
+
+    with pytest.raises(Refused, match="no_scheduling"):
+        attendee_free_busy(
+            client,
+            datetime(2026, 7, 6, tzinfo=UTC),
+            datetime(2026, 7, 7, tzinfo=UTC),
+            ["ann@example.com"],
+            ["https://dav.test/principals/me/"],
+        )
+
+    client.post.assert_not_called()
+
+
+def test_a_recipient_named_without_an_href_is_still_matched() -> None:
+    """SOGo writes the address straight into the recipient element."""
+    client = _scheduling_client(
+        SCHEDULE_RESPONSE.replace(
+            "<C:recipient><D:href>mailto:Ann@example.com</D:href></C:recipient>",
+            "<C:recipient>mailto:Ann@example.com</C:recipient>",
+        )
+    )
+
+    busy = attendee_free_busy(
+        client,
+        datetime(2026, 7, 6, tzinfo=UTC),
+        datetime(2026, 7, 7, tzinfo=UTC),
+        ["ann@example.com"],
+        ["mailto:me@example.com"],
+    )
+
+    assert len(busy["ann@example.com"]) == 1
+
+
+def test_the_organizer_is_a_path_where_the_account_has_no_email_address() -> None:
+    """sabre/dav refuses an organizer it does not list among the account's own."""
+    client = _scheduling_client()
+
+    attendee_free_busy(
+        client,
+        datetime(2026, 7, 6, tzinfo=UTC),
+        datetime(2026, 7, 7, tzinfo=UTC),
+        ["ann@example.com"],
+        ["https://dav.test/principals/me/"],
+    )
+
+    request = client.post.call_args.args[1].decode().replace("\r\n ", "")
+    assert "ORGANIZER:/principals/me/" in request

@@ -153,9 +153,6 @@
     "alarm_needs_date": {
       "message": "Un recordatorio necesita una fecha de inicio o de vencimiento desde la que contar."
     },
-    "allday_timed_switch": {
-      "message": "Una serie recurrente no puede pasar de ser de todo el día a tener hora, ni al revés."
-    },
     "ambiguous_calendar": {
       "message": "Esta cuenta tiene más de un calendario llamado {name}; cambia el nombre de uno primero."
     },
@@ -166,7 +163,7 @@
       "message": "No se puede conectar con el servidor CalDAV ({error})."
     },
     "document_empty": {
-      "message": "El documento no contiene ningún evento ni ninguna tarea."
+      "message": "El documento no contiene ningún evento, tarea ni entrada de diario."
     },
     "document_no_uid": {
       "message": "El documento contiene un componente sin UID."
@@ -222,12 +219,6 @@
     "parent_not_found": {
       "message": "En esta lista no hay ninguna tarea {parent} de la que pueda depender."
     },
-    "ranged_override": {
-      "message": "Esta serie tiene una excepción que se aplica a partir de una ocurrencia. Edítala en la aplicación que la creó."
-    },
-    "rdate_split": {
-      "message": "Esta ocurrencia se añadió a la serie a mano, y ahí no se puede dividir la serie."
-    },
     "read_only": {
       "message": "{name} es de solo lectura, así que no se puede escribir en él."
     },
@@ -272,6 +263,36 @@
     },
     "unreadable_lines": {
       "message": "El documento contiene líneas que no se pueden leer: {lines}"
+    },
+    "email_alarm_needs_recipient": {
+      "message": "Un recordatorio por correo necesita attendees a quienes enviarlo."
+    },
+    "attachment_not_found": {
+      "message": "Este elemento no tiene ningún adjunto incrustado llamado {name}."
+    },
+    "attachment_unreadable": {
+      "message": "No se pudo leer el archivo {path}."
+    },
+    "path_not_allowed": {
+      "message": "Home Assistant no tiene permiso para leer {path}. Añade su carpeta a allowlist_external_dirs."
+    },
+    "no_journals": {
+      "message": "{name} no admite entradas de diario."
+    },
+    "no_journal_in_object": {
+      "message": "Este elemento no está guardado como entrada de diario, así que no se puede cambiar aquí."
+    },
+    "sharing_unsupported": {
+      "message": "Este servidor no ofrece un uso compartido de calendarios al que se pueda acceder desde aquí."
+    },
+    "sharee_not_found": {
+      "message": "El servidor no conoce ninguna cuenta {user} con la que compartir."
+    },
+    "not_shared_with": {
+      "message": "Este calendario no está compartido con {user}."
+    },
+    "unknown_time_zone": {
+      "message": "{time_zone} no es una zona horaria. Usa un nombre como America/New_York."
     }
   },
   "selector": {
@@ -295,7 +316,8 @@
     "calendar_components": {
       "options": {
         "vevent": "Eventos",
-        "vtodo": "Tareas"
+        "vtodo": "Tareas",
+        "vjournal": "Entradas de diario"
       }
     },
     "event_status": {
@@ -339,6 +361,27 @@
         "category": "Categoría",
         "uid": "UID"
       }
+    },
+    "journal_status": {
+      "options": {
+        "draft": "Borrador",
+        "final": "Definitiva",
+        "cancelled": "Cancelada"
+      }
+    },
+    "journal_search_field": {
+      "options": {
+        "summary": "Título",
+        "description": "Descripción",
+        "category": "Categoría",
+        "uid": "UID"
+      }
+    },
+    "share_access": {
+      "options": {
+        "read": "Lectura",
+        "read_write": "Lectura y escritura"
+      }
     }
   },
   "services": {
@@ -348,7 +391,7 @@
       "fields": {
         "text": {
           "name": "Texto",
-          "description": "El texto a buscar. Los servidores buscan coincidencias parciales."
+          "description": "El texto a buscar. Los servidores buscan coincidencias parciales. Déjalo vacío para todos los eventos."
         },
         "field": {
           "name": "Campo",
@@ -375,6 +418,24 @@
         "end": {
           "name": "Fin",
           "description": "Final de la ventana."
+        },
+        "attendees": {
+          "name": "Asistentes",
+          "description": "Direcciones de correo de otras personas por las que preguntar al servidor. Sus periodos ocupados se devuelven en attendees, null para quien no pueda responder. Requiere un servidor con planificación CalDAV."
+        }
+      }
+    },
+    "get_invitations": {
+      "name": "Consultar invitaciones",
+      "description": "Devuelve los eventos del calendario que aún esperan tu respuesta. Requiere un servidor con planificación CalDAV.",
+      "fields": {
+        "start": {
+          "name": "Inicio",
+          "description": "Solo invitaciones que terminan después de este momento. Si no se indica, ahora."
+        },
+        "end": {
+          "name": "Fin",
+          "description": "Solo invitaciones que empiezan antes de este momento."
         }
       }
     },
@@ -401,6 +462,10 @@
         "end_date": {
           "name": "Fecha de fin",
           "description": "Para un evento de todo el día. El día siguiente al último."
+        },
+        "time_zone": {
+          "name": "Zona horaria",
+          "description": "La zona horaria del inicio y del fin, como America/New_York. Si no se indica, la de Home Assistant."
         },
         "description": {
           "name": "Descripción",
@@ -448,7 +513,11 @@
         },
         "alarms": {
           "name": "Recordatorios",
-          "description": "Minutos antes del inicio, u objetos con minutes_before, action, related y description."
+          "description": "Minutos antes del inicio, u objetos con minutes_before o at, action, related y description, y summary y attendees para un correo."
+        },
+        "attachments": {
+          "name": "Adjuntos",
+          "description": "Enlaces, u objetos con url, name y media_type. Un objeto con path incrusta ese archivo."
         }
       },
       "sections": {
@@ -494,6 +563,10 @@
           "name": "Fecha de fin",
           "description": "Para un evento de todo el día. El día siguiente al último."
         },
+        "time_zone": {
+          "name": "Zona horaria",
+          "description": "Traslada el evento a esta zona horaria, como America/New_York. Un inicio o fin indicado junto a ella se lee en ella."
+        },
         "description": {
           "name": "Descripción",
           "description": "El texto del evento."
@@ -540,7 +613,11 @@
         },
         "alarms": {
           "name": "Recordatorios",
-          "description": "Minutos antes del inicio, u objetos con minutes_before, action, related y description."
+          "description": "Minutos antes del inicio, u objetos con minutes_before o at, action, related y description, y summary y attendees para un correo."
+        },
+        "attachments": {
+          "name": "Adjuntos",
+          "description": "Enlaces, u objetos con url, name y media_type. Un objeto con path incrusta ese archivo."
         }
       },
       "sections": {
@@ -660,7 +737,11 @@
         },
         "alarms": {
           "name": "Recordatorios",
-          "description": "Minutos antes del inicio, o antes del vencimiento si no lo hay, u objetos con minutes_before, action, related y description."
+          "description": "Minutos antes del inicio, o antes del vencimiento si no lo hay, u objetos con minutes_before o at, action, related y description, y summary y attendees para un correo."
+        },
+        "attachments": {
+          "name": "Adjuntos",
+          "description": "Enlaces, u objetos con url, name y media_type. Un objeto con path incrusta ese archivo."
         }
       },
       "sections": {
@@ -748,7 +829,11 @@
         },
         "alarms": {
           "name": "Recordatorios",
-          "description": "Minutos antes del inicio, o antes del vencimiento si no lo hay, u objetos con minutes_before, action, related y description."
+          "description": "Minutos antes del inicio, o antes del vencimiento si no lo hay, u objetos con minutes_before o at, action, related y description, y summary y attendees para un correo."
+        },
+        "attachments": {
+          "name": "Adjuntos",
+          "description": "Enlaces, u objetos con url, name y media_type. Un objeto con path incrusta ese archivo."
         }
       },
       "sections": {
@@ -794,9 +879,129 @@
         }
       }
     },
+    "create_journal": {
+      "name": "Crear entrada de diario",
+      "description": "Crea una entrada de diario en un calendario que las admite.",
+      "fields": {
+        "summary": {
+          "name": "Título",
+          "description": "El título de la entrada."
+        },
+        "description": {
+          "name": "Descripción",
+          "description": "El texto de la entrada."
+        },
+        "start_date": {
+          "name": "Fecha",
+          "description": "El día al que pertenece la entrada."
+        },
+        "start_date_time": {
+          "name": "Fecha y hora",
+          "description": "El momento al que pertenece la entrada."
+        },
+        "status": {
+          "name": "Estado",
+          "description": "Si la entrada es un borrador, definitiva o está cancelada."
+        },
+        "classification": {
+          "name": "Confidencialidad",
+          "description": "Hasta qué punto es privada la entrada."
+        },
+        "categories": {
+          "name": "Categorías",
+          "description": "Una lista de nombres de categoría."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Un enlace de la entrada."
+        },
+        "attachments": {
+          "name": "Adjuntos",
+          "description": "Enlaces, u objetos con url, name y media_type. Un objeto con path incrusta ese archivo."
+        }
+      }
+    },
+    "update_journal": {
+      "name": "Actualizar entrada de diario",
+      "description": "Cambia cualquier subconjunto de las propiedades de una entrada de diario. Un campo vacío se borra.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "El UID de la entrada a cambiar."
+        },
+        "summary": {
+          "name": "Título",
+          "description": "El título de la entrada."
+        },
+        "description": {
+          "name": "Descripción",
+          "description": "El texto de la entrada."
+        },
+        "start_date": {
+          "name": "Fecha",
+          "description": "El día al que pertenece la entrada."
+        },
+        "start_date_time": {
+          "name": "Fecha y hora",
+          "description": "El momento al que pertenece la entrada."
+        },
+        "status": {
+          "name": "Estado",
+          "description": "Si la entrada es un borrador, definitiva o está cancelada."
+        },
+        "classification": {
+          "name": "Confidencialidad",
+          "description": "Hasta qué punto es privada la entrada."
+        },
+        "categories": {
+          "name": "Categorías",
+          "description": "Una lista de nombres de categoría."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Un enlace de la entrada."
+        },
+        "attachments": {
+          "name": "Adjuntos",
+          "description": "Enlaces, u objetos con url, name y media_type. Un objeto con path incrusta ese archivo."
+        }
+      }
+    },
+    "delete_journal": {
+      "name": "Eliminar entrada de diario",
+      "description": "Elimina una entrada de diario.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "El UID de la entrada a eliminar."
+        }
+      }
+    },
+    "search_journals": {
+      "name": "Buscar entradas de diario",
+      "description": "Devuelve las entradas de diario del calendario, primero las que tienen fecha.",
+      "fields": {
+        "text": {
+          "name": "Texto",
+          "description": "Devolver solo las entradas que contienen este texto. Déjalo vacío para todas."
+        },
+        "field": {
+          "name": "Campo",
+          "description": "En qué propiedad buscar."
+        },
+        "start": {
+          "name": "Inicio",
+          "description": "Solo entradas con fecha posterior a este momento. Una ventana deja fuera las entradas sin fecha."
+        },
+        "end": {
+          "name": "Fin",
+          "description": "Solo entradas con fecha anterior a este momento."
+        }
+      }
+    },
     "import_ics": {
       "name": "Importar iCalendar",
-      "description": "Escribe los eventos y las tareas de un documento iCalendar en el calendario.",
+      "description": "Escribe los eventos, las tareas y las entradas de diario de un documento iCalendar en el calendario.",
       "fields": {
         "ics": {
           "name": "Documento iCalendar",
@@ -810,7 +1015,7 @@
       "fields": {
         "uid": {
           "name": "UID",
-          "description": "Exporta solo este elemento, evento o tarea. Déjalo vacío para el calendario completo."
+          "description": "Exporta solo este elemento, sea del tipo que sea. Déjalo vacío para el calendario completo."
         }
       }
     },
@@ -824,6 +1029,34 @@
         }
       }
     },
+    "share_calendar": {
+      "name": "Compartir calendario",
+      "description": "Comparte el calendario con otra cuenta del servidor, solo administradores. Funciona con Nextcloud y con servidores basados en sabre/dav, como Baikal.",
+      "fields": {
+        "user": {
+          "name": "Usuario",
+          "description": "El nombre de usuario de la cuenta, o su dirección de correo en sabre/dav."
+        },
+        "access": {
+          "name": "Acceso",
+          "description": "Si la cuenta solo puede leer o también escribir."
+        }
+      }
+    },
+    "unshare_calendar": {
+      "name": "Dejar de compartir calendario",
+      "description": "Deja de compartir el calendario con una cuenta, solo administradores.",
+      "fields": {
+        "user": {
+          "name": "Usuario",
+          "description": "La cuenta con la que dejar de compartir, tal como la nombra la lista de usos compartidos."
+        }
+      }
+    },
+    "get_calendar_shares": {
+      "name": "Consultar usos compartidos",
+      "description": "Devuelve las cuentas con las que se comparte el calendario y lo que puede hacer cada una."
+    },
     "respond_to_invitation": {
       "name": "Responder a una invitación",
       "description": "Responde a un evento al que te han invitado. Requiere un servidor con planificación CalDAV.",
@@ -831,6 +1064,10 @@
         "uid": {
           "name": "UID",
           "description": "El UID del evento al que responder."
+        },
+        "recurrence_id": {
+          "name": "ID de recurrencia",
+          "description": "Responder solo a esta ocurrencia de una serie recurrente."
         },
         "response": {
           "name": "Respuesta",

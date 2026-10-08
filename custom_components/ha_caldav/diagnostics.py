@@ -10,6 +10,7 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 
+from .capability import account_calendars
 from .color import Collection, fetch_collections
 from .connection import calendar_key
 from .const import (
@@ -85,14 +86,14 @@ def _leaves(keys: list[Any]) -> dict[Any, str]:
 def _calendars(data: HaCaldavRuntimeData) -> Any:
     """Return each calendar with its color and what the server allows on it."""
     try:
-        found = data.client.principal().calendars()
+        found, _ = account_calendars(data.client)
     except Exception as err:  # noqa: BLE001
         # The error text embeds the server url and the username.
         return {"error": type(err).__name__}
     collections: dict[str, Collection] = {}
     color_error = None
     try:
-        collections = fetch_collections(data.client)
+        collections = fetch_collections(data.client, data.delegations)
     except Exception as err:  # noqa: BLE001
         # Anything from AssertionError to TypeError on a malformed multistatus.
         color_error = type(err).__name__

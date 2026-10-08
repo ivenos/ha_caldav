@@ -21,6 +21,7 @@ RANGE_THIS_AND_FUTURE = "THISANDFUTURE"
 
 COMPONENT_EVENT = "VEVENT"
 COMPONENT_TODO = "VTODO"
+COMPONENT_JOURNAL = "VJOURNAL"
 
 # RFC 3744 privileges that grant writes; servers disagree on which one they
 # report for a shared calendar, so any of them counts.
@@ -28,6 +29,7 @@ WRITE_PRIVILEGES = frozenset({"write", "write-content", "all", "bind"})
 
 SERVICE_SEARCH_EVENTS = "search_events"
 SERVICE_GET_FREE_BUSY = "get_free_busy"
+SERVICE_GET_INVITATIONS = "get_invitations"
 SERVICE_CREATE_EVENT = "create_event"
 SERVICE_UPDATE_EVENT = "update_event"
 SERVICE_DELETE_EVENT = "delete_event"
@@ -42,9 +44,17 @@ SERVICE_CREATE_TODO = "create_todo"
 SERVICE_UPDATE_TODO = "update_todo"
 SERVICE_SEARCH_TODOS = "search_todos"
 SERVICE_MOVE_TODO = "move_todo"
+SERVICE_CREATE_JOURNAL = "create_journal"
+SERVICE_UPDATE_JOURNAL = "update_journal"
+SERVICE_DELETE_JOURNAL = "delete_journal"
+SERVICE_SEARCH_JOURNALS = "search_journals"
+SERVICE_SHARE_CALENDAR = "share_calendar"
+SERVICE_UNSHARE_CALENDAR = "unshare_calendar"
+SERVICE_GET_CALENDAR_SHARES = "get_calendar_shares"
 
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 ATTR_ALARMS = "alarms"
+ATTR_ATTACHMENTS = "attachments"
 ATTR_ATTENDEES = "attendees"
 ATTR_CATEGORIES = "categories"
 ATTR_CLASSIFICATION = "classification"
@@ -67,6 +77,9 @@ ATTR_RENAME = "rename"
 ATTR_PARENT = "parent"
 ATTR_PARENT_UID = "parent_uid"
 ATTR_PERCENT_COMPLETE = "percent_complete"
+ATTR_TIME_ZONE = "time_zone"
+ATTR_USER = "user"
+ATTR_ACCESS = "access"
 
 # What the upcoming event publishes beyond core's fields; kept out of the recorder.
 EVENT_ATTRIBUTES = (
@@ -79,6 +92,7 @@ EVENT_ATTRIBUTES = (
     ATTR_ATTENDEES,
     ATTR_ORGANIZER,
     ATTR_ALARMS,
+    ATTR_ATTACHMENTS,
 )
 
 # Closed vocabularies from RFC 5545.
@@ -86,6 +100,9 @@ EVENT_STATUSES = ("TENTATIVE", "CONFIRMED", "CANCELLED")
 EVENT_CLASSIFICATIONS = ("PUBLIC", "PRIVATE", "CONFIDENTIAL")
 EVENT_TRANSPARENCIES = ("OPAQUE", "TRANSPARENT")
 TODO_STATUSES = ("NEEDS-ACTION", "IN-PROCESS", "COMPLETED", "CANCELLED")
+JOURNAL_STATUSES = ("DRAFT", "FINAL", "CANCELLED")
+ALARM_ACTIONS = ("DISPLAY", "AUDIO", "EMAIL")
+SHARE_ACCESS = ("read", "read_write")
 
 PARTSTAT_BY_RESPONSE = {
     "accept": "ACCEPTED",
@@ -110,8 +127,12 @@ TODO_SEARCH_FIELDS = (
     "uid",
 )
 
+JOURNAL_SEARCH_FIELDS = ("summary", "description", "category", "uid")
+
 # No RFC 5545 equivalent; Nextcloud Tasks and Apple Reminders both order by it.
 SORT_ORDER_PROPERTY = "X-APPLE-SORT-ORDER"
+
+EVENT_REMINDER = "ha_caldav_reminder"
 
 ISSUE_BUILTIN_CALDAV = "builtin_caldav_conflict"
 ISSUE_NO_SYNC_COLLECTION = "no_sync_collection"

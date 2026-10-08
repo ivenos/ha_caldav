@@ -53,25 +53,46 @@ tests/live-test.sh nextcloud 31 -- -v    # an image tag, then pytest arguments
 
 ## Commits
 
-Conventional Commits (https://www.conventionalcommits.org/en/v1.0.0/) with a short imperative subject.
+- Conventional Commits (https://www.conventionalcommits.org/en/v1.0.0/) with a short imperative subject.
+- A commit that does more than one thing lists its changes in the body, under the changelog section names as plain words. Changes to CI and tests are listed there too:
+
+```
+Added
+- Journal entries can be created and searched
+
+Changed
+- CI tests sharing with a second account
+
+Fixed
+- A time with a UTC offset was stored with a broken time zone
+```
+
+## Changelog
+
+- `CHANGELOG.md` follows Keep a Changelog (https://keepachangelog.com/en/1.1.0/), with `Breaking changes` as the first section and `Dependencies` as the last.
+- Every commit that changes something for users adds its entry under `Unreleased`. CI, tests and refactoring stay out.
+- An entry is one short sentence in plain words that anyone understands. Details belong in the README.
+- What users have to act on after an update goes under `Breaking changes`.
+- An entry that goes back to an issue or a pull request ends with its number: `(#12)`.
 
 ## Releases
 
-- A `v1.2.0` tag builds a draft release with `ha_caldav.zip`, with the version from the tag in `manifest.json`. The version in the repository is a placeholder.
+- Run the Release workflow with the new version, such as `1.5.0`. It turns `Unreleased` into that version, tags the commit and builds a draft release with `ha_caldav.zip` and the notes from `CHANGELOG.md`.
+- A tag pushed by hand builds the draft too, from the section of its version.
+- The workflow sets the version in `manifest.json`. The one in the repository is a placeholder.
 - HACS shows the README of the latest release.
 - Rebuild the README screenshots before every release.
-- The changelog lives in the GitHub release notes, in Keep a Changelog style (https://keepachangelog.com/en/1.1.0/). There is no CHANGELOG.md.
 
 ## Dependencies
 
 - GitHub Actions stay on version tags, never commit SHAs. hassfest has no tagged release and runs from `master`.
-- Renovate opens the bumps. Other PRs leave dependencies alone.
-- `caldav`, `icalendar` and `vobject` follow Home Assistant core. `manifest.json` lists them as minimum versions, the ones the oldest supported Home Assistant pins. `requirements_test.txt` pins the versions the newest Home Assistant pins, its beta included. Both move by hand.
+- Renovate opens the bumps and adds each one to the changelog. The release adds the numbers of their pull requests. Other PRs leave dependencies alone.
+- `caldav`, `icalendar` and `vobject` follow Home Assistant core. `manifest.json` lists them as minimum versions, the ones the oldest supported Home Assistant pins. `requirements_test.txt` pins the versions the newest Home Assistant pins, its beta included. Both move by hand, with `.github/scripts/changelog.sh dependency NAME FROM TO` for the changelog.
 - `python-dateutil` is not listed in `manifest.json` or `requirements_test.txt`.
 
 ## Pull requests
 
-- One concern per PR, with tests for behavior changes.
+- One concern per PR, with tests and a changelog entry for behavior changes.
 - Only the PR author and the maintainer commit to it.
 - `pytest`, `ruff check` and `ruff format --check` must pass.
 - The test plan names the CalDAV server and what you exercised: the calendar, the to-do list or which actions.

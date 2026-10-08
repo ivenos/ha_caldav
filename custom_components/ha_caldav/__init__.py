@@ -18,6 +18,8 @@ from homeassistant.helpers import (
 from homeassistant.helpers.typing import ConfigType
 
 from .capability import (
+    Delegation,
+    account_calendars,
     capability_for,
     fetch_address_set,
     fetch_capabilities,
@@ -134,7 +136,7 @@ def _registered_key(entry_id: str, unique_id: str, domain: str) -> str | None:
 
 async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> bool:
     """Set up the CalDAV account from a config entry."""
-    client, calendars = await _async_connect(hass, entry)
+    client, calendars, delegations = await _async_connect(hass, entry)
     _async_key_by_url(hass, entry, calendars)
 
     async def close_client() -> None:
@@ -145,7 +147,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
     entry.async_on_unload(close_client)
 
     try:
-        capabilities = await hass.async_add_executor_job(fetch_capabilities, client)
+        capabilities = await hass.async_add_executor_job(
+            fetch_capabilities, client, delegations
+        )
     except Exception as err:  # noqa: BLE001
         # Every calendar then keeps the permissive default.
         _LOGGER.debug("Could not read calendar capabilities: %s", err)
@@ -161,7 +165,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
     scan_interval = poll_interval(entry)
     selected = entry.options.get(CONF_CALENDARS)
 
-    colors = HaCaldavColorCoordinator(hass, entry, client, scan_interval)
+    colors = HaCaldavColorCoordinator(hass, entry, client, scan_interval, delegations)
     await colors.async_refresh()
 
     managed: list[ManagedCalendar] = []
@@ -185,6 +189,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
                     sync_collection,
                 ),
                 read_only=settings[CONF_READ_ONLY],
+                addresses=_owner_addresses(calendar, delegations),
             )
         )
 
@@ -206,6 +211,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
         calendars=managed,
         address_set=address_set,
         sync_collection=sync_collection,
+        delegations=delegations,
     )
     _async_drop_account_device(hass, entry)
     _async_prune_entities(hass, entry, managed, calendars)
@@ -224,9 +230,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
     return True
 
 
+def _owner_addresses(
+    calendar: caldav.Calendar, delegations: list[Delegation]
+) -> list[str] | None:
+    """Return the addresses of the account a delegated calendar belongs to."""
+    key = calendar_key(calendar.url)
+    for delegation in delegations:
+        if key.startswith(calendar_key(delegation.home.url) + "/"):
+            return delegation.addresses
+    return None
+
+
 async def _async_connect(
     hass: HomeAssistant, entry: HaCaldavConfigEntry
-) -> tuple[caldav.DAVClient, list[caldav.Calendar]]:
+) -> tuple[caldav.DAVClient, list[caldav.Calendar], list[Delegation]]:
     """Connect and list the calendars, trying the RFC 6764 bootstrap url too."""
     kwargs = connection_kwargs(entry.data, request_timeout(entry))
     last_error: Exception | None = None
@@ -243,7 +260,9 @@ async def _async_connect(
             kwargs,
         )
         try:
-            calendars = await hass.async_add_executor_job(_list_calendars, client)
+            calendars, delegations = await hass.async_add_executor_job(
+                account_calendars, client
+            )
         except Exception as err:  # noqa: BLE001
             # A captive portal answers 207 with html, which is a TypeError in caldav.
             await hass.async_add_executor_job(client.close)
@@ -255,7 +274,7 @@ async def _async_connect(
                 break
             continue
         size_pool(client, len(calendars))
-        return client, calendars
+        return client, calendars, delegations
     if refused is not None:
         _LOGGER.debug("Authorization failed: %s", refused)
         raise ConfigEntryAuthFailed("Authorization failed") from refused
@@ -292,10 +311,6 @@ def _async_key_by_url(
     if options != entry.options:
         _LOGGER.debug("Keying the calendars of %s by url", entry.title)
         hass.config_entries.async_update_entry(entry, options=options)
-
-
-def _list_calendars(client: caldav.DAVClient) -> list[caldav.Calendar]:
-    return client.principal().calendars()
 
 
 def _is_selected(calendar: caldav.Calendar, selected: list[str]) -> bool:
@@ -402,7 +417,7 @@ async def _async_reload_once_listed(
     otherwise reload the entry on every poll.
     """
     try:
-        calendars = await hass.async_add_executor_job(_list_calendars, client)
+        calendars, _ = await hass.async_add_executor_job(account_calendars, client)
     except Exception as err:  # noqa: BLE001
         _LOGGER.debug("Could not list the calendars again: %s", err)
         return
@@ -453,7 +468,7 @@ def _async_prune_entities(
             (
                 Platform.CALENDAR,
                 calendar_unique_id(entry.entry_id, url),
-                item.capability.supports_events,
+                item.capability.shows_calendar,
             ),
             (
                 Platform.TODO,

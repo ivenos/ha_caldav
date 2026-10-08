@@ -52,7 +52,7 @@ async def async_setup_entry(
     async_add_entities(
         HaCaldavCalendarEntity(data, managed, entry)
         for managed in data.calendars
-        if managed.capability.supports_events
+        if managed.capability.shows_calendar
     )
 
 
@@ -77,7 +77,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
             CalendarEntityFeature.CREATE_EVENT
             | CalendarEntityFeature.UPDATE_EVENT
             | CalendarEntityFeature.DELETE_EVENT
-            if managed.writable
+            if managed.writable and managed.capability.supports_events
             else CalendarEntityFeature(0)
         )
         self._color_key = calendar_key(managed.calendar.url)
@@ -217,8 +217,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         Written as ORGANIZER whenever attendees are set: RFC 5546 3 requires
         it, and sabre/dav answers 500 on deleting an object without one.
         """
-        addresses = self.runtime_data.address_set
-        return addresses[0] if addresses else None
+        return self.addresses[0] if self.addresses else None
 
     async def async_create_full_event(self, data: dict[str, Any]) -> None:
         """Create an event including the properties only a service can set."""
@@ -266,7 +265,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
                 recurrence_range == RANGE_THIS_AND_FUTURE,
                 expected_etag=self.coordinator.etags.get(uid) if as_shown else None,
                 own_address=self._own_address,
-                addresses=self.runtime_data.address_set,
+                addresses=self.addresses,
             ),
             "update",
             forget=("etags", (uid,)),
@@ -288,7 +287,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
                 recurrence_id,
                 recurrence_range == RANGE_THIS_AND_FUTURE,
                 expected_etag=self.coordinator.etags.get(uid) if as_shown else None,
-                addresses=self.runtime_data.address_set,
+                addresses=self.addresses,
             ),
             "delete",
             forget=("etags", (uid,)),

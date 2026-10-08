@@ -5,7 +5,6 @@ search_events:
       domain: calendar
   fields:
     text:
-      required: true
       example: dentist
       selector:
         text:
@@ -42,6 +41,24 @@ get_free_busy:
       required: true
       selector:
         datetime:
+    attendees:
+      example: '["ann@example.com"]'
+      selector:
+        text:
+          multiple: true
+
+get_invitations:
+  target:
+    entity:
+      integration: ha_caldav
+      domain: calendar
+  fields:
+    start:
+      selector:
+        datetime:
+    end:
+      selector:
+        datetime:
 
 create_event:
   target:
@@ -70,6 +87,10 @@ create_event:
       example: "2026-08-07"
       selector:
         date:
+    time_zone:
+      example: America/New_York
+      selector:
+        text:
     description:
       selector:
         text:
@@ -132,6 +153,10 @@ create_event:
             object:
         alarms:
           example: '[{"minutes_before": 15}]'
+          selector:
+            object:
+        attachments:
+          example: '[{"url": "https://example.com/agenda.pdf", "name": "agenda.pdf"}]'
           selector:
             object:
 
@@ -173,6 +198,10 @@ update_event:
       example: "2026-08-07"
       selector:
         date:
+    time_zone:
+      example: America/New_York
+      selector:
+        text:
     description:
       selector:
         text:
@@ -235,6 +264,10 @@ update_event:
             object:
         alarms:
           example: '[{"minutes_before": 15}]'
+          selector:
+            object:
+        attachments:
+          example: '[{"url": "https://example.com/agenda.pdf", "name": "agenda.pdf"}]'
           selector:
             object:
 
@@ -374,6 +407,10 @@ create_todo:
           example: '[{"minutes_before": 15}]'
           selector:
             object:
+        attachments:
+          example: '[{"url": "https://example.com/agenda.pdf", "name": "agenda.pdf"}]'
+          selector:
+            object:
 
 update_todo:
   target:
@@ -472,6 +509,10 @@ update_todo:
             object:
         alarms:
           example: '[{"minutes_before": 15}]'
+          selector:
+            object:
+        attachments:
+          example: '[{"url": "https://example.com/agenda.pdf", "name": "agenda.pdf"}]'
           selector:
             object:
 
@@ -579,6 +620,9 @@ respond_to_invitation:
       required: true
       selector:
         text:
+    recurrence_id:
+      selector:
+        text:
     response:
       required: true
       selector:
@@ -609,6 +653,7 @@ create_calendar:
           options:
             - vevent
             - vtodo
+            - vjournal
 
 delete_calendar:
   fields:
@@ -621,3 +666,202 @@ delete_calendar:
       required: true
       selector:
         text:
+
+create_journal:
+  target:
+    entity:
+      - integration: ha_caldav
+        domain: calendar
+      - integration: ha_caldav
+        domain: todo
+  fields:
+    summary:
+      required: true
+      example: Monday
+      selector:
+        text:
+    description:
+      selector:
+        text:
+          multiline: true
+    start_date:
+      example: "2026-08-06"
+      selector:
+        date:
+    start_date_time:
+      example: "2026-08-06 20:00:00"
+      selector:
+        datetime:
+    status:
+      selector:
+        select:
+          translation_key: journal_status
+          options:
+            - draft
+            - final
+            - cancelled
+    classification:
+      selector:
+        select:
+          translation_key: classification
+          options:
+            - public
+            - private
+            - confidential
+    categories:
+      example: '["diary"]'
+      selector:
+        text:
+          multiple: true
+    url:
+      example: https://example.com/notes
+      selector:
+        text:
+    attachments:
+      example: '[{"url": "https://example.com/scan.pdf", "name": "scan.pdf"}]'
+      selector:
+        object:
+
+update_journal:
+  target:
+    entity:
+      - integration: ha_caldav
+        domain: calendar
+      - integration: ha_caldav
+        domain: todo
+  fields:
+    uid:
+      required: true
+      selector:
+        text:
+    summary:
+      example: Monday
+      selector:
+        text:
+    description:
+      selector:
+        text:
+          multiline: true
+    start_date:
+      example: "2026-08-06"
+      selector:
+        date:
+    start_date_time:
+      example: "2026-08-06 20:00:00"
+      selector:
+        datetime:
+    status:
+      selector:
+        select:
+          translation_key: journal_status
+          options:
+            - draft
+            - final
+            - cancelled
+    classification:
+      selector:
+        select:
+          translation_key: classification
+          options:
+            - public
+            - private
+            - confidential
+    categories:
+      example: '["diary"]'
+      selector:
+        text:
+          multiple: true
+    url:
+      example: https://example.com/notes
+      selector:
+        text:
+    attachments:
+      example: '[{"url": "https://example.com/scan.pdf", "name": "scan.pdf"}]'
+      selector:
+        object:
+
+delete_journal:
+  target:
+    entity:
+      - integration: ha_caldav
+        domain: calendar
+      - integration: ha_caldav
+        domain: todo
+  fields:
+    uid:
+      required: true
+      selector:
+        text:
+
+search_journals:
+  target:
+    entity:
+      - integration: ha_caldav
+        domain: calendar
+      - integration: ha_caldav
+        domain: todo
+  fields:
+    text:
+      example: garden
+      selector:
+        text:
+    field:
+      default: summary
+      selector:
+        select:
+          translation_key: journal_search_field
+          options:
+            - summary
+            - description
+            - category
+            - uid
+    start:
+      selector:
+        datetime:
+    end:
+      selector:
+        datetime:
+
+share_calendar:
+  target:
+    entity:
+      - integration: ha_caldav
+        domain: calendar
+      - integration: ha_caldav
+        domain: todo
+  fields:
+    user:
+      required: true
+      example: ann
+      selector:
+        text:
+    access:
+      default: read
+      selector:
+        select:
+          translation_key: share_access
+          options:
+            - read
+            - read_write
+
+unshare_calendar:
+  target:
+    entity:
+      - integration: ha_caldav
+        domain: calendar
+      - integration: ha_caldav
+        domain: todo
+  fields:
+    user:
+      required: true
+      example: ann
+      selector:
+        text:
+
+get_calendar_shares:
+  target:
+    entity:
+      - integration: ha_caldav
+        domain: calendar
+      - integration: ha_caldav
+        domain: todo

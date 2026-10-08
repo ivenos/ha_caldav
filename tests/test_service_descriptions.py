@@ -167,11 +167,15 @@ def test_declared_defaults_match_the_schema(service: str) -> None:
         (
             const.SERVICE_CREATE_CALENDAR,
             "components",
-            (const.COMPONENT_EVENT, const.COMPONENT_TODO),
+            (const.COMPONENT_EVENT, const.COMPONENT_TODO, const.COMPONENT_JOURNAL),
         ),
         (const.SERVICE_CREATE_TODO, "classification", const.EVENT_CLASSIFICATIONS),
         (const.SERVICE_UPDATE_TODO, "classification", const.EVENT_CLASSIFICATIONS),
         (const.SERVICE_SEARCH_TODOS, "field", const.TODO_SEARCH_FIELDS),
+        (const.SERVICE_CREATE_JOURNAL, "status", const.JOURNAL_STATUSES),
+        (const.SERVICE_UPDATE_JOURNAL, "status", const.JOURNAL_STATUSES),
+        (const.SERVICE_SEARCH_JOURNALS, "field", const.JOURNAL_SEARCH_FIELDS),
+        (const.SERVICE_SHARE_CALENDAR, "access", const.SHARE_ACCESS),
     ],
 )
 def test_selector_options_match_the_constants(service, field, options) -> None:

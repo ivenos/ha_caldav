@@ -8,7 +8,11 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.auth.permissions.const import POLICY_CONTROL
-from homeassistant.components.calendar import DOMAIN as CALENDAR_DOMAIN, CalendarEntity
+from homeassistant.components.calendar import (
+    DOMAIN as CALENDAR_DOMAIN,
+    CalendarEntity,
+    CalendarEvent,
+)
 from homeassistant.components.todo import DOMAIN as TODO_DOMAIN
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import (
@@ -31,19 +35,23 @@ from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
 from .api import (
+    attendee_free_busy,
+    busy_periods,
     create_calendar,
     delete_calendar,
     export_ics,
     import_ics,
     move_event,
     move_todo,
-    respond_to_invitation,
     set_calendar_color,
 )
 from .color import normalize_color
 from .connection import calendar_key
 from .const import (
+    ALARM_ACTIONS,
+    ATTR_ACCESS,
     ATTR_ALARMS,
+    ATTR_ATTACHMENTS,
     ATTR_ATTENDEES,
     ATTR_CATEGORIES,
     ATTR_CLASSIFICATION,
@@ -65,9 +73,12 @@ from .const import (
     ATTR_RESPONSE,
     ATTR_TARGET_ENTITY_ID,
     ATTR_TEXT,
+    ATTR_TIME_ZONE,
     ATTR_TRANSPARENCY,
     ATTR_URL,
+    ATTR_USER,
     COMPONENT_EVENT,
+    COMPONENT_JOURNAL,
     COMPONENT_TODO,
     CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
@@ -76,25 +87,36 @@ from .const import (
     EVENT_CLASSIFICATIONS,
     EVENT_STATUSES,
     EVENT_TRANSPARENCIES,
+    JOURNAL_SEARCH_FIELDS,
+    JOURNAL_STATUSES,
     PARTSTAT_BY_RESPONSE,
     RANGE_THIS_AND_FUTURE,
     SEARCH_FIELDS,
     SERVICE_CREATE_CALENDAR,
     SERVICE_CREATE_EVENT,
+    SERVICE_CREATE_JOURNAL,
     SERVICE_CREATE_TODO,
     SERVICE_DELETE_CALENDAR,
     SERVICE_DELETE_EVENT,
+    SERVICE_DELETE_JOURNAL,
     SERVICE_EXPORT_ICS,
+    SERVICE_GET_CALENDAR_SHARES,
     SERVICE_GET_FREE_BUSY,
+    SERVICE_GET_INVITATIONS,
     SERVICE_IMPORT_ICS,
     SERVICE_MOVE_EVENT,
     SERVICE_MOVE_TODO,
     SERVICE_RESPOND_TO_INVITATION,
     SERVICE_SEARCH_EVENTS,
+    SERVICE_SEARCH_JOURNALS,
     SERVICE_SEARCH_TODOS,
     SERVICE_SET_CALENDAR_COLOR,
+    SERVICE_SHARE_CALENDAR,
+    SERVICE_UNSHARE_CALENDAR,
     SERVICE_UPDATE_EVENT,
+    SERVICE_UPDATE_JOURNAL,
     SERVICE_UPDATE_TODO,
+    SHARE_ACCESS,
     TODO_SEARCH_FIELDS,
     TODO_STATUSES,
 )
@@ -102,6 +124,7 @@ from .coordinator import (
     HaCaldavConfigEntry,
     ManagedCalendar,
     calendar_unique_id,
+    components_of,
     master_of,
     occurrences,
     sort_order,
@@ -110,8 +133,11 @@ from .coordinator import (
     todo_unique_id,
 )
 from .errors import as_reported
-from .event import read_extras
+from .event import awaits_reply, read_extras
+from .journal import create_journal, delete_journal, read_journals, update_journal
 from .options import account_settings
+from .recurrence import respond_to_invitation
+from .sharing import read_shares, share_calendar, unshare_calendar
 from .task import read_todo_extras, status_of
 
 if TYPE_CHECKING:
@@ -124,10 +150,19 @@ def _local_datetime(value: Any) -> datetime:
     """Return an aware datetime in Home Assistant's own timezone.
 
     The datetime selector sends a naive value, which caldav would resolve
-    against the OS timezone.
+    against the OS timezone, and a template renders an offset no zone is
+    named after.
     """
-    parsed = cv.datetime(value)
-    return parsed if parsed.tzinfo is not None else dt_util.as_local(parsed)
+    return dt_util.as_local(cv.datetime(value))
+
+
+def _placed(value: Any, zone: Any) -> Any:
+    """Return a time in the zone a call names, or in Home Assistant's own."""
+    if not isinstance(value, datetime) or zone is None:
+        return dt_util.as_local(value) if isinstance(value, datetime) else value
+    return (
+        value.replace(tzinfo=zone) if value.tzinfo is None else value.astimezone(zone)
+    )
 
 
 def _date_only(value: Any) -> date:
@@ -175,13 +210,41 @@ EXTRA_FIELDS = {
         [
             vol.Any(
                 vol.Coerce(int),
-                vol.Schema(
-                    {
-                        vol.Required("minutes_before"): vol.Coerce(int),
-                        vol.Optional("action"): _named(("DISPLAY", "AUDIO")),
-                        vol.Optional("related"): _named(("START", "END")),
-                        vol.Optional("description"): cv.string,
-                    }
+                vol.All(
+                    vol.Schema(
+                        {
+                            vol.Exclusive("minutes_before", "trigger"): vol.Coerce(int),
+                            vol.Exclusive("at", "trigger"): _local_datetime,
+                            vol.Optional("action"): _named(ALARM_ACTIONS),
+                            vol.Optional("related"): _named(("START", "END")),
+                            vol.Optional("description"): cv.string,
+                            vol.Optional("summary"): cv.string,
+                            vol.Optional("attendees"): vol.All(
+                                cv.ensure_list, [cv.string]
+                            ),
+                        }
+                    ),
+                    cv.has_at_least_one_key("minutes_before", "at"),
+                ),
+            )
+        ],
+    ),
+    vol.Optional(ATTR_ATTACHMENTS): vol.All(
+        cv.ensure_list,
+        [
+            vol.Any(
+                cv.string,
+                vol.All(
+                    vol.Schema(
+                        {
+                            vol.Optional("url"): cv.string,
+                            vol.Optional("path"): cv.string,
+                            vol.Optional("name"): cv.string,
+                            vol.Optional("media_type"): cv.string,
+                            vol.Optional("size"): vol.Coerce(int),
+                        }
+                    ),
+                    cv.has_at_least_one_key("url", "path", "name"),
                 ),
             )
         ],
@@ -189,7 +252,7 @@ EXTRA_FIELDS = {
 }
 
 SEARCH_SCHEMA = {
-    vol.Required(ATTR_TEXT): cv.string,
+    vol.Optional(ATTR_TEXT): cv.string,
     vol.Optional(ATTR_FIELD, default="summary"): vol.In(SEARCH_FIELDS),
     vol.Optional("start"): _local_datetime,
     vol.Optional("end"): _local_datetime,
@@ -198,15 +261,22 @@ SEARCH_SCHEMA = {
 FREE_BUSY_SCHEMA = {
     vol.Required("start"): _local_datetime,
     vol.Required("end"): _local_datetime,
+    vol.Optional(ATTR_ATTENDEES): vol.All(cv.ensure_list, [cv.string]),
+}
+
+INVITATIONS_SCHEMA = {
+    vol.Optional("start"): _local_datetime,
+    vol.Optional("end"): _local_datetime,
 }
 
 # A field each: the datetime picker always sends a time, and RFC 5545 writes
 # an all-day event as a DATE.
 SPAN_FIELDS = {
-    vol.Optional("start_date_time"): _local_datetime,
-    vol.Optional("end_date_time"): _local_datetime,
+    vol.Optional("start_date_time"): cv.datetime,
+    vol.Optional("end_date_time"): cv.datetime,
     vol.Optional("start_date"): _date_only,
     vol.Optional("end_date"): _date_only,
+    vol.Optional(ATTR_TIME_ZONE): cv.string,
 }
 
 _ONE_START = cv.has_at_most_one_key("start_date_time", "start_date")
@@ -278,6 +348,7 @@ UPDATE_EVENT_SCHEMA = vol.All(
         "end_date_time",
         "start_date",
         "end_date",
+        ATTR_TIME_ZONE,
         *(str(key) for key in EXTRA_FIELDS),
     ),
 )
@@ -367,6 +438,55 @@ MOVE_TODO_SCHEMA = {
     vol.Optional(ATTR_KEEP_ORIGINAL, default=False): cv.boolean,
 }
 
+JOURNAL_FIELDS = {
+    vol.Optional("description"): _blank_as_none(cv.string),
+    vol.Optional("start_date"): _blank_as_none(_date_only),
+    vol.Optional("start_date_time"): _blank_as_none(_local_datetime),
+    vol.Optional(ATTR_EVENT_STATUS): _named(JOURNAL_STATUSES),
+    **{
+        key: validator
+        for key, validator in EXTRA_FIELDS.items()
+        if str(key)
+        in (ATTR_URL, ATTR_CLASSIFICATION, ATTR_CATEGORIES, ATTR_ATTACHMENTS)
+    },
+}
+
+_ONE_JOURNAL_START = cv.has_at_most_one_key("start_date", "start_date_time")
+_NAMED = vol.All(cv.string, vol.Length(min=1))
+
+CREATE_JOURNAL_SCHEMA = vol.All(
+    cv.make_entity_service_schema({vol.Required("summary"): _NAMED, **JOURNAL_FIELDS}),
+    _ONE_JOURNAL_START,
+)
+
+UPDATE_JOURNAL_SCHEMA = vol.All(
+    cv.make_entity_service_schema(
+        {
+            vol.Required("uid"): cv.string,
+            vol.Optional("summary"): _NAMED,
+            **JOURNAL_FIELDS,
+        }
+    ),
+    _ONE_JOURNAL_START,
+    cv.has_at_least_one_key("summary", *(str(key) for key in JOURNAL_FIELDS)),
+)
+
+DELETE_JOURNAL_SCHEMA = {vol.Required("uid"): cv.string}
+
+SEARCH_JOURNALS_SCHEMA = {
+    vol.Optional(ATTR_TEXT): cv.string,
+    vol.Optional(ATTR_FIELD, default="summary"): vol.In(JOURNAL_SEARCH_FIELDS),
+    vol.Optional("start"): _local_datetime,
+    vol.Optional("end"): _local_datetime,
+}
+
+SHARE_SCHEMA = {
+    vol.Required(ATTR_USER): _NAMED,
+    vol.Optional(ATTR_ACCESS, default="read"): vol.In(SHARE_ACCESS),
+}
+
+UNSHARE_SCHEMA = {vol.Required(ATTR_USER): _NAMED}
+
 IMPORT_SCHEMA = {vol.Required(ATTR_ICS): cv.string}
 
 EXPORT_SCHEMA = {vol.Optional("uid"): cv.string}
@@ -383,6 +503,7 @@ COLOR_SCHEMA = {vol.Required(ATTR_COLOR): _hex_color}
 
 INVITATION_SCHEMA = {
     vol.Required("uid"): cv.string,
+    vol.Optional("recurrence_id"): _blank_as_none(cv.string),
     vol.Required(ATTR_RESPONSE): vol.In(tuple(PARTSTAT_BY_RESPONSE)),
 }
 
@@ -391,7 +512,8 @@ CREATE_CALENDAR_SCHEMA = vol.Schema(
         vol.Required(ATTR_CONFIG_ENTRY_ID): cv.string,
         vol.Required(ATTR_NAME): cv.string,
         vol.Optional(ATTR_COMPONENTS): vol.All(
-            cv.ensure_list, [_named((COMPONENT_EVENT, COMPONENT_TODO))]
+            cv.ensure_list,
+            [_named((COMPONENT_EVENT, COMPONENT_TODO, COMPONENT_JOURNAL))],
         ),
     }
 )
@@ -412,6 +534,13 @@ def async_register_services(hass: HomeAssistant) -> None:
     for name, schema, func, response, domain in (
         (SERVICE_SEARCH_EVENTS, SEARCH_SCHEMA, _async_search_events, ONLY, cal),
         (SERVICE_GET_FREE_BUSY, FREE_BUSY_SCHEMA, _async_get_free_busy, ONLY, cal),
+        (
+            SERVICE_GET_INVITATIONS,
+            INVITATIONS_SCHEMA,
+            _async_get_invitations,
+            ONLY,
+            cal,
+        ),
         (SERVICE_CREATE_EVENT, CREATE_EVENT_SCHEMA, _async_create_event, NONE, cal),
         (SERVICE_UPDATE_EVENT, UPDATE_EVENT_SCHEMA, _async_update_event, NONE, cal),
         (SERVICE_DELETE_EVENT, DELETE_EVENT_SCHEMA, _async_delete_event, NONE, cal),
@@ -435,6 +564,13 @@ def async_register_services(hass: HomeAssistant) -> None:
         (SERVICE_IMPORT_ICS, IMPORT_SCHEMA, _async_import_ics, NONE),
         (SERVICE_EXPORT_ICS, EXPORT_SCHEMA, _async_export_ics, ONLY),
         (SERVICE_SET_CALENDAR_COLOR, COLOR_SCHEMA, _async_set_color, NONE),
+        (SERVICE_CREATE_JOURNAL, CREATE_JOURNAL_SCHEMA, _async_create_journal, NONE),
+        (SERVICE_UPDATE_JOURNAL, UPDATE_JOURNAL_SCHEMA, _async_update_journal, NONE),
+        (SERVICE_DELETE_JOURNAL, DELETE_JOURNAL_SCHEMA, _async_delete_journal, NONE),
+        (SERVICE_SEARCH_JOURNALS, SEARCH_JOURNALS_SCHEMA, _async_search_journals, ONLY),
+        (SERVICE_SHARE_CALENDAR, SHARE_SCHEMA, _async_share_calendar, NONE),
+        (SERVICE_UNSHARE_CALENDAR, UNSHARE_SCHEMA, _async_unshare_calendar, NONE),
+        (SERVICE_GET_CALENDAR_SHARES, {}, _async_get_shares, ONLY),
     ):
         # The platform helper binds an action to the entities of one domain.
         hass.services.async_register(
@@ -446,7 +582,9 @@ def async_register_services(hass: HomeAssistant) -> None:
                 partial(_collection_entities, hass),
                 HassJob(func),
             ),
-            schema=cv.make_entity_service_schema(schema),
+            schema=schema
+            if isinstance(schema, vol.All)
+            else cv.make_entity_service_schema(schema),
             supports_response=response,
             job_type=HassJobType.Coroutinefunction,
         )
@@ -478,7 +616,7 @@ def _collection_entities(hass: HomeAssistant) -> dict[str, Any]:
         for entity_id, entity in platform.entities.items():
             if (
                 platform.domain == CALENDAR_DOMAIN
-                or not entity.managed.capability.supports_events
+                or not entity.managed.capability.shows_calendar
             ):
                 found[entity_id] = entity
     return found
@@ -498,7 +636,9 @@ async def _async_search_events(
     entity: HaCaldavCalendarEntity, call: ServiceCall
 ) -> ServiceResponse:
     """Search the calendar server-side and return what it matched."""
-    criteria: dict[str, Any] = {call.data[ATTR_FIELD]: call.data[ATTR_TEXT]}
+    criteria: dict[str, Any] = {}
+    if text := call.data.get(ATTR_TEXT):
+        criteria[call.data[ATTR_FIELD]] = text
     if start := call.data.get("start"):
         criteria["start"] = start
     if end := call.data.get("end"):
@@ -528,60 +668,102 @@ def _found_events(calendar: Any, criteria: dict[str, Any]) -> list[dict[str, Any
             else [master_of(item)]
         )
         for vevent in vevents:
-            if vevent is None or (event := to_event(vevent)) is None:
-                continue
-            events.append(
-                {
-                    "uid": event.uid,
-                    "recurrence_id": event.recurrence_id,
-                    "summary": event.summary,
-                    "start": event.start.isoformat(),
-                    "end": event.end.isoformat(),
-                    "description": event.description,
-                    "location": event.location,
-                    **read_extras(vevent),
-                }
-            )
+            if vevent is not None and (event := to_event(vevent)) is not None:
+                events.append(_event_entry(vevent, event))
     return events
+
+
+def _event_entry(vevent: Any, event: CalendarEvent) -> dict[str, Any]:
+    return {
+        "uid": event.uid,
+        "recurrence_id": event.recurrence_id,
+        "summary": event.summary,
+        "start": event.start.isoformat(),
+        "end": event.end.isoformat(),
+        "description": event.description,
+        "location": event.location,
+        **read_extras(vevent),
+    }
+
+
+async def _async_get_invitations(
+    entity: HaCaldavCalendarEntity, call: ServiceCall
+) -> ServiceResponse:
+    """Return the events on a calendar that still wait for the account's answer."""
+    if not (addresses := entity.addresses):
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="no_scheduling"
+        )
+    start = call.data.get("start") or dt_util.now()
+    _check_window(start, call.data.get("end"))
+    invitations = await _async_account_job(
+        entity.hass,
+        partial(
+            _found_invitations, entity.calendar, addresses, start, call.data.get("end")
+        ),
+        SERVICE_GET_INVITATIONS,
+    )
+    return {"invitations": invitations}
+
+
+def _found_invitations(
+    calendar: Any, addresses: list[str], start: datetime, end: datetime | None
+) -> list[dict[str, Any]]:
+    """Return the unanswered invitations from a moment on, mapped. Blocking.
+
+    A series answers with its master, and with each exception that waits for
+    an answer of its own.
+    """
+    window = {"start": start} if end is None else {"start": start, "end": end}
+    invitations = []
+    for item in calendar.search(event=True, **window):
+        for vevent in components_of(item, "vevent"):
+            if not awaits_reply(vevent, addresses):
+                continue
+            if (event := to_event(vevent)) is None:
+                continue
+            if event.recurrence_id and event.end_datetime_local <= start:
+                continue
+            invitations.append(_event_entry(vevent, event))
+    return invitations
 
 
 async def _async_get_free_busy(
     entity: HaCaldavCalendarEntity, call: ServiceCall
 ) -> ServiceResponse:
     """Return the busy periods the server reports for a window."""
-    _check_window(call.data["start"], call.data["end"])
+    start, end = call.data["start"], call.data["end"]
+    _check_window(start, end)
+    attendees = call.data.get(ATTR_ATTENDEES)
+    addresses = entity.runtime_data.address_set
+    if attendees and not addresses:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="no_scheduling"
+        )
     report = await _async_account_job(
         entity.hass,
-        partial(entity.calendar.freebusy_request, call.data["start"], call.data["end"]),
+        partial(entity.calendar.freebusy_request, start, end),
         SERVICE_GET_FREE_BUSY,
     )
-    return {"periods": _periods(report)}
-
-
-def _periods(report: Any) -> list[dict[str, str]]:
-    """Flatten the FREEBUSY lines of a VFREEBUSY into start/end pairs.
-
-    A period's second half is an end or a duration, and icalendar hands back
-    a bare value for one period and a list for several.
-    """
     try:
-        found = list(report.icalendar_instance.walk("VFREEBUSY"))
+        answer: dict[str, Any] = {"periods": busy_periods(report.icalendar_instance)}
     except Exception as err:
         # "Nothing is busy" is the wrong answer for a report we could not read.
         raise as_reported(err, SERVICE_GET_FREE_BUSY) from err
-    periods = []
-    for component in found:
-        entries = component.get("FREEBUSY")
-        if entries is None:
-            continue
-        for entry in entries if isinstance(entries, list) else [entries]:
-            value = getattr(entry, "dt", None)
-            if not isinstance(value, tuple) or len(value) != 2:
-                continue
-            start, second = value
-            end = second if isinstance(second, datetime) else start + second
-            periods.append({"start": start.isoformat(), "end": end.isoformat()})
-    return periods
+    if attendees:
+        answer[ATTR_ATTENDEES] = await _async_account_job(
+            entity.hass,
+            partial(
+                attendee_free_busy,
+                entity.runtime_data.client,
+                start,
+                end,
+                attendees,
+                addresses,
+            ),
+            SERVICE_GET_FREE_BUSY,
+        )
+    return answer
 
 
 async def _async_create_event(
@@ -589,8 +771,8 @@ async def _async_create_event(
 ) -> None:
     """Create an event with the full set of properties."""
     _require_writable(entity)
-    data = _event_fields(call.data)
-    start, end = _span(call.data)
+    data = _event_fields(entity.hass, call.data)
+    start, end = _span(call.data, await _async_zone(call.data))
     _check_span(start, end)
     data["dtstart"] = start
     data["dtend"] = end
@@ -602,14 +784,17 @@ async def _async_update_event(
 ) -> None:
     """Change any subset of an event's properties."""
     _require_writable(entity)
-    data = _event_fields(call.data)
-    start, end = _span(call.data)
+    data = _event_fields(entity.hass, call.data)
+    zone = await _async_zone(call.data)
+    start, end = _span(call.data, zone)
     if start is not None and end is not None:
         _check_span(start, end)
     if start is not None:
         data["dtstart"] = start
     if end is not None:
         data["dtend"] = end
+    if zone is not None:
+        data[ATTR_TIME_ZONE] = zone
     await entity.async_update_full_event(
         call.data["uid"],
         data,
@@ -631,11 +816,24 @@ async def _async_delete_event(
     )
 
 
-def _span(data: Mapping[str, Any]) -> tuple[Any, Any]:
+async def _async_zone(data: Mapping[str, Any]) -> Any:
+    """Return the zone a call names, loaded off the event loop."""
+    if (name := data.get(ATTR_TIME_ZONE)) is None:
+        return None
+    if (zone := await dt_util.async_get_time_zone(name)) is None:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="unknown_time_zone",
+            translation_placeholders={"time_zone": name},
+        )
+    return zone
+
+
+def _span(data: Mapping[str, Any], zone: Any) -> tuple[Any, Any]:
     """Return the start and end of a call, whichever pair of fields it used."""
     return (
-        data.get("start_date_time", data.get("start_date")),
-        data.get("end_date_time", data.get("end_date")),
+        _placed(data.get("start_date_time", data.get("start_date")), zone),
+        _placed(data.get("end_date_time", data.get("end_date")), zone),
     )
 
 
@@ -669,11 +867,24 @@ def _check_span(start: Any, end: Any) -> None:
 _CLEARABLE = ("description", "location", ATTR_URL, ATTR_ORGANIZER)
 
 
-def _event_fields(data: dict[str, Any]) -> dict[str, Any]:
+def _check_paths(hass: HomeAssistant, fields: Mapping[str, Any]) -> None:
+    """Refuse to attach a file from outside the folders Home Assistant may read."""
+    for attachment in fields.get(ATTR_ATTACHMENTS) or []:
+        path = attachment.get("path") if isinstance(attachment, dict) else None
+        if path and not hass.config.is_allowed_path(path):
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="path_not_allowed",
+                translation_placeholders={"path": path},
+            )
+
+
+def _event_fields(hass: HomeAssistant, data: Mapping[str, Any]) -> dict[str, Any]:
     """Return the event fields present in a call, extras included.
 
     An empty text clears its field: it is what a template renders for nothing.
     """
+    _check_paths(hass, data)
     fields: dict[str, Any] = {}
     for key in ("summary", "description", "location", "rrule"):
         if key in data:
@@ -828,6 +1039,7 @@ def _todo_fields(
 
     A field given as nothing clears it.
     """
+    _check_paths(entity.hass, data)
     fields: dict[str, Any] = {}
     for key in TODO_FIELDS:
         name = str(key)
@@ -934,6 +1146,125 @@ async def _async_move_todo(entity: HaCaldavTodoListEntity, call: ServiceCall) ->
     await target.coordinator.async_refresh()
 
 
+def _require_journals(entity: HaCaldavEntity) -> None:
+    """Refuse a journal action on a calendar that holds no journal entries."""
+    if not entity.managed.capability.supports_journals:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="no_journals",
+            translation_placeholders={"name": entity.managed.name},
+        )
+
+
+def _journal_fields(hass: HomeAssistant, data: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the journal fields present in a call. One given as nothing is cleared."""
+    _check_paths(hass, data)
+    fields: dict[str, Any] = {}
+    for key in JOURNAL_FIELDS:
+        if (name := str(key)) in data:
+            fields["start" if name.startswith("start_") else name] = data[name]
+    if "summary" in data:
+        fields["summary"] = data["summary"]
+    if fields.get(ATTR_URL) == "":
+        fields[ATTR_URL] = None
+    return fields
+
+
+async def _async_create_journal(entity: HaCaldavEntity, call: ServiceCall) -> None:
+    _require_writable(entity)
+    _require_journals(entity)
+    data = _journal_fields(entity.hass, call.data)
+    await entity.async_write(
+        partial(
+            create_journal,
+            entity.calendar,
+            {key: value for key, value in data.items() if value is not None},
+        ),
+        SERVICE_CREATE_JOURNAL,
+    )
+
+
+async def _async_update_journal(entity: HaCaldavEntity, call: ServiceCall) -> None:
+    _require_writable(entity)
+    _require_journals(entity)
+    data = _journal_fields(entity.hass, call.data)
+    await entity.async_write(
+        partial(update_journal, entity.calendar, call.data["uid"], data),
+        SERVICE_UPDATE_JOURNAL,
+    )
+
+
+async def _async_delete_journal(entity: HaCaldavEntity, call: ServiceCall) -> None:
+    _require_writable(entity)
+    _require_journals(entity)
+    await entity.async_write(
+        partial(delete_journal, entity.calendar, call.data["uid"]),
+        SERVICE_DELETE_JOURNAL,
+    )
+
+
+async def _async_search_journals(
+    entity: HaCaldavEntity, call: ServiceCall
+) -> ServiceResponse:
+    _require_journals(entity)
+    start, end = call.data.get("start"), call.data.get("end")
+    _check_window(start, end)
+    journals = await _async_account_job(
+        entity.hass,
+        partial(read_journals, entity.calendar, start, end),
+        SERVICE_SEARCH_JOURNALS,
+    )
+    if text := call.data.get(ATTR_TEXT):
+        field = call.data[ATTR_FIELD]
+        journals = [entry for entry in journals if _matches(entry, field, text)]
+    return {"journals": journals}
+
+
+async def _async_require_admin(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Refuse a caller who is not an administrator, as an admin service would."""
+    if (user_id := call.context.user_id) is None:
+        return
+    user = await hass.auth.async_get_user(user_id)
+    if user is None:
+        raise UnknownUser(context=call.context)
+    if not user.is_admin:
+        raise Unauthorized(context=call.context)
+
+
+async def _async_share_calendar(entity: HaCaldavEntity, call: ServiceCall) -> None:
+    await _async_require_admin(entity.hass, call)
+    _require_writable(entity)
+    await _async_account_job(
+        entity.hass,
+        partial(
+            share_calendar,
+            entity.calendar,
+            call.data[ATTR_USER],
+            call.data[ATTR_ACCESS] == "read_write",
+        ),
+        SERVICE_SHARE_CALENDAR,
+    )
+
+
+async def _async_unshare_calendar(entity: HaCaldavEntity, call: ServiceCall) -> None:
+    await _async_require_admin(entity.hass, call)
+    _require_writable(entity)
+    await _async_account_job(
+        entity.hass,
+        partial(unshare_calendar, entity.calendar, call.data[ATTR_USER]),
+        SERVICE_UNSHARE_CALENDAR,
+    )
+
+
+async def _async_get_shares(
+    entity: HaCaldavEntity, call: ServiceCall
+) -> ServiceResponse:
+    shares = await _async_account_job(
+        entity.hass, partial(read_shares, entity.calendar), SERVICE_GET_CALENDAR_SHARES
+    )
+    return {"shares": shares}
+
+
 async def _async_import_ics(entity: HaCaldavEntity, call: ServiceCall) -> None:
     _require_writable(entity)
     await entity.async_write(
@@ -967,7 +1298,7 @@ async def _async_set_color(entity: HaCaldavEntity, call: ServiceCall) -> None:
 
 async def _async_respond(entity: HaCaldavCalendarEntity, call: ServiceCall) -> None:
     _require_writable(entity)
-    addresses = entity.runtime_data.address_set
+    addresses = entity.addresses
     if not addresses:
         raise ServiceValidationError(
             translation_domain=DOMAIN, translation_key="no_scheduling"
@@ -979,6 +1310,7 @@ async def _async_respond(entity: HaCaldavCalendarEntity, call: ServiceCall) -> N
             call.data["uid"],
             PARTSTAT_BY_RESPONSE[call.data[ATTR_RESPONSE]],
             addresses,
+            call.data.get("recurrence_id"),
         ),
         SERVICE_RESPOND_TO_INVITATION,
         # The reply is a PUT, so the etag held for this event is stale.

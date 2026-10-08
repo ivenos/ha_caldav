@@ -74,8 +74,7 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
 
     @property
     def _own_address(self) -> str | None:
-        addresses = self.runtime_data.address_set
-        return addresses[0] if addresses else None
+        return self.addresses[0] if self.addresses else None
 
     def every_etag(self) -> tuple[str, tuple[str, ...]]:
         """Return what a write that reaches subtasks and parents makes stale."""

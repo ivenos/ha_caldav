@@ -1,11 +1,20 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The new version, such as 1.5.0
+        required: true
+        type: string
   push:
     tags: ["v*"]
 
 permissions:
   contents: write
+
+env:
+  VERSION: ${{ inputs.version || github.ref_name }}
 
 jobs:
   release:
@@ -13,12 +22,27 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Stamp the changelog and tag the commit
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::A release is started from main"
+            exit 1
+          fi
+          sh .github/scripts/changelog.sh release "$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: release $VERSION" CHANGELOG.md
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push --atomic origin HEAD:main "v$VERSION"
 
       - name: Set version from tag
         run: |
-          version="${GITHUB_REF_NAME#v}"
           tmp=$(mktemp)
-          jq --arg v "$version" '.version = $v' custom_components/ha_caldav/manifest.json > "$tmp"
+          jq --arg v "${VERSION#v}" '.version = $v' custom_components/ha_caldav/manifest.json > "$tmp"
           mv "$tmp" custom_components/ha_caldav/manifest.json
 
       - name: Build zip
@@ -26,9 +50,13 @@ jobs:
           cd custom_components/ha_caldav
           zip -r ../../ha_caldav.zip .
 
+      - name: Write the release notes
+        run: sh .github/scripts/changelog.sh notes "${VERSION#v}" > "$RUNNER_TEMP/notes.md"
+
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+          body_path: ${{ runner.temp }}/notes.md
           files: ha_caldav.zip
-          # Published by hand once the release notes are written.
           draft: true

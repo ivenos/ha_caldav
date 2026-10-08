@@ -12,8 +12,8 @@ from caldav.elements import cdav, dav
 from caldav.elements.base import BaseElement
 from caldav.lib.namespace import ns
 
-from .connection import calendar_key, origin
-from .const import COMPONENT_EVENT, COMPONENT_TODO, WRITE_PRIVILEGES
+from .connection import calendar_key, display_name, origin
+from .const import COMPONENT_EVENT, COMPONENT_JOURNAL, COMPONENT_TODO, WRITE_PRIVILEGES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,6 +22,18 @@ class CurrentUserPrivilegeSet(BaseElement):
     """RFC 3744 current-user-privilege-set, which caldav does not model."""
 
     tag: ClassVar[str] = ns("D", "current-user-privilege-set")
+
+
+class ProxyReadFor(BaseElement):
+    """The accounts this one may read as a delegate, by caldav-proxy."""
+
+    tag: ClassVar[str] = "{http://calendarserver.org/ns/}calendar-proxy-read-for"
+
+
+class ProxyWriteFor(BaseElement):
+    """The accounts this one may write to as a delegate."""
+
+    tag: ClassVar[str] = "{http://calendarserver.org/ns/}calendar-proxy-write-for"
 
 
 @dataclass(frozen=True)
@@ -41,27 +53,138 @@ class Capability:
         """Return whether the calendar accepts VTODO."""
         return COMPONENT_TODO in self.components
 
+    @property
+    def supports_journals(self) -> bool:
+        """Return whether the calendar accepts VJOURNAL."""
+        return COMPONENT_JOURNAL in self.components
+
+    @property
+    def shows_calendar(self) -> bool:
+        """Return whether the calendar gets a calendar entity.
+
+        One holding nothing but journal entries shows those that carry a date.
+        """
+        return self.supports_events or self.components == {COMPONENT_JOURNAL}
+
 
 # A server answering neither property is saying nothing, not "nothing allowed".
 UNKNOWN = Capability(frozenset({COMPONENT_EVENT, COMPONENT_TODO}), writable=True)
 
 
-def fetch_capabilities(client: caldav.DAVClient) -> dict[str, Capability]:
-    """Return calendar key -> capability for everything the home set reports on."""
-    home = client.principal().calendar_home_set
-    response = home.get_properties(
-        [cdav.SupportedCalendarComponentSet(), CurrentUserPrivilegeSet()],
-        depth=1,
-        parse_response_xml=False,
-    )
-    capabilities: dict[str, Capability] = {}
-    for href, props in objects_and_props(response, home.url).items():
-        components = _components(props.get(cdav.SupportedCalendarComponentSet.tag))
-        privileges = _privileges(props.get(CurrentUserPrivilegeSet.tag))
-        capabilities[href] = Capability(
-            components=components or UNKNOWN.components,
-            writable=bool(privileges & WRITE_PRIVILEGES) if privileges else True,
+@dataclass(frozen=True)
+class Delegation:
+    """An account this one acts for, by its calendars and its addresses."""
+
+    home: Any
+    addresses: list[str]
+    owner: str
+
+
+def fetch_delegations(client: caldav.DAVClient, principal: Any) -> list[Delegation]:
+    """Return the accounts that made this one their delegate.
+
+    None on a server without caldav-proxy.
+    """
+    try:
+        response = principal.get_properties(
+            [ProxyReadFor(), ProxyWriteFor()], parse_response_xml=False
         )
+        hrefs = [
+            element.text
+            for tag in (ProxyReadFor.tag, ProxyWriteFor.tag)
+            for holder in response.tree.iter(tag)
+            for element in holder.iter(dav.Href.tag)
+            if element.text
+        ]
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("No delegated accounts: %s", err)
+        return []
+    found = []
+    own = client.url
+    for href in dict.fromkeys(hrefs):
+        try:
+            delegator = caldav.Principal(client=client, url=client.url.join(href))
+            home = delegator.calendar_home_set
+            if client.url.hostname != own.hostname:
+                _LOGGER.debug("Leaving out a delegated account on another host")
+                continue
+            found.append(
+                Delegation(
+                    home=home,
+                    addresses=_addresses(client, delegator),
+                    owner=calendar_key(href).rsplit("/", 1)[-1],
+                )
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Leaving out a delegated account: %s", err)
+        finally:
+            # caldav moves the client to the host of every home it reads.
+            client.url = own
+    return found
+
+
+def account_calendars(
+    client: caldav.DAVClient,
+) -> tuple[list[caldav.Calendar], list[Delegation]]:
+    """Return the calendars of the account and of those it is a delegate of.
+
+    A delegated calendar is named with its owner, as it may share its name
+    with one of the account's own. SOGo names it so by itself.
+    """
+    principal = client.principal()
+    # caldav moves the client to the host of the home on reading it, as on iCloud.
+    principal.calendar_home_set  # noqa: B018
+    calendars = list(principal.calendars())
+    delegations = fetch_delegations(client, principal)
+    seen = {calendar_key(calendar.url) for calendar in calendars}
+    for delegation in delegations:
+        try:
+            delegated = delegation.home.calendars()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Could not list the calendars of %s: %s", delegation.owner, err
+            )
+            continue
+        for calendar in delegated:
+            if (key := calendar_key(calendar.url)) not in seen:
+                seen.add(key)
+                name = display_name(calendar)
+                if delegation.owner.lower() not in name.lower():
+                    name = f"{name} ({delegation.owner})"
+                calendars.append(
+                    caldav.Calendar(
+                        client=client,
+                        url=calendar.url,
+                        parent=calendar.parent,
+                        name=name,
+                    )
+                )
+    return calendars, delegations
+
+
+def home_sets(client: caldav.DAVClient, delegations: Any = ()) -> list[Any]:
+    """Return the calendar home set of the account and of each delegation."""
+    return [client.principal().calendar_home_set, *(item.home for item in delegations)]
+
+
+def fetch_capabilities(
+    client: caldav.DAVClient, delegations: Any = ()
+) -> dict[str, Capability]:
+    """Return calendar key -> capability for everything the home sets report on."""
+    capabilities: dict[str, Capability] = {}
+    for home in home_sets(client, delegations):
+        response = home.get_properties(
+            [cdav.SupportedCalendarComponentSet(), CurrentUserPrivilegeSet()],
+            depth=1,
+            parse_response_xml=False,
+        )
+        for href, props in objects_and_props(response, home.url).items():
+            components = _components(props.get(cdav.SupportedCalendarComponentSet.tag))
+            privileges = _privileges(props.get(CurrentUserPrivilegeSet.tag))
+            capabilities[href] = Capability(
+                components=components or UNKNOWN.components,
+                writable=bool(privileges & WRITE_PRIVILEGES) if privileges else True,
+            )
     return capabilities
 
 
@@ -139,11 +262,15 @@ def fetch_address_set(client: caldav.DAVClient) -> list[str]:
     Only a server doing RFC 6638 scheduling answers this.
     """
     try:
-        addresses = client.principal().calendar_user_address_set()
-        return [_absolute(client, str(address)) for address in addresses if address]
+        return _addresses(client, client.principal())
     except Exception as err:  # noqa: BLE001
         _LOGGER.debug("No calendar user address set: %s", err)
         return []
+
+
+def _addresses(client: caldav.DAVClient, principal: Any) -> list[str]:
+    addresses = principal.calendar_user_address_set()
+    return [_absolute(client, str(address)) for address in addresses if address]
 
 
 def _absolute(client: caldav.DAVClient, address: str) -> str:

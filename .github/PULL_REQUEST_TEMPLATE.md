@@ -12,6 +12,7 @@
 
 - [ ] One concern per pull request
 - [ ] Tests added for the behavior that changed
+- [ ] An entry under `Unreleased` in `CHANGELOG.md` for what users will notice
 - [ ] `pytest`, `ruff check` and `ruff format --check` pass
 
 ---

@@ -1182,19 +1182,128 @@ def test_delete_this_and_future_drops_the_added_dates_after_the_cut() -> None:
     assert _exdates(head) == [datetime(2026, 7, 13, 9, 0, tzinfo=UTC)]
 
 
-def test_splitting_at_an_added_date_is_refused() -> None:
+ADDED_DATE = "2026-07-09 09:00:00+00:00"
+
+
+def test_a_split_at_an_added_date_leaves_that_date_as_an_event_of_its_own() -> None:
+    """A series anchored on a date its rule does not produce would be rescheduled."""
     calendar = FakeCalendar(DATED_SERIES)
 
-    with pytest.raises(Refused, match="rdate_split"):
+    update_event(
+        calendar,
+        "dated-1",
+        {"summary": "Onwards"},
+        recurrence_id=ADDED_DATE,
+        this_and_future=True,
+    )
+
+    single, tail = (_only_vevent(created.data) for created in calendar.created)
+    assert single["UID"] == "dated-1-20260709T090000Z"
+    assert single["DTSTART"].dt == datetime(2026, 7, 9, 9, 0, tzinfo=UTC)
+    assert single["DTEND"].dt == datetime(2026, 7, 9, 10, 0, tzinfo=UTC)
+    assert single["SUMMARY"] == "Onwards"
+    assert not any(key in single for key in ("RRULE", "RDATE", "RECURRENCE-ID"))
+    # The slot of the 13th is excluded, so the rule carries on from the 20th.
+    assert tail["UID"] == "dated-1-20260720T090000Z"
+    assert tail["DTSTART"].dt == datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
+    assert tail["SUMMARY"] == "Onwards"
+    assert _rdates(tail) == [datetime(2026, 7, 23, 9, 0, tzinfo=UTC)]
+    assert _exdates(tail) == [datetime(2026, 7, 27, 9, 0, tzinfo=UTC)]
+    head = _master(calendar.event.stored())
+    assert head["SUMMARY"] == "Standup"
+    assert head["RRULE"]["UNTIL"] == [datetime(2026, 7, 20, 8, 59, 59, tzinfo=UTC)]
+    assert _rdates(head) == []
+    assert _exdates(head) == [datetime(2026, 7, 13, 9, 0, tzinfo=UTC)]
+
+
+def test_a_split_at_an_added_date_moves_the_series_as_far_as_that_date() -> None:
+    calendar = FakeCalendar(DATED_SERIES)
+
+    update_event(
+        calendar,
+        "dated-1",
+        {
+            "dtstart": datetime(2026, 7, 9, 11, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 9, 12, 30, tzinfo=UTC),
+        },
+        recurrence_id=ADDED_DATE,
+        this_and_future=True,
+    )
+
+    single, tail = (_only_vevent(created.data) for created in calendar.created)
+    assert single["DTSTART"].dt == datetime(2026, 7, 9, 11, 0, tzinfo=UTC)
+    assert single["DTEND"].dt == datetime(2026, 7, 9, 12, 30, tzinfo=UTC)
+    assert tail["DTSTART"].dt == datetime(2026, 7, 20, 11, 0, tzinfo=UTC)
+    assert tail["DTEND"].dt == datetime(2026, 7, 20, 12, 30, tzinfo=UTC)
+    assert _rdates(tail) == [datetime(2026, 7, 23, 11, 0, tzinfo=UTC)]
+
+
+def test_every_added_date_before_the_next_slot_leaves_with_the_split() -> None:
+    calendar = FakeCalendar(
+        DATED_SERIES.replace(
+            "RDATE:20260709T090000Z", "RDATE:20260709T090000Z,20260710T090000Z"
+        ).replace("EXDATE:20260713T090000Z\n", "")
+    )
+
+    update_event(
+        calendar,
+        "dated-1",
+        {"summary": "Onwards"},
+        recurrence_id=ADDED_DATE,
+        this_and_future=True,
+    )
+
+    first, second, tail = (_only_vevent(created.data) for created in calendar.created)
+    assert first["DTSTART"].dt == datetime(2026, 7, 9, 9, 0, tzinfo=UTC)
+    assert second["DTSTART"].dt == datetime(2026, 7, 10, 9, 0, tzinfo=UTC)
+    assert second["SUMMARY"] == "Onwards"
+    assert tail["DTSTART"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+    assert _rdates(_master(calendar.event.stored())) == []
+
+
+def test_an_exception_on_an_added_date_becomes_the_event_split_off_there() -> None:
+    calendar = FakeCalendar(
+        DATED_SERIES.replace(
+            "END:VCALENDAR",
+            "BEGIN:VEVENT\nUID:dated-1\nDTSTAMP:20260101T000000Z\n"
+            "RECURRENCE-ID:20260709T090000Z\nDTSTART:20260709T140000Z\n"
+            "DTEND:20260709T150000Z\nSUMMARY:Extra\nLOCATION:Room 2\n"
+            "END:VEVENT\nEND:VCALENDAR",
+        )
+    )
+
+    update_event(
+        calendar,
+        "dated-1",
+        {"summary": "Onwards"},
+        recurrence_id=ADDED_DATE,
+        this_and_future=True,
+    )
+
+    single = _only_vevent(calendar.created[0].data)
+    assert single["DTSTART"].dt == datetime(2026, 7, 9, 14, 0, tzinfo=UTC)
+    assert single["LOCATION"] == "Room 2"
+    assert single["SUMMARY"] == "Onwards"
+    assert _overrides(calendar.event.stored()) == []
+
+
+def test_a_failed_split_at_an_added_date_takes_back_everything_it_wrote() -> None:
+    from caldav.davclient import requests
+
+    calendar = FakeCalendar(
+        DATED_SERIES, save_error=requests.Timeout("boom"), refetch_ics=DATED_SERIES
+    )
+
+    with pytest.raises(requests.Timeout):
         update_event(
             calendar,
             "dated-1",
             {"summary": "Onwards"},
-            recurrence_id="2026-07-09 09:00:00+00:00",
+            recurrence_id=ADDED_DATE,
             this_and_future=True,
         )
 
-    assert calendar.created == []
+    assert [created.deleted for created in calendar.created] == [True, True]
 
 
 def test_a_moved_split_shifts_the_added_dates_in_wall_clock() -> None:
@@ -1422,17 +1531,196 @@ def test_an_absent_field_is_left_alone_and_an_explicit_none_clears_it() -> None:
     assert master["DESCRIPTION"] == "Daily sync"
 
 
-def test_a_series_cannot_be_switched_between_all_day_and_timed() -> None:
+def test_a_timed_series_becomes_all_day_with_its_exceptions() -> None:
+    calendar = FakeCalendar(SERIES_WITH_OVERRIDE_AND_EXDATE)
+
+    update_event(
+        calendar, "timed-1", {"dtstart": date(2026, 7, 6), "dtend": date(2026, 7, 7)}
+    )
+
+    stored = calendar.event.stored()
+    master = _master(stored)
+    assert master["DTSTART"].dt == date(2026, 7, 6)
+    assert master["DTEND"].dt == date(2026, 7, 7)
+    assert _exdates(master) == [date(2026, 7, 20)]
+    assert "EXDATE;VALUE=DATE:20260720" in calendar.event.data
+    [override] = _overrides(stored)
+    assert override["RECURRENCE-ID"].dt == date(2026, 7, 13)
+    assert override["DTSTART"].dt == date(2026, 7, 13)
+    assert override["DTEND"].dt == date(2026, 7, 14)
+    assert override["SUMMARY"] == "Standup moved"
+
+
+def test_an_all_day_series_becomes_timed_with_its_added_and_excluded_days() -> None:
+    calendar = FakeCalendar(ALL_DAY_DATED_SERIES)
+    start = datetime(2026, 7, 6, 9, 0, tzinfo=BERLIN)
+
+    update_event(
+        calendar,
+        "allday-dated-1",
+        {"dtstart": start, "dtend": start + timedelta(hours=1)},
+    )
+
+    master = _master(calendar.event.stored())
+    assert master["DTSTART"].dt == start
+    assert str(master["DTSTART"].dt.tzinfo) == "Europe/Berlin"
+    assert _rdates(master) == [
+        datetime(2026, 7, 9, 9, 0, tzinfo=BERLIN),
+        datetime(2026, 7, 23, 9, 0, tzinfo=BERLIN),
+    ]
+    assert _exdates(master) == [
+        datetime(2026, 7, 13, 9, 0, tzinfo=BERLIN),
+        datetime(2026, 7, 27, 9, 0, tzinfo=BERLIN),
+    ]
+    assert "VALUE=DATE" not in calendar.event.data
+
+
+def test_a_respelled_rule_keeps_the_exceptions_of_a_series_made_all_day() -> None:
+    calendar = FakeCalendar(SERIES_WITH_OVERRIDE_AND_EXDATE)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {
+            "dtstart": date(2026, 7, 6),
+            "dtend": date(2026, 7, 7),
+            "rrule": "FREQ=WEEKLY;BYDAY=MO",
+        },
+    )
+
+    stored = calendar.event.stored()
+    assert _exdates(_master(stored)) == [date(2026, 7, 20)]
+    assert [item["RECURRENCE-ID"].dt for item in _overrides(stored)] == [
+        date(2026, 7, 13)
+    ]
+
+
+def test_the_end_of_a_rule_follows_a_series_made_all_day() -> None:
+    calendar = FakeCalendar(
+        TIMED_SERIES.replace("FREQ=WEEKLY", "FREQ=WEEKLY;UNTIL=20260727T090000Z")
+    )
+
+    update_event(
+        calendar, "timed-1", {"dtstart": date(2026, 7, 6), "dtend": date(2026, 7, 7)}
+    )
+
+    rule = _master(calendar.event.stored())["RRULE"]
+    assert rule["UNTIL"] == [date(2026, 7, 27)]
+
+
+def test_the_end_of_a_rule_follows_a_series_made_timed() -> None:
+    calendar = FakeCalendar(
+        ALL_DAY_SERIES.replace("FREQ=DAILY", "FREQ=DAILY;UNTIL=20260710")
+    )
+    start = datetime(2026, 7, 6, 9, 0, tzinfo=BERLIN)
+
+    update_event(
+        calendar, "allday-1", {"dtstart": start, "dtend": start + timedelta(hours=1)}
+    )
+
+    rule = _master(calendar.event.stored())["RRULE"]
+    assert rule["UNTIL"] == [datetime(2026, 7, 10, 7, 0, tzinfo=UTC)]
+
+
+def test_one_occurrence_of_a_timed_series_can_be_made_all_day() -> None:
+    """Its RECURRENCE-ID still names the slot the way the series is written."""
     calendar = FakeCalendar(TIMED_SERIES)
 
-    with pytest.raises(Refused, match="allday_timed_switch"):
-        update_event(
-            calendar,
-            "timed-1",
-            {"dtstart": date(2026, 7, 6), "dtend": date(2026, 7, 7)},
-        )
+    update_event(
+        calendar,
+        "timed-1",
+        {"dtstart": date(2026, 7, 13), "dtend": date(2026, 7, 14)},
+        recurrence_id=SECOND_OCCURRENCE,
+    )
 
-    assert not calendar.event.saved
+    stored = calendar.event.stored()
+    [override] = _overrides(stored)
+    assert override["RECURRENCE-ID"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+    assert override["DTSTART"].dt == date(2026, 7, 13)
+    assert override["DTEND"].dt == date(2026, 7, 14)
+    assert _master(stored)["DTSTART"].dt == datetime(2026, 7, 6, 9, 0, tzinfo=UTC)
+
+
+def test_a_series_can_be_made_all_day_from_one_occurrence_onwards() -> None:
+    calendar = FakeCalendar(
+        TIMED_SERIES.replace(
+            "RRULE:FREQ=WEEKLY", "RRULE:FREQ=WEEKLY\nEXDATE:20260727T090000Z"
+        )
+    )
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"dtstart": date(2026, 7, 20), "dtend": date(2026, 7, 21)},
+        recurrence_id=THIRD_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    head = _master(calendar.event.stored())
+    assert head["DTSTART"].dt == datetime(2026, 7, 6, 9, 0, tzinfo=UTC)
+    assert head["RRULE"]["UNTIL"] == [datetime(2026, 7, 20, 8, 59, 59, tzinfo=UTC)]
+    tail = _only_vevent(calendar.created[0].data)
+    assert tail["DTSTART"].dt == date(2026, 7, 20)
+    assert tail["DTEND"].dt == date(2026, 7, 21)
+    assert _exdates(tail) == [date(2026, 7, 27)]
+
+
+def test_an_exception_at_the_split_follows_a_tail_made_all_day() -> None:
+    calendar = FakeCalendar(SERIES_WITH_OVERRIDE)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"dtstart": date(2026, 7, 13), "dtend": date(2026, 7, 14)},
+        recurrence_id=SECOND_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    tail = ICalendar.from_ical(calendar.created[0].data)
+    assert _master(tail)["DTSTART"].dt == date(2026, 7, 13)
+    [override] = _overrides(tail)
+    assert override["RECURRENCE-ID"].dt == date(2026, 7, 13)
+    assert override["DTSTART"].dt == date(2026, 7, 13)
+    assert override["DTEND"].dt == date(2026, 7, 14)
+
+
+def test_a_series_moved_to_another_zone_keeps_its_wall_clock() -> None:
+    """In the last week of October Berlin has left summer time and New York has
+    not, so the occurrence excluded there is another instant in the new zone."""
+    calendar = FakeCalendar(
+        TZID_SERIES.replace(
+            "RRULE:FREQ=WEEKLY",
+            "RRULE:FREQ=WEEKLY\nEXDATE;TZID=Europe/Berlin:20261026T090000",
+        )
+    )
+
+    update_event(calendar, "tz-1", {"time_zone": NEW_YORK})
+
+    master = _master(calendar.event.stored())
+    assert master["DTSTART"].dt == datetime(2026, 7, 6, 9, 0, tzinfo=BERLIN)
+    assert str(master["DTSTART"].dt.tzinfo) == "America/New_York"
+    assert master["DTEND"].dt == datetime(2026, 7, 6, 10, 0, tzinfo=BERLIN)
+    [excluded] = _exdates(master)
+    assert excluded.replace(tzinfo=None) == datetime(2026, 10, 26, 3, 0)
+    assert str(excluded.tzinfo) == "America/New_York"
+
+
+def test_a_start_given_beside_a_zone_is_written_in_that_zone() -> None:
+    calendar = FakeCalendar(SINGLE_EVENT)
+    start = datetime(2026, 7, 6, 9, 0, tzinfo=NEW_YORK)
+
+    update_event(
+        calendar,
+        "single-1",
+        {
+            "dtstart": start,
+            "dtend": start + timedelta(hours=1),
+            "time_zone": NEW_YORK,
+        },
+    )
+
+    assert "DTSTART;TZID=America/New_York:20260706T090000" in calendar.event.data
+    assert "DTEND;TZID=America/New_York:20260706T100000" in calendar.event.data
 
 
 def test_a_single_event_can_be_switched_to_all_day() -> None:
@@ -1945,19 +2233,18 @@ def test_a_split_off_tail_keeps_its_relation_and_writes_nowhere_else() -> None:
     assert "RELATED-TO" in _master(tail.stored())
 
 
-def test_an_rdate_only_series_cannot_be_switched_to_all_day() -> None:
+def test_an_rdate_only_series_becomes_all_day_with_its_dates() -> None:
     calendar = FakeCalendar(RDATE_HEAD_SERIES)
 
-    with pytest.raises(Refused, match="allday_timed_switch"):
-        update_event(
-            calendar,
-            "rdate-only-1",
-            {
-                "summary": "Standup",
-                "dtstart": date(2026, 7, 6),
-                "dtend": date(2026, 7, 7),
-            },
-        )
+    update_event(
+        calendar,
+        "rdate-only-1",
+        {"summary": "Standup", "dtstart": date(2026, 7, 6), "dtend": date(2026, 7, 7)},
+    )
+
+    master = _master(calendar.event.stored())
+    assert master["DTSTART"].dt == date(2026, 7, 6)
+    assert _rdates(master) == [date(2026, 7, 9)]
 
 
 def test_the_head_of_an_rdate_only_series_can_be_edited() -> None:
@@ -2421,41 +2708,150 @@ def test_editing_a_whole_object_of_detached_instances_is_refused() -> None:
     assert not calendar.event.saved
 
 
-def test_an_absolute_alarm_survives_an_edit_that_sets_the_relative_ones() -> None:
-    from custom_components.ha_caldav.event import _set_alarms
+# RFC 5545 3.2.13: from the 13th on, every occurrence runs from 11 to 12 and is
+# called "Standup moved".
+RANGED_SERIES = SERIES_WITH_OVERRIDE_FIRST.replace(
+    "RECURRENCE-ID:20260713T090000Z",
+    "RECURRENCE-ID;RANGE=THISANDFUTURE:20260713T090000Z",
+)
 
-    event = ICalendar.from_ical(
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
-        "BEGIN:VEVENT\r\nUID:u\r\nDTSTAMP:20260101T000000Z\r\n"
-        "DTSTART:20260706T090000Z\r\n"
-        "BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:rel\r\n"
-        "TRIGGER:-PT15M\r\nEND:VALARM\r\n"
-        "BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:abs\r\n"
-        "TRIGGER;VALUE=DATE-TIME:20260706T080000Z\r\nEND:VALARM\r\n"
-        "END:VEVENT\r\nEND:VCALENDAR\r\n"
+
+def _by_slot(ical: ICalendar) -> dict:
+    return {item["RECURRENCE-ID"].dt: item for item in _overrides(ical)}
+
+
+def _is_ranged(component) -> bool:
+    return component["RECURRENCE-ID"].params.get("RANGE") == "THISANDFUTURE"
+
+
+def test_one_occurrence_under_a_ranged_exception_is_edited_as_it_shows() -> None:
+    calendar = FakeCalendar(RANGED_SERIES)
+
+    update_event(
+        calendar, "timed-1", {"summary": "Renamed"}, recurrence_id=THIRD_OCCURRENCE
     )
-    vevent = next(iter(event.walk("VEVENT")))
 
-    _set_alarms(vevent, [30])
+    found = _by_slot(calendar.event.stored())
+    single = found[datetime(2026, 7, 20, 9, 0, tzinfo=UTC)]
+    assert single["SUMMARY"] == "Renamed"
+    assert single["DTSTART"].dt == datetime(2026, 7, 20, 11, 0, tzinfo=UTC)
+    assert single["DTEND"].dt == datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    assert not _is_ranged(single)
+    ranged = found[datetime(2026, 7, 13, 9, 0, tzinfo=UTC)]
+    assert ranged["SUMMARY"] == "Standup moved"
+    assert _is_ranged(ranged)
 
-    kept = [sub for sub in vevent.subcomponents if sub.name == "VALARM"]
-    assert [str(sub["DESCRIPTION"]) for sub in kept] == ["abs", "Reminder"]
 
+def test_editing_the_occurrence_a_ranged_exception_sits_on_hands_its_range_on() -> None:
+    calendar = FakeCalendar(RANGED_SERIES)
 
-def test_an_exception_covering_later_occurrences_is_refused() -> None:
-    """RFC 5545 RANGE=THISANDFUTURE stands for its occurrence and every later one."""
-    ranged = SERIES_WITH_OVERRIDE_FIRST.replace(
-        "RECURRENCE-ID:20260713T090000Z",
-        "RECURRENCE-ID;RANGE=THISANDFUTURE:20260713T090000Z",
+    update_event(
+        calendar, "timed-1", {"summary": "This one"}, recurrence_id=SECOND_OCCURRENCE
     )
-    calendar = FakeCalendar(ranged)
 
-    with pytest.raises(Refused, match="ranged_override"):
-        update_event(
-            calendar, "timed-1", {"summary": "Renamed"}, recurrence_id=THIRD_OCCURRENCE
+    found = _by_slot(calendar.event.stored())
+    own = found[datetime(2026, 7, 13, 9, 0, tzinfo=UTC)]
+    assert own["SUMMARY"] == "This one"
+    assert not _is_ranged(own)
+    successor = found[datetime(2026, 7, 20, 9, 0, tzinfo=UTC)]
+    assert successor["SUMMARY"] == "Standup moved"
+    assert successor["DTSTART"].dt == datetime(2026, 7, 20, 11, 0, tzinfo=UTC)
+    assert successor["DTEND"].dt == datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    assert _is_ranged(successor)
+
+
+def test_a_range_is_not_handed_on_past_an_exception_of_the_next_occurrence() -> None:
+    calendar = FakeCalendar(
+        RANGED_SERIES.replace(
+            "END:VCALENDAR",
+            "BEGIN:VEVENT\nUID:timed-1\nDTSTAMP:20260101T000000Z\n"
+            "RECURRENCE-ID:20260720T090000Z\nDTSTART:20260720T150000Z\n"
+            "DTEND:20260720T160000Z\nSUMMARY:Once\nEND:VEVENT\nEND:VCALENDAR",
         )
+    )
 
-    assert not calendar.event.saved
+    update_event(
+        calendar, "timed-1", {"summary": "This one"}, recurrence_id=SECOND_OCCURRENCE
+    )
+
+    found = _by_slot(calendar.event.stored())
+    assert found[datetime(2026, 7, 20, 9, 0, tzinfo=UTC)]["SUMMARY"] == "Once"
+    successor = found[datetime(2026, 7, 27, 9, 0, tzinfo=UTC)]
+    assert successor["SUMMARY"] == "Standup moved"
+    assert _is_ranged(successor)
+
+
+def test_deleting_one_occurrence_under_a_ranged_exception_excludes_its_slot() -> None:
+    calendar = FakeCalendar(RANGED_SERIES)
+
+    delete_event(calendar, "timed-1", THIRD_OCCURRENCE)
+
+    stored = calendar.event.stored()
+    assert _exdates(_master(stored)) == [datetime(2026, 7, 20, 9, 0, tzinfo=UTC)]
+    [ranged] = _overrides(stored)
+    assert _is_ranged(ranged)
+
+
+def test_deleting_the_occurrence_a_ranged_exception_sits_on_keeps_the_later_ones() -> (
+    None
+):
+    calendar = FakeCalendar(RANGED_SERIES)
+
+    delete_event(calendar, "timed-1", SECOND_OCCURRENCE)
+
+    stored = calendar.event.stored()
+    assert _exdates(_master(stored)) == [datetime(2026, 7, 13, 9, 0, tzinfo=UTC)]
+    [successor] = _overrides(stored)
+    assert successor["RECURRENCE-ID"].dt == datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
+    assert successor["DTSTART"].dt == datetime(2026, 7, 20, 11, 0, tzinfo=UTC)
+    assert _is_ranged(successor)
+
+
+def test_a_split_under_a_ranged_exception_takes_its_values_along() -> None:
+    calendar = FakeCalendar(RANGED_SERIES)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"location": "Room 2"},
+        recurrence_id=THIRD_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    [kept] = _overrides(calendar.event.stored())
+    assert kept["RECURRENCE-ID"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+    assert _is_ranged(kept)
+    assert "LOCATION" not in kept
+    tail = ICalendar.from_ical(calendar.created[0].data)
+    assert _master(tail)["DTSTART"].dt == datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
+    [carried] = _overrides(tail)
+    assert carried["RECURRENCE-ID"].dt == datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
+    assert carried["DTSTART"].dt == datetime(2026, 7, 20, 11, 0, tzinfo=UTC)
+    assert carried["SUMMARY"] == "Standup moved"
+    assert carried["LOCATION"] == "Room 2"
+    assert _is_ranged(carried)
+
+
+def test_a_split_moved_under_a_ranged_exception_moves_what_it_shows() -> None:
+    calendar = FakeCalendar(RANGED_SERIES)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {
+            "dtstart": datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 20, 13, 0, tzinfo=UTC),
+        },
+        recurrence_id=THIRD_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    tail = ICalendar.from_ical(calendar.created[0].data)
+    assert _master(tail)["DTSTART"].dt == datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+    [carried] = _overrides(tail)
+    assert carried["RECURRENCE-ID"].dt == datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+    assert carried["DTSTART"].dt == datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    assert carried["DTEND"].dt == datetime(2026, 7, 20, 13, 0, tzinfo=UTC)
 
 
 def test_moving_a_whole_series_carries_its_extra_and_canceled_dates() -> None:
@@ -2658,17 +3054,34 @@ def test_the_last_day_of_an_all_day_series_can_be_deleted(new_york) -> None:
     assert str(master["RRULE"].to_ical().decode()) == "FREQ=DAILY;UNTIL=20260709"
 
 
-def test_a_whole_series_edit_is_refused_over_a_ranged_exception() -> None:
-    ranged = SERIES_WITH_OVERRIDE_FIRST.replace(
-        "RECURRENCE-ID:20260713T090000Z",
-        "RECURRENCE-ID;RANGE=THISANDFUTURE:20260713T090000Z",
+def test_a_ranged_exception_moves_to_the_next_occurrence_of_a_new_rule() -> None:
+    calendar = FakeCalendar(RANGED_SERIES)
+
+    update_event(calendar, "timed-1", {"rrule": "FREQ=WEEKLY;INTERVAL=2"})
+
+    [ranged] = _overrides(calendar.event.stored())
+    assert ranged["RECURRENCE-ID"].dt == datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
+    assert ranged["DTSTART"].dt == datetime(2026, 7, 20, 11, 0, tzinfo=UTC)
+    assert ranged["SUMMARY"] == "Standup moved"
+    assert _is_ranged(ranged)
+
+
+def test_a_ranged_exception_moves_with_its_series() -> None:
+    calendar = FakeCalendar(RANGED_SERIES)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {
+            "dtstart": datetime(2026, 7, 7, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 7, 10, 0, tzinfo=UTC),
+        },
     )
-    calendar = FakeCalendar(ranged)
 
-    with pytest.raises(Refused, match="ranged_override"):
-        update_event(calendar, "timed-1", {"rrule": "FREQ=WEEKLY;INTERVAL=2"})
-
-    assert not calendar.event.saved
+    [ranged] = _overrides(calendar.event.stored())
+    assert ranged["RECURRENCE-ID"].dt == datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    assert ranged["DTSTART"].dt == datetime(2026, 7, 14, 11, 0, tzinfo=UTC)
+    assert _is_ranged(ranged)
 
 
 def test_renaming_a_series_with_a_ranged_exception_is_still_allowed() -> None:
@@ -3534,21 +3947,19 @@ def test_a_rule_given_with_a_floating_end_is_stored_with_it_in_utc() -> None:
     assert rule["UNTIL"] == [datetime(2026, 12, 29, 9, 0, tzinfo=UTC)]
 
 
-@pytest.mark.parametrize("this_and_future", [False, True])
-def test_a_delete_is_refused_over_a_ranged_exception(this_and_future: bool) -> None:
-    ranged = SERIES_WITH_OVERRIDE_FIRST.replace(
-        "RECURRENCE-ID:20260713T090000Z",
-        "RECURRENCE-ID;RANGE=THISANDFUTURE:20260713T090000Z",
-    )
-    calendar = FakeCalendar(ranged)
+def test_deleting_from_an_occurrence_onwards_keeps_an_earlier_ranged_exception() -> (
+    None
+):
+    calendar = FakeCalendar(RANGED_SERIES)
 
-    with pytest.raises(Refused, match="ranged_override"):
-        delete_event(
-            calendar, "timed-1", THIRD_OCCURRENCE, this_and_future=this_and_future
-        )
+    delete_event(calendar, "timed-1", THIRD_OCCURRENCE, this_and_future=True)
 
-    assert not calendar.event.saved
-    assert not calendar.event.deleted
+    stored = calendar.event.stored()
+    assert _master(stored)["RRULE"]["UNTIL"] == [
+        datetime(2026, 7, 20, 8, 59, 59, tzinfo=UTC)
+    ]
+    [ranged] = _overrides(stored)
+    assert _is_ranged(ranged)
 
 
 def test_moving_a_series_shifts_every_line_of_its_excluded_dates() -> None:
@@ -3843,6 +4254,7 @@ END:VEVENT
 END:VCALENDAR
 """
 BERLIN = ZoneInfo("Europe/Berlin")
+NEW_YORK = ZoneInfo("America/New_York")
 # As the editor sends it: its own BYDAY, and UNTIL still at the old end date.
 TUESDAYS = "FREQ=WEEKLY;BYDAY=TU;UNTIL=20260831T070000Z"
 
@@ -4017,3 +4429,71 @@ def test_a_description_reaches_the_part_of_the_series_edited(
     else:
         edited = _master(calendar.event.stored())
     assert edited.get("DESCRIPTION") == description
+
+
+ME = ["mailto:me@example.com"]
+
+
+def _replies(component) -> dict[str, str]:
+    held = component.get("ATTENDEE")
+    lines = held if isinstance(held, list) else [held]
+    return {str(line): str(line.params.get("PARTSTAT", "")) for line in lines}
+
+
+def test_answering_one_occurrence_leaves_the_rest_of_the_series_open() -> None:
+    from custom_components.ha_caldav.recurrence import respond_to_invitation
+
+    calendar = FakeCalendar(INVITED_SERIES)
+
+    respond_to_invitation(calendar, "timed-1", "DECLINED", ME, SECOND_OCCURRENCE)
+
+    stored = calendar.event.stored()
+    [override] = _overrides(stored)
+    assert override["RECURRENCE-ID"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+    assert override["DTSTART"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+    assert _replies(override) == {"mailto:me@example.com": "DECLINED"}
+    assert _replies(_master(stored)) == {"mailto:me@example.com": ""}
+    assert int(override["SEQUENCE"]) == 4
+
+
+def test_answering_an_occurrence_that_has_an_exception_answers_that_one() -> None:
+    from custom_components.ha_caldav.recurrence import respond_to_invitation
+
+    calendar = FakeCalendar(
+        SERIES_WITH_OVERRIDE.replace(
+            "SUMMARY:Standup moved\n",
+            "SUMMARY:Standup moved\nORGANIZER:mailto:boss@example.com\n"
+            "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\n",
+        )
+    )
+
+    respond_to_invitation(calendar, "timed-1", "ACCEPTED", ME, SECOND_OCCURRENCE)
+
+    stored = calendar.event.stored()
+    [override] = _overrides(stored)
+    assert _replies(override) == {"mailto:me@example.com": "ACCEPTED"}
+    assert "ATTENDEE" not in _master(stored)
+
+
+def test_answering_a_day_the_series_does_not_fall_on_is_refused() -> None:
+    from custom_components.ha_caldav.recurrence import respond_to_invitation
+
+    calendar = FakeCalendar(INVITED_SERIES)
+
+    with pytest.raises(Refused, match="occurrence_not_found"):
+        respond_to_invitation(
+            calendar, "timed-1", "ACCEPTED", ME, "2026-07-14 09:00:00+00:00"
+        )
+
+    assert not calendar.event.saved
+
+
+def test_answering_one_occurrence_of_a_series_we_are_not_on_adds_no_exception() -> None:
+    from custom_components.ha_caldav.recurrence import respond_to_invitation
+
+    calendar = FakeCalendar(TIMED_SERIES)
+
+    with pytest.raises(Refused, match="not_an_attendee"):
+        respond_to_invitation(calendar, "timed-1", "ACCEPTED", ME, SECOND_OCCURRENCE)
+
+    assert not calendar.event.saved

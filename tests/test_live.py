@@ -813,8 +813,8 @@ def test_writing_a_calendar_name_back(calendar) -> None:
 
 
 def test_responding_to_an_invitation_sets_our_partstat(calendar) -> None:
-    from custom_components.ha_caldav.api import respond_to_invitation
     from custom_components.ha_caldav.capability import fetch_address_set
+    from custom_components.ha_caldav.recurrence import respond_to_invitation
 
     addresses = fetch_address_set(calendar.client)
     if not addresses:
@@ -936,6 +936,409 @@ def test_moving_one_item_leaves_the_others_untouched(calendar) -> None:
         vtodo = resource.vobject_instance.vtodo
         positions[str(vtodo.summary.value)] = sort_order(vtodo)
     assert positions["Live three"] < positions["Live one"] < positions["Live two"]
+
+
+OTHER = os.environ.get("CALDAV_OTHER_USERNAME", "")
+
+
+def _extras(calendar) -> dict:
+    from custom_components.ha_caldav.event import read_extras
+
+    found = calendar.search(start=RANGE_START, end=RANGE_END, event=True)
+    return read_extras(found[0].vobject_instance.vevent)
+
+
+def test_an_event_keeps_its_attachments_and_every_kind_of_alarm(
+    calendar, tmp_path
+) -> None:
+    file = tmp_path / "note.txt"
+    file.write_bytes(b"hello world")
+
+    create_event(
+        calendar,
+        {
+            "summary": "Live rich",
+            "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+            "attachments": [
+                {"url": "https://example.com/agenda.pdf", "name": "agenda.pdf"},
+                {"path": str(file), "media_type": "text/plain"},
+            ],
+            "alarms": [
+                {"at": datetime(2026, 7, 5, 18, 0, tzinfo=UTC)},
+                {
+                    "minutes_before": 60,
+                    "action": "EMAIL",
+                    "attendees": ["ann@example.com"],
+                },
+            ],
+        },
+    )
+
+    extras = _extras(calendar)
+    assert {"url": "https://example.com/agenda.pdf", "name": "agenda.pdf"} in extras[
+        "attachments"
+    ]
+    assert {"size": 11, "name": "note.txt", "media_type": "text/plain"} in extras[
+        "attachments"
+    ]
+    by_action = {alarm["action"]: alarm for alarm in extras["alarms"]}
+    assert datetime.fromisoformat(by_action["DISPLAY"]["at"]) == datetime(
+        2026, 7, 5, 18, 0, tzinfo=UTC
+    )
+    assert by_action["EMAIL"]["minutes_before"] == 60
+    assert by_action["EMAIL"]["attendees"] == ["ann@example.com"]
+
+
+def test_an_event_is_stored_in_the_zone_it_was_given(calendar) -> None:
+    from zoneinfo import ZoneInfo
+
+    start = datetime(2026, 7, 6, 9, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    create_event(
+        calendar,
+        {
+            "summary": "Live zone",
+            "dtstart": start,
+            "dtend": start.replace(hour=10),
+            "rrule": "FREQ=WEEKLY;COUNT=3",
+        },
+    )
+
+    stored = calendar.events()[0].icalendar_component["DTSTART"]
+    assert stored.params["TZID"] == "America/New_York"
+    assert starts(calendar)[0] == datetime(2026, 7, 6, 13, 0, tzinfo=UTC)
+
+
+def test_a_series_is_switched_to_all_day_with_its_canceled_date(calendar) -> None:
+    uid = series(calendar)
+    delete_event(calendar, uid, "2026-07-13 09:00:00+00:00")
+
+    update_event(
+        calendar, uid, {"dtstart": date(2026, 7, 6), "dtend": date(2026, 7, 7)}
+    )
+
+    assert starts(calendar) == [date(2026, 7, 6), date(2026, 7, 20), date(2026, 7, 27)]
+
+
+def test_one_occurrence_of_a_timed_series_is_made_all_day(calendar) -> None:
+    uid = series(calendar)
+
+    update_event(
+        calendar,
+        uid,
+        {"dtstart": date(2026, 7, 13), "dtend": date(2026, 7, 14)},
+        recurrence_id="2026-07-13 09:00:00+00:00",
+    )
+
+    found = {
+        str(vevent.dtstart.value)[:10]: vevent.dtstart.value
+        for vevent in _expanded(calendar)
+    }
+    assert found["2026-07-13"] == date(2026, 7, 13)
+    assert isinstance(found["2026-07-20"], datetime)
+    assert len(found) == 4
+
+
+RANGED = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//EN
+BEGIN:VEVENT
+UID:live-ranged
+DTSTAMP:20260101T000000Z
+DTSTART:20260706T090000Z
+DTEND:20260706T100000Z
+RRULE:FREQ=WEEKLY;COUNT=5
+SUMMARY:Standup
+END:VEVENT
+BEGIN:VEVENT
+UID:live-ranged
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID;RANGE=THISANDFUTURE:20260713T090000Z
+DTSTART:20260713T110000Z
+DTEND:20260713T120000Z
+SUMMARY:Standup later
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def test_one_occurrence_under_a_ranged_exception_is_edited_alone(calendar) -> None:
+    """RFC 5545 3.2.13: the exception of the 13th stands for every later one too."""
+    from custom_components.ha_caldav.api import import_ics
+    from custom_components.ha_caldav.coordinator import to_event
+
+    import_ics(calendar, RANGED)
+    shown = {to_event(v).start: to_event(v) for v in _expanded(calendar)}
+    third = shown[datetime(2026, 7, 20, 11, 0, tzinfo=UTC)]
+    assert third.summary == "Standup later"
+
+    update_event(
+        calendar, "live-ranged", {"summary": "Once"}, recurrence_id=third.recurrence_id
+    )
+
+    assert summaries(calendar) == {
+        datetime(2026, 7, 6, 9, 0, tzinfo=UTC): "Standup",
+        datetime(2026, 7, 13, 11, 0, tzinfo=UTC): "Standup later",
+        datetime(2026, 7, 20, 11, 0, tzinfo=UTC): "Once",
+        datetime(2026, 7, 27, 11, 0, tzinfo=UTC): "Standup later",
+        datetime(2026, 8, 3, 11, 0, tzinfo=UTC): "Standup later",
+    }
+
+
+def test_the_occurrence_a_ranged_exception_sits_on_is_deleted_alone(calendar) -> None:
+    from custom_components.ha_caldav.api import import_ics
+
+    # Nextcloud refuses a uid while an object deleted under it sits in its trash.
+    import_ics(calendar, RANGED.replace("live-ranged", "live-ranged-2"))
+
+    delete_event(calendar, "live-ranged-2", "2026-07-13 09:00:00+00:00")
+
+    assert summaries(calendar) == {
+        datetime(2026, 7, 6, 9, 0, tzinfo=UTC): "Standup",
+        datetime(2026, 7, 20, 11, 0, tzinfo=UTC): "Standup later",
+        datetime(2026, 7, 27, 11, 0, tzinfo=UTC): "Standup later",
+        datetime(2026, 8, 3, 11, 0, tzinfo=UTC): "Standup later",
+    }
+
+
+DATED = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//EN
+BEGIN:VEVENT
+UID:live-dated
+DTSTAMP:20260101T000000Z
+DTSTART:20260706T090000Z
+DTEND:20260706T100000Z
+RRULE:FREQ=WEEKLY;COUNT=4
+RDATE:20260709T090000Z
+SUMMARY:Standup
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def test_a_series_is_split_at_a_date_added_by_hand(calendar) -> None:
+    from custom_components.ha_caldav.api import import_ics
+
+    import_ics(calendar, DATED)
+
+    update_event(
+        calendar,
+        "live-dated",
+        {"summary": "Onwards"},
+        recurrence_id="2026-07-09 09:00:00+00:00",
+        this_and_future=True,
+    )
+
+    assert summaries(calendar) == {
+        datetime(2026, 7, 6, 9, 0, tzinfo=UTC): "Standup",
+        datetime(2026, 7, 9, 9, 0, tzinfo=UTC): "Onwards",
+        datetime(2026, 7, 13, 9, 0, tzinfo=UTC): "Onwards",
+        datetime(2026, 7, 20, 9, 0, tzinfo=UTC): "Onwards",
+        datetime(2026, 7, 27, 9, 0, tzinfo=UTC): "Onwards",
+    }
+    assert len(calendar.events()) == 3
+
+
+def test_one_occurrence_of_an_invitation_is_answered_alone(calendar) -> None:
+    from custom_components.ha_caldav.capability import fetch_address_set
+    from custom_components.ha_caldav.recurrence import respond_to_invitation
+
+    addresses = fetch_address_set(calendar.client)
+    if not addresses:
+        pytest.skip("server does not do CalDAV scheduling")
+    create_event(
+        calendar,
+        {
+            "summary": "Live invite series",
+            "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+            "rrule": "FREQ=WEEKLY;COUNT=3",
+            "attendees": [addresses[0]],
+        },
+    )
+    uid = uid_of(calendar)
+
+    respond_to_invitation(
+        calendar, uid, "DECLINED", addresses, "2026-07-13 09:00:00+00:00"
+    )
+
+    replies = {}
+    for component in calendar.event_by_uid(uid).icalendar_instance.walk("VEVENT"):
+        held = component["ATTENDEE"]
+        line = held[0] if isinstance(held, list) else held
+        replies["RECURRENCE-ID" in component] = str(line.params.get("PARTSTAT"))
+    assert replies == {False: "NEEDS-ACTION", True: "DECLINED"}
+
+
+def test_the_busy_times_of_an_account_come_back_from_the_outbox(calendar) -> None:
+    from custom_components.ha_caldav.api import attendee_free_busy
+    from custom_components.ha_caldav.capability import fetch_address_set
+
+    addresses = fetch_address_set(calendar.client)
+    mail = next((a for a in addresses if a.lower().startswith("mailto:")), None)
+    if mail is None:
+        pytest.skip("the account has no email address to ask the server about")
+    create_event(
+        calendar,
+        {
+            "summary": "Live busy",
+            "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+        },
+    )
+
+    busy = attendee_free_busy(
+        calendar.client, RANGE_START, RANGE_END, [mail, "nobody@example.org"], addresses
+    )
+
+    assert busy["nobody@example.org"] is None
+    assert {
+        "start": "2026-07-06T09:00:00+00:00",
+        "end": "2026-07-06T10:00:00+00:00",
+    } in [
+        {
+            key: datetime.fromisoformat(value).astimezone(UTC).isoformat()
+            for key, value in period.items()
+        }
+        for period in busy[mail]
+    ]
+
+
+@pytest.fixture
+def journal_calendar(calendar):
+    principal = calendar.client.principal()
+    name = f"{CALENDAR_NAME}_journal"
+    for existing in principal.calendars():
+        if existing.name == name:
+            existing.delete()
+    created = principal.make_calendar(
+        name=name, supported_calendar_component_set=["VJOURNAL"]
+    )
+    if "VJOURNAL" not in created.get_supported_components():
+        created.delete()
+        pytest.skip("server holds no journal entries")
+    yield created
+    enable_sockets()
+    created.delete()
+
+
+def test_a_journal_entry_is_created_changed_found_and_deleted(journal_calendar) -> None:
+    from custom_components.ha_caldav.journal import (
+        create_journal,
+        delete_journal,
+        read_journals,
+        update_journal,
+    )
+
+    create_journal(
+        journal_calendar,
+        {"summary": "Live diary", "description": "Rain", "start": date(2026, 7, 6)},
+    )
+    create_journal(journal_calendar, {"summary": "Live note"})
+    [dated, undated] = read_journals(journal_calendar, None, None)
+    assert (dated["summary"], dated["start"]) == ("Live diary", "2026-07-06")
+    assert "start" not in undated
+
+    update_journal(journal_calendar, dated["uid"], {"description": "Sun"})
+    [found] = read_journals(journal_calendar, RANGE_START, RANGE_END)
+    assert found["description"] == "Sun"
+    assert (
+        read_journals(
+            journal_calendar,
+            datetime(2027, 1, 1, tzinfo=UTC),
+            datetime(2027, 2, 1, tzinfo=UTC),
+        )
+        == []
+    )
+
+    delete_journal(journal_calendar, dated["uid"])
+    assert [entry["uid"] for entry in read_journals(journal_calendar, None, None)] == [
+        undated["uid"]
+    ]
+
+
+def _other_client():
+    if not OTHER:
+        pytest.skip("server has no second account")
+    return build_client(URL, OTHER, PASSWORD, connection_kwargs({}))
+
+
+def test_a_calendar_is_shared_with_another_account_and_taken_back(calendar) -> None:
+    from custom_components.ha_caldav.sharing import (
+        read_shares,
+        share_calendar,
+        unshare_calendar,
+    )
+
+    other = _other_client()
+    try:
+        assert read_shares(calendar) == []
+    except Refused:
+        pytest.skip("server shares calendars in no dialect known here")
+
+    share_calendar(calendar, OTHER, write=True)
+
+    [share] = read_shares(calendar)
+    assert (share["user"], share["access"]) == (OTHER, "read_write")
+    assert any(
+        CALENDAR_NAME in (shared.name or "") for shared in other.principal().calendars()
+    )
+    with pytest.raises(Refused, match="sharee_not_found"):
+        share_calendar(calendar, "nobody-by-that-name", write=False)
+
+    unshare_calendar(calendar, OTHER)
+
+    assert read_shares(calendar) == []
+    assert not any(
+        CALENDAR_NAME in (shared.name or "") for shared in other.principal().calendars()
+    )
+
+
+def test_a_delegate_sees_the_calendars_of_the_account_it_acts_for(calendar) -> None:
+    from custom_components.ha_caldav.capability import (
+        account_calendars,
+        fetch_capabilities,
+    )
+    from custom_components.ha_caldav.connection import calendar_key
+
+    other = _other_client()
+    owner = calendar.client.principal()
+    group = str(owner.url).rstrip("/") + "/calendar-proxy-write/"
+    member = urlparse(str(other.principal().url)).path
+
+    def members(hrefs: str) -> int:
+        body = (
+            '<d:propertyupdate xmlns:d="DAV:"><d:set><d:prop><d:group-member-set>'
+            f"{hrefs}</d:group-member-set></d:prop></d:set></d:propertyupdate>"
+        )
+        headers = {"Content-Type": "application/xml; charset=utf-8"}
+        return calendar.client.request(group, "PROPPATCH", body, headers).status
+
+    try:
+        granted = members(f"<d:href>{member}</d:href>")
+    except Exception:  # noqa: BLE001
+        pytest.skip("server has no delegation")
+    calendars, delegations = account_calendars(other)
+    if granted != 207 or not delegations:
+        pytest.skip("server has no delegation")
+    try:
+        key = calendar_key(calendar.url)
+        [delegated] = [item for item in calendars if calendar_key(item.url) == key]
+        assert delegated.name.startswith(f"{CALENDAR_NAME} ({USERNAME}")
+        assert fetch_capabilities(other, delegations)[key].writable is True
+        create_event(
+            delegated,
+            {
+                "summary": "Live delegated",
+                "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+                "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+            },
+        )
+        assert len(calendar.events()) == 1
+    finally:
+        members("")
 
 
 def _raw(uid: str, summary: str = "Raw") -> str:

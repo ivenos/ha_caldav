@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import re
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import caldav
 from caldav.elements import cdav, dav, ical
 from homeassistant.util.color import color_name_to_rgb
 
-from .capability import objects_and_props
+from .capability import home_sets, objects_and_props
 
 _HEX = re.compile(r"[0-9a-fA-F]+")
 _EXPANDABLE = (3, 4)
@@ -49,29 +49,31 @@ class Collection(NamedTuple):
     calendar: bool | None = None
 
 
-def fetch_collections(client: caldav.DAVClient) -> dict[str, Collection]:
-    """Return calendar key -> color, name and kind for everything the home set holds.
+def fetch_collections(
+    client: caldav.DAVClient, delegations: Any = ()
+) -> dict[str, Collection]:
+    """Return calendar key -> color, name and kind for everything the home sets hold.
 
     Whatever a calendar lacks holds None. A calendar is what caldav lists as
     one: a collection whose resource type names it.
     """
-    home = client.principal().calendar_home_set
-    # The parsed form collapses to the home set itself.
-    response = home.get_properties(
-        [ical.CalendarColor(), dav.DisplayName(), dav.ResourceType()],
-        depth=1,
-        parse_response_xml=False,
-    )
     collections: dict[str, Collection] = {}
-    for key, props in objects_and_props(response, home.url).items():
-        color = props.get(ical.CalendarColor.tag)
-        name = props.get(dav.DisplayName.tag)
-        kind = props.get(dav.ResourceType.tag)
-        collections[key] = Collection(
-            None if color is None else normalize_color(color.text),
-            None if name is None else name.text or None,
-            None
-            if kind is None
-            else any(item.tag == cdav.Calendar.tag for item in kind),
+    for home in home_sets(client, delegations):
+        # The parsed form collapses to the home set itself.
+        response = home.get_properties(
+            [ical.CalendarColor(), dav.DisplayName(), dav.ResourceType()],
+            depth=1,
+            parse_response_xml=False,
         )
+        for key, props in objects_and_props(response, home.url).items():
+            color = props.get(ical.CalendarColor.tag)
+            name = props.get(dav.DisplayName.tag)
+            kind = props.get(dav.ResourceType.tag)
+            collections[key] = Collection(
+                None if color is None else normalize_color(color.text),
+                None if name is None else name.text or None,
+                None
+                if kind is None
+                else any(item.tag == cdav.Calendar.tag for item in kind),
+            )
     return collections

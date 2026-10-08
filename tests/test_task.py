@@ -219,6 +219,29 @@ def test_a_reminder_on_an_item_without_any_date_is_refused() -> None:
         apply_fields(_written(), {"alarms": [15]})
 
 
+def test_an_alarm_at_a_fixed_time_needs_no_date_to_count_from() -> None:
+    vtodo = _written()
+
+    apply_fields(vtodo, {"alarms": [{"at": datetime(2026, 7, 6, 8, 0, tzinfo=UTC)}]})
+
+    assert "TRIGGER;VALUE=DATE-TIME:20260706T080000Z" in _stored(vtodo)
+
+
+def test_a_to_do_takes_attachments_and_reports_them_back() -> None:
+    vtodo = _written()
+
+    apply_fields(vtodo, {"attachments": ["https://example.com/recipe.pdf"]})
+
+    assert "ATTACH:https://example.com/recipe.pdf" in _stored(vtodo)
+    document = (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
+        f"{_stored(vtodo)}END:VCALENDAR\r\n"
+    )
+    assert read_todo_extras(vobject.readOne(document).vtodo)["attachments"] == [
+        {"url": "https://example.com/recipe.pdf"}
+    ]
+
+
 def test_assigning_a_todo_names_the_account_as_its_organizer() -> None:
     vtodo = _written()
 

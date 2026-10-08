@@ -35,6 +35,7 @@ from homeassistant.helpers.selector import (
 )
 import voluptuous as vol
 
+from .capability import account_calendars
 from .connection import (
     UNREACHABLE,
     account_key,
@@ -479,7 +480,7 @@ def _calendar_choices(client: caldav.DAVClient) -> dict[str, str]:
     """Return key -> display name for every calendar on the account."""
     return {
         calendar_key(calendar.url): display_name(calendar)
-        for calendar in client.principal().calendars()
+        for calendar in account_calendars(client)[0]
     }
 
 

@@ -153,9 +153,6 @@
     "alarm_needs_date": {
       "message": "Eine Erinnerung braucht ein Start- oder Fälligkeitsdatum, von dem aus sie zählt."
     },
-    "allday_timed_switch": {
-      "message": "Eine Serie lässt sich nicht zwischen ganztägig und zeitgebunden umstellen."
-    },
     "ambiguous_calendar": {
       "message": "Dieses Konto hat mehrere Kalender namens {name}; benenne zuerst einen davon um."
     },
@@ -166,7 +163,7 @@
       "message": "Keine Verbindung zum CalDAV-Server ({error})."
     },
     "document_empty": {
-      "message": "Das Dokument enthält weder einen Termin noch eine Aufgabe."
+      "message": "Das Dokument enthält weder einen Termin noch eine Aufgabe noch einen Journaleintrag."
     },
     "document_no_uid": {
       "message": "Das Dokument enthält eine Komponente ohne UID."
@@ -222,12 +219,6 @@
     "parent_not_found": {
       "message": "Auf dieser Liste gibt es keine Aufgabe {parent}, unter die sie gehören könnte."
     },
-    "ranged_override": {
-      "message": "Diese Serie enthält eine Ausnahme, die ab einer Wiederholung für alle folgenden gilt. Bearbeite sie in der App, die sie erstellt hat."
-    },
-    "rdate_split": {
-      "message": "Diese Wiederholung wurde der Serie von Hand hinzugefügt, und dort lässt sich eine Serie nicht teilen."
-    },
     "read_only": {
       "message": "{name} ist schreibgeschützt; es lässt sich nichts hineinschreiben."
     },
@@ -272,6 +263,36 @@
     },
     "unreadable_lines": {
       "message": "Das Dokument enthält Zeilen, die sich nicht lesen lassen: {lines}"
+    },
+    "email_alarm_needs_recipient": {
+      "message": "Eine E-Mail-Erinnerung braucht attendees, an die sie geht."
+    },
+    "attachment_not_found": {
+      "message": "Dieser Eintrag hat keinen eingebetteten Anhang namens {name}."
+    },
+    "attachment_unreadable": {
+      "message": "Die Datei {path} ließ sich nicht lesen."
+    },
+    "path_not_allowed": {
+      "message": "Home Assistant darf {path} nicht lesen. Trage den Ordner in allowlist_external_dirs ein."
+    },
+    "no_journals": {
+      "message": "{name} nimmt keine Journaleinträge auf."
+    },
+    "no_journal_in_object": {
+      "message": "Dieser Eintrag ist nicht als Journaleintrag gespeichert und lässt sich hier nicht ändern."
+    },
+    "sharing_unsupported": {
+      "message": "Dieser Server bietet keine Kalenderfreigabe, die sich von hier aus erreichen lässt."
+    },
+    "sharee_not_found": {
+      "message": "Der Server kennt kein Konto {user}, für das sich freigeben ließe."
+    },
+    "not_shared_with": {
+      "message": "Dieser Kalender ist nicht für {user} freigegeben."
+    },
+    "unknown_time_zone": {
+      "message": "{time_zone} ist keine Zeitzone. Verwende einen Namen wie America/New_York."
     }
   },
   "selector": {
@@ -295,7 +316,8 @@
     "calendar_components": {
       "options": {
         "vevent": "Termine",
-        "vtodo": "Aufgaben"
+        "vtodo": "Aufgaben",
+        "vjournal": "Journaleinträge"
       }
     },
     "event_status": {
@@ -339,6 +361,27 @@
         "category": "Kategorie",
         "uid": "UID"
       }
+    },
+    "journal_status": {
+      "options": {
+        "draft": "Entwurf",
+        "final": "Endgültig",
+        "cancelled": "Verworfen"
+      }
+    },
+    "journal_search_field": {
+      "options": {
+        "summary": "Titel",
+        "description": "Beschreibung",
+        "category": "Kategorie",
+        "uid": "UID"
+      }
+    },
+    "share_access": {
+      "options": {
+        "read": "Lesen",
+        "read_write": "Lesen und schreiben"
+      }
     }
   },
   "services": {
@@ -348,7 +391,7 @@
       "fields": {
         "text": {
           "name": "Text",
-          "description": "Der gesuchte Text. Server suchen nach Teilzeichenfolgen."
+          "description": "Der gesuchte Text. Server suchen nach Teilzeichenfolgen. Leer lassen für alle Termine."
         },
         "field": {
           "name": "Feld",
@@ -375,6 +418,24 @@
         "end": {
           "name": "Ende",
           "description": "Ende des Zeitfensters."
+        },
+        "attendees": {
+          "name": "Teilnehmer",
+          "description": "E-Mail-Adressen anderer Personen, nach denen der Server gefragt wird. Ihre belegten Zeiträume stehen unter attendees, null bei jemandem, zu dem er nichts sagen kann. Setzt einen Server mit CalDAV-Scheduling voraus."
+        }
+      }
+    },
+    "get_invitations": {
+      "name": "Einladungen abfragen",
+      "description": "Gibt die Termine des Kalenders zurück, die noch auf deine Antwort warten. Setzt einen Server mit CalDAV-Scheduling voraus.",
+      "fields": {
+        "start": {
+          "name": "Start",
+          "description": "Nur Einladungen, die nach diesem Zeitpunkt enden. Ohne Angabe jetzt."
+        },
+        "end": {
+          "name": "Ende",
+          "description": "Nur Einladungen, die vor diesem Zeitpunkt beginnen."
         }
       }
     },
@@ -401,6 +462,10 @@
         "end_date": {
           "name": "Enddatum",
           "description": "Für einen ganztägigen Termin. Der Tag nach dem letzten."
+        },
+        "time_zone": {
+          "name": "Zeitzone",
+          "description": "Die Zeitzone von Start und Ende, etwa America/New_York. Ohne Angabe die von Home Assistant."
         },
         "description": {
           "name": "Beschreibung",
@@ -448,7 +513,11 @@
         },
         "alarms": {
           "name": "Erinnerungen",
-          "description": "Minuten vor dem Start oder Objekte mit minutes_before, action, related und description."
+          "description": "Minuten vor dem Start oder Objekte mit minutes_before oder at, action, related und description, bei einer E-Mail auch summary und attendees."
+        },
+        "attachments": {
+          "name": "Anhänge",
+          "description": "Links oder Objekte mit url, name und media_type. Ein Objekt mit path bettet diese Datei ein."
         }
       },
       "sections": {
@@ -494,6 +563,10 @@
           "name": "Enddatum",
           "description": "Für einen ganztägigen Termin. Der Tag nach dem letzten."
         },
+        "time_zone": {
+          "name": "Zeitzone",
+          "description": "Verlegt den Termin in diese Zeitzone, etwa America/New_York. Ein daneben angegebener Start oder ein Ende gilt in ihr."
+        },
         "description": {
           "name": "Beschreibung",
           "description": "Der Beschreibungstext des Termins."
@@ -540,7 +613,11 @@
         },
         "alarms": {
           "name": "Erinnerungen",
-          "description": "Minuten vor dem Start oder Objekte mit minutes_before, action, related und description."
+          "description": "Minuten vor dem Start oder Objekte mit minutes_before oder at, action, related und description, bei einer E-Mail auch summary und attendees."
+        },
+        "attachments": {
+          "name": "Anhänge",
+          "description": "Links oder Objekte mit url, name und media_type. Ein Objekt mit path bettet diese Datei ein."
         }
       },
       "sections": {
@@ -660,7 +737,11 @@
         },
         "alarms": {
           "name": "Erinnerungen",
-          "description": "Minuten vor dem Start, ohne Start vor der Fälligkeit, oder Objekte mit minutes_before, action, related und description."
+          "description": "Minuten vor dem Start, ohne Start vor der Fälligkeit, oder Objekte mit minutes_before oder at, action, related und description, bei einer E-Mail auch summary und attendees."
+        },
+        "attachments": {
+          "name": "Anhänge",
+          "description": "Links oder Objekte mit url, name und media_type. Ein Objekt mit path bettet diese Datei ein."
         }
       },
       "sections": {
@@ -748,7 +829,11 @@
         },
         "alarms": {
           "name": "Erinnerungen",
-          "description": "Minuten vor dem Start, ohne Start vor der Fälligkeit, oder Objekte mit minutes_before, action, related und description."
+          "description": "Minuten vor dem Start, ohne Start vor der Fälligkeit, oder Objekte mit minutes_before oder at, action, related und description, bei einer E-Mail auch summary und attendees."
+        },
+        "attachments": {
+          "name": "Anhänge",
+          "description": "Links oder Objekte mit url, name und media_type. Ein Objekt mit path bettet diese Datei ein."
         }
       },
       "sections": {
@@ -794,9 +879,129 @@
         }
       }
     },
+    "create_journal": {
+      "name": "Journaleintrag anlegen",
+      "description": "Legt einen Journaleintrag in einem Kalender an, der solche aufnimmt.",
+      "fields": {
+        "summary": {
+          "name": "Titel",
+          "description": "Der Titel des Eintrags."
+        },
+        "description": {
+          "name": "Beschreibung",
+          "description": "Der Text des Eintrags."
+        },
+        "start_date": {
+          "name": "Datum",
+          "description": "Der Tag, zu dem der Eintrag gehört."
+        },
+        "start_date_time": {
+          "name": "Datum und Uhrzeit",
+          "description": "Der Zeitpunkt, zu dem der Eintrag gehört."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Ob der Eintrag ein Entwurf, endgültig oder verworfen ist."
+        },
+        "classification": {
+          "name": "Vertraulichkeit",
+          "description": "Wie privat der Eintrag ist."
+        },
+        "categories": {
+          "name": "Kategorien",
+          "description": "Eine Liste von Kategorienamen."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Ein Link zum Eintrag."
+        },
+        "attachments": {
+          "name": "Anhänge",
+          "description": "Links oder Objekte mit url, name und media_type. Ein Objekt mit path bettet diese Datei ein."
+        }
+      }
+    },
+    "update_journal": {
+      "name": "Journaleintrag ändern",
+      "description": "Ändert beliebige Eigenschaften eines Journaleintrags. Ein leer übergebenes Feld wird geleert.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "Die UID des zu ändernden Eintrags."
+        },
+        "summary": {
+          "name": "Titel",
+          "description": "Der Titel des Eintrags."
+        },
+        "description": {
+          "name": "Beschreibung",
+          "description": "Der Text des Eintrags."
+        },
+        "start_date": {
+          "name": "Datum",
+          "description": "Der Tag, zu dem der Eintrag gehört."
+        },
+        "start_date_time": {
+          "name": "Datum und Uhrzeit",
+          "description": "Der Zeitpunkt, zu dem der Eintrag gehört."
+        },
+        "status": {
+          "name": "Status",
+          "description": "Ob der Eintrag ein Entwurf, endgültig oder verworfen ist."
+        },
+        "classification": {
+          "name": "Vertraulichkeit",
+          "description": "Wie privat der Eintrag ist."
+        },
+        "categories": {
+          "name": "Kategorien",
+          "description": "Eine Liste von Kategorienamen."
+        },
+        "url": {
+          "name": "URL",
+          "description": "Ein Link zum Eintrag."
+        },
+        "attachments": {
+          "name": "Anhänge",
+          "description": "Links oder Objekte mit url, name und media_type. Ein Objekt mit path bettet diese Datei ein."
+        }
+      }
+    },
+    "delete_journal": {
+      "name": "Journaleintrag löschen",
+      "description": "Löscht einen Journaleintrag.",
+      "fields": {
+        "uid": {
+          "name": "UID",
+          "description": "Die UID des zu löschenden Eintrags."
+        }
+      }
+    },
+    "search_journals": {
+      "name": "Journaleinträge suchen",
+      "description": "Gibt die Journaleinträge des Kalenders zurück, die mit Datum zuerst.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "Nur Einträge zurückgeben, die diesen Text enthalten. Leer lassen für alle."
+        },
+        "field": {
+          "name": "Feld",
+          "description": "In welcher Eigenschaft gesucht wird."
+        },
+        "start": {
+          "name": "Start",
+          "description": "Nur Einträge mit einem Datum nach diesem Zeitpunkt. Ein Zeitfenster lässt Einträge ohne Datum weg."
+        },
+        "end": {
+          "name": "Ende",
+          "description": "Nur Einträge mit einem Datum vor diesem Zeitpunkt."
+        }
+      }
+    },
     "import_ics": {
       "name": "iCalendar importieren",
-      "description": "Schreibt die Termine und Aufgaben eines iCalendar-Dokuments in den Kalender.",
+      "description": "Schreibt die Termine, Aufgaben und Journaleinträge eines iCalendar-Dokuments in den Kalender.",
       "fields": {
         "ics": {
           "name": "iCalendar-Dokument",
@@ -810,7 +1015,7 @@
       "fields": {
         "uid": {
           "name": "UID",
-          "description": "Nur diesen Eintrag exportieren, Termin oder Aufgabe. Leer lassen für den ganzen Kalender."
+          "description": "Nur diesen Eintrag exportieren, gleich welcher Art. Leer lassen für den ganzen Kalender."
         }
       }
     },
@@ -824,6 +1029,34 @@
         }
       }
     },
+    "share_calendar": {
+      "name": "Kalender freigeben",
+      "description": "Gibt den Kalender für ein anderes Konto auf dem Server frei, nur für Administratoren. Funktioniert mit Nextcloud und mit Servern auf Basis von sabre/dav wie Baikal.",
+      "fields": {
+        "user": {
+          "name": "Benutzer",
+          "description": "Der Benutzername des Kontos, bei sabre/dav auch seine E-Mail-Adresse."
+        },
+        "access": {
+          "name": "Zugriff",
+          "description": "Ob das Konto nur lesen oder auch schreiben darf."
+        }
+      }
+    },
+    "unshare_calendar": {
+      "name": "Kalenderfreigabe aufheben",
+      "description": "Hebt die Freigabe des Kalenders für ein Konto auf, nur für Administratoren.",
+      "fields": {
+        "user": {
+          "name": "Benutzer",
+          "description": "Das Konto, dessen Freigabe endet, so wie die Liste der Freigaben es nennt."
+        }
+      }
+    },
+    "get_calendar_shares": {
+      "name": "Kalenderfreigaben abfragen",
+      "description": "Gibt die Konten zurück, für die der Kalender freigegeben ist, und was jedes darf."
+    },
     "respond_to_invitation": {
       "name": "Auf eine Einladung antworten",
       "description": "Beantwortet eine Einladung zu einem Termin. Setzt einen Server mit CalDAV-Scheduling voraus.",
@@ -831,6 +1064,10 @@
         "uid": {
           "name": "UID",
           "description": "Die UID des zu beantwortenden Termins."
+        },
+        "recurrence_id": {
+          "name": "Wiederholungs-ID",
+          "description": "Nur diese eine Wiederholung einer Serie beantworten."
         },
         "response": {
           "name": "Antwort",

@@ -17,6 +17,7 @@ database="$name-db"
 network="$name-net"
 username="admin"
 password='TestPass!2026'
+other=""
 
 cleanup() {
   docker rm -fv "$name" "$database" >/dev/null 2>&1 || true
@@ -67,6 +68,13 @@ case "$server" in
       docker logs --tail 50 "$name"
       exit 1
     }
+    other="other"
+    docker exec -u www-data -e OC_PASS="$password" "$name" \
+      php occ user:add --password-from-env "$other" >/dev/null
+    for account in "$username" "$other"; do
+      docker exec -u www-data "$name" \
+        php occ user:setting "$account" settings email "$account@example.com" >/dev/null
+    done
     url="http://localhost:8080/remote.php/dav"
     ;;
 
@@ -75,6 +83,7 @@ case "$server" in
     docker run -d --name "$name" -p 127.0.0.1:5232:5232 \
       "tomsquest/docker-radicale:$tag" >/dev/null
     wait_for http://localhost:5232/ 40 2
+    other="other"
     url="http://localhost:5232/"
     ;;
 
@@ -91,8 +100,9 @@ case "$server" in
     wait_for http://localhost:8082/ 40 2
     # Baikal has only an install wizard, so this seeds it through php; only the nginx image has sqlite3.
     # No email on the account, or sabre/dav answers 500 when deleting an event with it as attendee but no organizer.
-    docker exec -i -e BAIKAL_USER="$username" -e BAIKAL_PASSWORD="$password" \
-      "$name" php >/dev/null <<'PHP'
+    other="other"
+    docker exec -i -e BAIKAL_USER="$username" -e BAIKAL_OTHER="$other" \
+      -e BAIKAL_PASSWORD="$password" "$name" php >/dev/null <<'PHP'
 <?php
 $root = "/var/www/baikal";
 require "$root/Core/Distrib.php";
@@ -111,10 +121,15 @@ foreach (explode(";", file_get_contents("$root/Core/Resources/Db/SQLite/db.sql")
     }
 }
 // digesta1 is what both the Digest and the Basic backend compare against.
-$db->prepare("INSERT INTO users (username, digesta1) VALUES (?, ?)")
-    ->execute([$user, md5("$user:BaikalDAV:$password")]);
-$db->prepare("INSERT INTO principals (uri, displayname) VALUES (?, ?)")
-    ->execute(["principals/$user", $user]);
+// The proxy principals are what Baikal's own user form adds beside an account.
+foreach ([$user, getenv("BAIKAL_OTHER")] as $account) {
+    $db->prepare("INSERT INTO users (username, digesta1) VALUES (?, ?)")
+        ->execute([$account, md5("$account:BaikalDAV:$password")]);
+    foreach (["", "/calendar-proxy-read", "/calendar-proxy-write"] as $suffix) {
+        $db->prepare("INSERT INTO principals (uri, displayname) VALUES (?, ?)")
+            ->execute(["principals/$account$suffix", $suffix === "" ? $account : null]);
+    }
+}
 
 file_put_contents("$root/config/baikal.yaml", implode("\n", [
     "system:",
@@ -176,7 +191,10 @@ PHP
         c_cn varchar(128),
         mail varchar(128));
       INSERT INTO sogo_users VALUES ('$username', '$username',
-        MD5('$password'), '$username', '$username@example.com');"
+        MD5('$password'), '$username', '$username@example.com');
+      INSERT INTO sogo_users VALUES ('other', 'other',
+        MD5('$password'), 'other', 'other@example.com');"
+    other="other"
 
     docker run -d --name "$name" --network "$network" -p 127.0.0.1:8084:80 \
       "pmietlicki/sogo:$tag" >/dev/null
@@ -243,7 +261,7 @@ pytest="$root/.venv/bin/pytest"
 [[ -x $pytest ]] || pytest=pytest
 set +e
 CALDAV_URL="$url" CALDAV_USERNAME="$username" CALDAV_PASSWORD="$password" \
-  "$pytest" -m live "$@"
+  CALDAV_OTHER_USERNAME="$other" "$pytest" -m live "$@"
 status=$?
 set -e
 if [[ $status -ne 0 ]]; then

@@ -25,7 +25,13 @@ from .capability import Capability
 from .color import Collection, fetch_collections
 from .connection import calendar_key, display_name
 from .errors import rejected
-from .event import check_expandable, read_extras
+from .event import alarm_moments, check_expandable, read_extras, to_utc
+
+try:
+    from homeassistant.components.calendar import CalendarEventStatus
+except ImportError:
+    # Older Home Assistant has no status on an event.
+    CalendarEventStatus = None
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,6 +85,8 @@ class ManagedCalendar:
     read_only: bool
     # Shared by the calendar entity and the to-do list of the same collection.
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Of the account a delegated calendar belongs to; None for the account's own.
+    addresses: list[str] | None = None
 
     @property
     def name(self) -> str:
@@ -100,9 +108,19 @@ class HaCaldavRuntimeData:
     calendars: list[ManagedCalendar]
     address_set: list[str]
     sync_collection: bool = True
+    delegations: list[Any] = field(default_factory=list)
 
 
 type HaCaldavConfigEntry = ConfigEntry[HaCaldavRuntimeData]
+
+
+@dataclass(frozen=True)
+class Reminder:
+    """One alarm and the moment it comes due, with what its event carries."""
+
+    at: datetime
+    key: tuple[Any, ...]
+    data: dict[str, Any]
 
 
 @dataclass
@@ -122,6 +140,7 @@ class _TodoRead:
     items: list[TodoItem]
     etags: dict[str, str] | None
     epoch: int = 0
+    reminders: list[Reminder] = field(default_factory=list)
 
 
 @dataclass
@@ -200,6 +219,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         self._etags_missed = False
         self._fetched_at: datetime | None = None
         self._moved_on: tuple[Any, CalendarEvent | None, dict[str, Any]] | None = None
+        self.reminders: dict[str, list[Reminder]] = {"events": [], "todos": []}
         self.halves = {
             "events": _Half(capability.supports_events),
             "todos": _Half(capability.supports_todos),
@@ -249,12 +269,31 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
     async def async_get_events(
         self, start_date: datetime, end_date: datetime
     ) -> list[CalendarEvent]:
-        """Return all events between two dates."""
-        if not self.capability.supports_events:
+        """Return all events between two dates.
+
+        A calendar of nothing but journal entries shows those carrying a date.
+        """
+        if not self.capability.shows_calendar:
             return []
-        return await self.hass.async_add_executor_job(
-            self._searched_events, start_date, end_date
+        read = (
+            self._searched_events
+            if self.capability.supports_events
+            else self._dated_journals
         )
+        return await self.hass.async_add_executor_job(read, start_date, end_date)
+
+    def _dated_journals(
+        self, start_date: datetime, end_date: datetime
+    ) -> list[CalendarEvent]:
+        found = self.calendar.search(journal=True, start=start_date, end=end_date)
+        entries = (master_of(item, "vjournal") for item in found)
+        return [
+            event
+            for entry in entries
+            if entry is not None
+            and _dated(entry)
+            and (event := to_event(entry)) is not None
+        ]
 
     def _searched_events(
         self, start_date: datetime, end_date: datetime
@@ -404,6 +443,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
 
     def _commit_window(self, window: _WindowRead) -> None:
         self.halves["events"].cached = window.vevents
+        self.reminders["events"] = event_reminders(window.vevents)
         self._keep_rules(window.rules)
         # Committing the token without the etags would freeze every etag here.
         if window.etags is None or not self._merge_etags(window.etags, window.epoch):
@@ -411,6 +451,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
 
     def _commit_todos(self, read: _TodoRead) -> None:
         self.halves["todos"].cached = read.items
+        self.reminders["todos"] = read.reminders
         with self.etag_lock:
             if read.etags is None or read.epoch != self._etag_epoch:
                 self._etags_missed = True
@@ -498,11 +539,13 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         )
         found = []
         etags: dict[str, str] = {}
+        reminders: list[Reminder] = []
         for resource in results:
             vtodo = master_of(resource, "vtodo")
             if vtodo is None or (item := to_todo(vtodo)) is None:
                 continue
             found.append((sort_order(vtodo), item))
+            reminders.extend(todo_reminders(vtodo, item))
             etag = resource.props.get(dav.GetEtag.tag)
             if isinstance(etag, str) and item.uid:
                 etags[item.uid] = etag
@@ -511,6 +554,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             # Items without a single etag is a server not saying, not an empty cache.
             etags=etags if etags or not found else None,
             epoch=epoch,
+            reminders=reminders,
         )
 
     def _sync_changed(self) -> tuple[bool, str | None]:
@@ -538,6 +582,7 @@ class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, Collection]]):
         entry: HaCaldavConfigEntry,
         client: caldav.DAVClient,
         scan_interval: timedelta,
+        delegations: list[Any] | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -548,6 +593,7 @@ class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, Collection]]):
             config_entry=entry,
         )
         self.client = client
+        self.delegations = delegations or []
 
     async def _async_update_data(self) -> dict[str, Collection]:
         """Return the color and name of every calendar on the account.
@@ -557,7 +603,7 @@ class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, Collection]]):
         """
         try:
             return await self.hass.async_add_executor_job(
-                fetch_collections, self.client
+                fetch_collections, self.client, self.delegations
             )
         except Exception as err:
             if rejected(err):
@@ -614,6 +660,60 @@ def to_todo(vtodo: Any) -> TodoItem | None:
         description=get_attr_value(vtodo, "description"),
         completed=completed,
     )
+
+
+def event_reminders(vevents: list[Any]) -> list[Reminder]:
+    """Return the alarms of the occurrences in a window.
+
+    An alarm at a fixed time sits on every occurrence of its series and is
+    due once.
+    """
+    found: dict[tuple[Any, ...], Reminder] = {}
+    for vevent in vevents:
+        try:
+            moments = alarm_moments(vevent, vevent.dtstart.value, get_end_date(vevent))
+            event = to_event(vevent) if moments else None
+        except _UNMAPPABLE as err:
+            _LOGGER.debug("Skipping the alarms of an event: %s", err)
+            continue
+        if event is None:
+            continue
+        data = {
+            "uid": event.uid,
+            "recurrence_id": event.recurrence_id,
+            "summary": event.summary,
+            "start": event.start.isoformat(),
+            "end": event.end.isoformat(),
+            "description": event.description,
+            "location": event.location,
+        }
+        for index, (at, alarm) in enumerate(moments):
+            key = (event.uid, at, index)
+            found.setdefault(key, Reminder(at, key, {**data, "alarm": alarm}))
+    return list(found.values())
+
+
+def todo_reminders(vtodo: Any, item: TodoItem) -> list[Reminder]:
+    """Return the alarms of a to-do that is still open."""
+    if item.status is not TodoItemStatus.NEEDS_ACTION:
+        return []
+    try:
+        start = get_attr_value(vtodo, "dtstart")
+        moments = alarm_moments(vtodo, start, get_attr_value(vtodo, "due"))
+    except _UNMAPPABLE as err:
+        _LOGGER.debug("Skipping the alarms of a to-do: %s", err)
+        return []
+    data = {
+        "uid": item.uid,
+        "summary": item.summary,
+        "start": to_local(start).isoformat() if start is not None else None,
+        "due": item.due.isoformat() if item.due is not None else None,
+        "description": item.description,
+    }
+    return [
+        Reminder(at, (item.uid, at, index), {**data, "alarm": alarm})
+        for index, (at, alarm) in enumerate(moments)
+    ]
 
 
 def get_attr_value(obj: Any, attribute: str) -> Any | None:
@@ -778,6 +878,7 @@ def occurrences(item: Any, start: datetime, end: datetime) -> list[Any]:
     VTIMEZONEs, and vobject reads a TZID it never saw as floating.
     """
     vevents = _vevents(item)
+    ranged = _ranged_offsets(vevents)
     if any(key in vevent for vevent in vevents for key in _RECURRING):
         try:
             for vevent in vevents:
@@ -794,7 +895,57 @@ def occurrences(item: Any, start: datetime, end: datetime) -> list[Any]:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Skipping a series that cannot be expanded: %s", err)
             return []
-    return components_of(item, "vevent")
+    found = components_of(item, "vevent")
+    if ranged:
+        for vevent in found:
+            _name_own_slot(vevent, ranged)
+    return found
+
+
+def _ranged_offsets(vevents: list[Any]) -> list[tuple[Any, Any]]:
+    """Return the id and the start of every exception that covers later occurrences.
+
+    RFC 5545 3.2.13, RANGE=THISANDFUTURE.
+    """
+    found = []
+    for vevent in vevents:
+        held = vevent.get("RECURRENCE-ID")
+        params = getattr(held, "params", None) or {}
+        if (
+            str(params.get("RANGE", "")).upper() == "THISANDFUTURE"
+            and "DTSTART" in vevent
+        ):
+            found.append((_first(held).dt, _first(vevent["DTSTART"]).dt))
+    return found
+
+
+def _name_own_slot(vevent: Any, ranged: list[tuple[Any, Any]]) -> None:
+    """Give an occurrence under a ranged exception the id of its own slot.
+
+    The expansion hands every one of them the id of the exception itself.
+    """
+    held = getattr(vevent, "recurrence_id", None)
+    start = getattr(getattr(vevent, "dtstart", None), "value", None)
+    if held is None or start is None:
+        return
+    for rid, first in ranged:
+        try:
+            if to_utc(held.value) == to_utc(rid) and to_utc(start) != to_utc(first):
+                held.value = start - (first - rid)
+                return
+        except _UNMAPPABLE as err:
+            _LOGGER.debug("Leaving the id of an occurrence as it came: %s", err)
+
+
+def _status(vevent: Any) -> dict[str, Any]:
+    """Return the status of an event where core has a field and a value for it."""
+    if CalendarEventStatus is None:
+        return {}
+    try:
+        value = str(get_attr_value(vevent, "status") or "").lower()
+        return {"status": CalendarEventStatus(value)}
+    except ValueError:
+        return {}
 
 
 def to_event(vevent: Any, rrule: str | None = None) -> CalendarEvent | None:
@@ -817,6 +968,7 @@ def to_event(vevent: Any, rrule: str | None = None) -> CalendarEvent | None:
                 if (value := get_attr_value(vevent, "recurrence_id")) is not None
                 else None
             ),
+            **_status(vevent),
         )
     except _UNMAPPABLE as err:
         if rrule is not None:

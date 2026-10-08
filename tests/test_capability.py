@@ -1,19 +1,26 @@
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
 
+import caldav
 from caldav.davclient import DAVResponse
+from caldav.elements import dav
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+import requests
 
 from custom_components.ha_caldav.capability import (
     UNKNOWN,
     Capability,
+    Delegation,
+    account_calendars,
     capability_for,
     fetch_address_set,
     fetch_capabilities,
     supports_sync_collection,
 )
+from custom_components.ha_caldav.connection import build_client, display_name
 from custom_components.ha_caldav.const import DOMAIN
 
 ENTRY_DATA = {
@@ -519,3 +526,266 @@ def test_an_absolute_href_on_the_same_server_spelled_otherwise_counts(
     home.get_properties.return_value = Mock(tree=ET.fromstring(body))
 
     assert not fetch_capabilities(client)["/dav/bob/tasks"].supports_events
+
+
+BOSS = "/remote.php/dav/principals/users/boss/"
+BOSS_HOME = "/remote.php/dav/calendars/boss"
+
+
+def _proxy_response(write_for: str = "", read_for: str = "") -> DAVResponse:
+    def hrefs(found: str) -> str:
+        return "".join(f"<d:href>{href}</d:href>" for href in found.split())
+
+    return _multistatus(
+        '<?xml version="1.0"?>'
+        '<d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">'
+        "<d:response><d:href>/remote.php/dav/principals/users/iven/</d:href>"
+        "<d:propstat><d:prop>"
+        f"<cs:calendar-proxy-read-for>{hrefs(read_for)}</cs:calendar-proxy-read-for>"
+        f"<cs:calendar-proxy-write-for>{hrefs(write_for)}</cs:calendar-proxy-write-for>"
+        "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
+        "</d:response></d:multistatus>"
+    )
+
+
+def _delegating_client(response: DAVResponse, own: list[Mock]) -> caldav.DAVClient:
+    """A real client, as a calendar reads its name through the client it hangs on."""
+    client = caldav.DAVClient("https://cloud.example.com/remote.php/dav/")
+    principal = Mock()
+    principal.calendars.return_value = own
+    principal.get_properties.return_value = response
+    client.principal = Mock(return_value=principal)
+    return client
+
+
+def _delegator(calendars: list[Mock]) -> Mock:
+    delegator = Mock()
+    delegator.calendar_home_set.url = f"https://cloud.example.com{BOSS_HOME}/"
+    delegator.calendar_home_set.calendars.return_value = calendars
+    delegator.calendar_user_address_set.return_value = ["mailto:boss@example.com"]
+    return delegator
+
+
+def test_a_delegated_calendar_is_listed_with_the_name_of_its_owner() -> None:
+    own = _setup_calendar("Personal", f"https://cloud.example.com{HOME}/personal/")
+    theirs = _setup_calendar(
+        "Personal", f"https://cloud.example.com{BOSS_HOME}/personal/"
+    )
+    client = _delegating_client(_proxy_response(write_for=BOSS), [own])
+
+    with patch(
+        "custom_components.ha_caldav.capability.caldav.Principal",
+        return_value=_delegator([theirs]),
+    ) as principal:
+        calendars, delegations = account_calendars(client)
+
+    assert [display_name(item) for item in calendars] == ["Personal", "Personal (boss)"]
+    assert str(principal.call_args.kwargs["url"]) == f"https://cloud.example.com{BOSS}"
+    [delegation] = delegations
+    assert delegation.owner == "boss"
+    assert delegation.addresses == ["mailto:boss@example.com"]
+    assert client.principal.call_count == 1
+
+
+def test_an_account_named_as_reader_and_writer_is_listed_once() -> None:
+    client = _delegating_client(_proxy_response(write_for=BOSS, read_for=BOSS), [])
+    theirs = _setup_calendar("Team", f"https://cloud.example.com{BOSS_HOME}/team/")
+
+    with patch(
+        "custom_components.ha_caldav.capability.caldav.Principal",
+        return_value=_delegator([theirs]),
+    ):
+        calendars, delegations = account_calendars(client)
+
+    assert len(calendars) == len(delegations) == 1
+
+
+def test_a_server_without_delegation_lists_only_the_accounts_own_calendars() -> None:
+    own = _setup_calendar("Personal", f"https://cloud.example.com{HOME}/personal/")
+    client = _delegating_client(_proxy_response(), [own])
+    client.principal.return_value.get_properties.side_effect = RuntimeError("no")
+
+    assert account_calendars(client) == ([own], [])
+
+
+def test_a_delegated_account_that_cannot_be_read_leaves_the_others() -> None:
+    own = _setup_calendar("Personal", f"https://cloud.example.com{HOME}/personal/")
+    client = _delegating_client(_proxy_response(write_for=BOSS), [own])
+    broken = _delegator([])
+    broken.calendar_home_set.calendars.side_effect = RuntimeError("gone")
+
+    with patch(
+        "custom_components.ha_caldav.capability.caldav.Principal", return_value=broken
+    ):
+        calendars, _ = account_calendars(client)
+
+    assert calendars == [own]
+
+
+SHARD = "https://p42-caldav.icloud.test:443"
+SHARED = (
+    "<d:resourcetype><d:collection/><c:calendar/></d:resourcetype>"
+    '<c:supported-calendar-component-set><c:comp name="VEVENT"/>'
+    "</c:supported-calendar-component-set>"
+)
+DENTIST = (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Apple Inc.//iOS 18.0//EN\r\n"
+    "BEGIN:VEVENT\r\nUID:dentist\r\nDTSTAMP:20261001T100000Z\r\n"
+    "DTSTART:20261009T100000Z\r\nDTEND:20261009T110000Z\r\nSUMMARY:Dentist\r\n"
+    "END:VEVENT\r\nEND:VCALENDAR\r\n"
+)
+
+
+def _sharded(delegator_home: str = ""):
+    """Answer like iCloud, which names the calendar home on a host of its own."""
+
+    def props(href: str, found: str) -> str:
+        return (
+            f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>{found}</d:prop>"
+            "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+        )
+
+    def home(url: str) -> str:
+        return f"<c:calendar-home-set><d:href>{url}</d:href></c:calendar-home-set>"
+
+    def answer(request: requests.PreparedRequest) -> str:
+        path = "/" + request.url.split("/", 3)[3]
+        me = "<d:href>/1/principal/</d:href>"
+        me = f"<d:current-user-principal>{me}</d:current-user-principal>"
+        if request.method == "REPORT":
+            data = f"<c:calendar-data><![CDATA[{DENTIST}]]></c:calendar-data>"
+            return props("/1/calendars/home/dentist.ics", data) * (
+                "query" in request.body.decode()
+            )
+        if path == "/1/principal/":
+            boss = "<d:href>/2/principal/</d:href>" * bool(delegator_home)
+            proxy = f"<cs:calendar-proxy-write-for>{boss}</cs:calendar-proxy-write-for>"
+            return props(path, me + home(f"{SHARD}/1/calendars/") + proxy)
+        if path == "/2/principal/":
+            return props(path, home(delegator_home))
+        if path == "/1/calendars/":
+            return props(
+                path, "<d:resourcetype><d:collection/></d:resourcetype>"
+            ) + props(
+                "/1/calendars/home/", SHARED + "<d:displayname>Home</d:displayname>"
+            )
+        return props(path, me)
+
+    def send(self, request: requests.PreparedRequest, **kwargs) -> requests.Response:
+        reply = requests.Response()
+        reply.status_code = 207
+        reply.reason = "Multi-Status"
+        reply.headers["Content-Type"] = "text/xml; charset=UTF-8"
+        reply._content = (
+            '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" '
+            'xmlns:c="urn:ietf:params:xml:ns:caldav" '
+            f'xmlns:cs="http://calendarserver.org/ns/">{answer(request)}</d:multistatus>'
+        ).encode()
+        reply.url = request.url
+        reply.request = request
+        return reply
+
+    return patch.object(requests.adapters.HTTPAdapter, "send", send)
+
+
+def _events(calendar: caldav.Calendar) -> list[str]:
+    start = datetime(2026, 10, 8, tzinfo=UTC)
+    found = calendar.search(
+        start=start, end=start + timedelta(days=7), event=True, props=[dav.GetEtag()]
+    )
+    return [str(item.url) for item in found]
+
+
+def test_events_are_read_when_the_calendar_home_is_on_another_host() -> None:
+    with _sharded():
+        client = build_client("https://caldav.icloud.test/", "jane", "secret", {})
+        [calendar], _ = account_calendars(client)
+        fetch_capabilities(client)
+
+        assert _events(calendar) == [f"{SHARD}/1/calendars/home/dentist.ics"]
+
+
+def test_a_delegated_account_on_another_host_does_not_take_the_client_along() -> None:
+    with _sharded(delegator_home="https://p57-caldav.icloud.test:443/2/calendars/"):
+        client = build_client("https://caldav.icloud.test/", "jane", "secret", {})
+        [calendar], delegations = account_calendars(client)
+
+        assert delegations == []
+        assert _events(calendar) == [f"{SHARD}/1/calendars/home/dentist.ics"]
+
+
+def test_capabilities_are_read_from_every_home_set() -> None:
+    client = _client(
+        _home_set_response(_entry(f"{HOME}/personal/", ["VEVENT"], ["write"]))
+    )
+    theirs = Mock()
+    theirs.home.url = f"https://cloud.example.com{BOSS_HOME}/"
+    theirs.home.get_properties.return_value = _home_set_response(
+        _entry(f"{BOSS_HOME}/personal/", ["VEVENT"], ["read"])
+    )
+
+    capabilities = fetch_capabilities(client, [theirs])
+
+    assert capabilities[f"{HOME}/personal"].writable is True
+    assert capabilities[f"{BOSS_HOME}/personal"].writable is False
+
+
+async def test_a_delegated_calendar_writes_as_the_account_it_belongs_to(
+    hass: HomeAssistant,
+) -> None:
+    """An event with attendees names its organizer, who is the calendar's owner."""
+    own = _setup_calendar("Personal", f"https://cloud.example.com{HOME}/personal/")
+    theirs = _setup_calendar(
+        "Personal (boss)", f"https://cloud.example.com{BOSS_HOME}/personal/"
+    )
+    home = Mock(url=f"https://cloud.example.com{BOSS_HOME}/")
+    delegation = Delegation(home, ["mailto:boss@example.com"], "boss")
+    entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    with (
+        patch("custom_components.ha_caldav.caldav.DAVClient") as client,
+        patch("custom_components.ha_caldav.fetch_capabilities", return_value={}),
+        patch(
+            "custom_components.ha_caldav.account_calendars",
+            return_value=([own, theirs], [delegation]),
+        ),
+    ):
+        principal = client.return_value.principal.return_value
+        principal.calendar_user_address_set.return_value = ["mailto:iven@example.com"]
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert hass.states.get("calendar.personal") is not None
+    assert hass.states.get("calendar.personal_boss") is not None
+    by_name = {item.name: item for item in entry.runtime_data.calendars}
+    assert by_name["Personal"].addresses is None
+    assert by_name["Personal (boss)"].addresses == ["mailto:boss@example.com"]
+    with patch("custom_components.ha_caldav.calendar.create_event") as create:
+        await hass.services.async_call(
+            DOMAIN,
+            "create_event",
+            {
+                "entity_id": "calendar.personal_boss",
+                "summary": "Review",
+                "start_date_time": "2026-07-06 09:00:00",
+                "end_date_time": "2026-07-06 10:00:00",
+            },
+            blocking=True,
+        )
+    assert create.call_args.args[2] == "mailto:boss@example.com"
+
+
+def test_a_delegated_calendar_already_named_after_its_owner_keeps_its_name() -> None:
+    """SOGo lists it as "Personal (boss <boss@example.com>)" by itself."""
+    theirs = _setup_calendar(
+        "Team (Boss <boss@example.com>)", f"https://cloud.example.com{BOSS_HOME}/team/"
+    )
+    client = _delegating_client(_proxy_response(write_for=BOSS), [])
+
+    with patch(
+        "custom_components.ha_caldav.capability.caldav.Principal",
+        return_value=_delegator([theirs]),
+    ):
+        calendars, _ = account_calendars(client)
+
+    assert display_name(calendars[0]) == "Team (Boss <boss@example.com>)"

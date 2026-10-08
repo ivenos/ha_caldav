@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 from caldav.lib.error import NotFoundError
-from homeassistant.core import callback
+from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import async_call_later, async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .api import set_calendar_name
+from .const import EVENT_REMINDER
 from .coordinator import HaCaldavCoordinator, HaCaldavRuntimeData, ManagedCalendar
 from .errors import Refused, as_reported
 
 _LOGGER = logging.getLogger(__name__)
+
+_LATE = timedelta(minutes=15)
 
 
 class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
@@ -28,6 +32,15 @@ class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
     runtime_data: HaCaldavRuntimeData
     _name_in_registry: str | None = None
     _name_noted = False
+    _reminding_since: datetime | None = None
+    _next_reminder: CALLBACK_TYPE | None = None
+
+    @property
+    def addresses(self) -> list[str]:
+        """Return the calendar user addresses of whoever owns this calendar."""
+        if self.managed.addresses is not None:
+            return self.managed.addresses
+        return self.runtime_data.address_set
 
     @property
     def available(self) -> bool:
@@ -40,6 +53,7 @@ class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
         self.managed = managed
         self.calendar = managed.calendar
         self._attr_name = managed.name
+        self._reminded: set[tuple[object, ...]] = set()
 
     async def async_added_to_hass(self) -> None:
         """Note the name the registry holds, to tell a rename from it.
@@ -56,6 +70,49 @@ class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
         if readded:
             self.async_on_remove(
                 async_call_later(self.hass, 0, self._async_recheck_name)
+            )
+        self._reminding_since = self._reminding_since or dt_util.utcnow()
+        self.async_on_remove(self._async_stop_reminding)
+        self._async_remind()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        super()._handle_coordinator_update()
+        self._async_remind()
+
+    @callback
+    def _async_stop_reminding(self) -> None:
+        if self._next_reminder is not None:
+            self._next_reminder()
+            self._next_reminder = None
+
+    @callback
+    def _async_remind(self, _now: datetime | None = None) -> None:
+        """Fire the reminders that came due and wake up for the next one.
+
+        One found late still fires, as long as it came due within the last
+        poll interval and after this entity started.
+        """
+        self._async_stop_reminding()
+        now = dt_util.utcnow()
+        earliest = now - (self.coordinator.update_interval or _LATE)
+        if self._reminding_since is not None:
+            earliest = max(earliest, self._reminding_since)
+        upcoming: datetime | None = None
+        known = set()
+        for reminder in self.coordinator.reminders[self._half]:
+            known.add(reminder.key)
+            if reminder.at > now:
+                upcoming = min(upcoming or reminder.at, reminder.at)
+            elif reminder.at > earliest and reminder.key not in self._reminded:
+                self._reminded.add(reminder.key)
+                self.hass.bus.async_fire(
+                    EVENT_REMINDER, {"entity_id": self.entity_id, **reminder.data}
+                )
+        self._reminded &= known
+        if upcoming is not None:
+            self._next_reminder = async_track_point_in_utc_time(
+                self.hass, self._async_remind, upcoming
             )
 
     @callback

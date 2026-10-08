@@ -2025,3 +2025,414 @@ async def test_deleting_a_calendar_whose_path_ends_in_todo_spares_its_neighbor(
         await hass.async_block_till_done()
 
     assert sorted(removed) == ["calendar.work_todo", "todo.work_todo"]
+
+
+async def test_a_search_without_a_text_returns_every_event_of_the_window(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    calendar.search.return_value = [_search_item("Dentist")]
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "search_events",
+        {
+            "entity_id": "calendar.personal",
+            "start": "2026-07-01 00:00:00",
+            "end": "2026-08-01 00:00:00",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert len(result["calendar.personal"]["events"]) == 1
+    assert set(calendar.search.call_args.kwargs) == {"event", "start", "end"}
+
+
+async def test_a_time_a_template_rendered_with_an_offset_lands_in_the_local_zone(
+    hass: HomeAssistant,
+) -> None:
+    """An offset names no zone, and a zone without a name has no definition."""
+    await hass.config.async_set_time_zone("Europe/Berlin")
+    calendar = _calendar("Personal")
+    _record_writes(calendar)
+    await _setup(hass, [calendar])
+
+    await hass.services.async_call(
+        DOMAIN,
+        "create_event",
+        {
+            "entity_id": "calendar.personal",
+            "summary": "Standup",
+            "start_date_time": "2026-07-06T09:00:00+02:00",
+            "end_date_time": "2026-07-06T10:00:00+02:00",
+        },
+        blocking=True,
+    )
+
+    body = calendar.client.bodies[-1]
+    assert "DTSTART;TZID=Europe/Berlin:20260706T090000" in body
+    assert "TZID:Europe/Berlin" in body
+
+
+async def test_an_event_is_created_in_the_zone_it_names(hass: HomeAssistant) -> None:
+    calendar = _calendar("Personal")
+    _record_writes(calendar)
+    await _setup(hass, [calendar])
+
+    await hass.services.async_call(
+        DOMAIN,
+        "create_event",
+        {
+            "entity_id": "calendar.personal",
+            "summary": "Standup",
+            "start_date_time": "2026-07-06 09:00:00",
+            "end_date_time": "2026-07-06 10:00:00",
+            "time_zone": "America/New_York",
+            "rrule": "FREQ=WEEKLY",
+        },
+        blocking=True,
+    )
+
+    body = calendar.client.bodies[-1]
+    assert "DTSTART;TZID=America/New_York:20260706T090000" in body
+    assert "DTEND;TZID=America/New_York:20260706T100000" in body
+    assert "TZID:America/New_York" in body
+
+
+async def test_an_update_hands_the_zone_it_names_to_the_write(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+
+    with patch("custom_components.ha_caldav.calendar.update_event") as update:
+        await hass.services.async_call(
+            DOMAIN,
+            "update_event",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "start_date_time": "2026-07-06 09:00:00",
+                "time_zone": "America/New_York",
+            },
+            blocking=True,
+        )
+
+    data = update.call_args.args[2]
+    assert str(data["time_zone"]) == "America/New_York"
+    assert data["dtstart"].replace(tzinfo=None) == datetime(2026, 7, 6, 9, 0)
+    assert str(data["dtstart"].tzinfo) == "America/New_York"
+
+
+async def test_a_zone_nobody_knows_is_refused(hass: HomeAssistant) -> None:
+    await _setup(hass)
+
+    with pytest.raises(ServiceValidationError) as refusal:
+        await hass.services.async_call(
+            DOMAIN,
+            "update_event",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "time_zone": "Mars/Base",
+            },
+            blocking=True,
+        )
+
+    assert refusal.value.translation_key == "unknown_time_zone"
+
+
+async def test_an_alarm_takes_a_fixed_time_instead_of_an_offset(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+
+    with patch("custom_components.ha_caldav.calendar.create_event") as create:
+        await hass.services.async_call(
+            DOMAIN,
+            "create_event",
+            {
+                "entity_id": "calendar.personal",
+                "summary": "Standup",
+                "start_date_time": "2026-07-06 09:00:00",
+                "end_date_time": "2026-07-06 10:00:00",
+                "alarms": [{"at": "2026-07-05 18:00:00", "action": "email"}],
+            },
+            blocking=True,
+        )
+
+    [alarm] = create.call_args.args[1]["alarms"]
+    assert alarm["at"] == dt_util.as_local(datetime(2026, 7, 5, 18, 0))
+    assert alarm["action"] == "EMAIL"
+
+
+@pytest.mark.parametrize(
+    "alarm", [{"action": "display"}, {"minutes_before": 5, "at": "2026-07-05 18:00:00"}]
+)
+async def test_an_alarm_needs_exactly_one_moment_to_fire_at(
+    hass: HomeAssistant, alarm: dict
+) -> None:
+    await _setup(hass)
+
+    with pytest.raises(vol.Invalid):
+        await hass.services.async_call(
+            DOMAIN,
+            "update_event",
+            {"entity_id": "calendar.personal", "uid": "uid-1", "alarms": [alarm]},
+            blocking=True,
+        )
+
+
+async def test_a_file_outside_the_allowed_folders_is_not_attached(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+
+    with (
+        patch("custom_components.ha_caldav.calendar.update_event") as update,
+        pytest.raises(ServiceValidationError, match="not allowed to read"),
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "update_event",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "attachments": [{"path": "/etc/passwd"}],
+            },
+            blocking=True,
+        )
+
+    update.assert_not_called()
+
+
+async def test_a_file_from_an_allowed_folder_is_embedded(
+    hass: HomeAssistant, tmp_path
+) -> None:
+    file = tmp_path / "note.txt"
+    file.write_bytes(b"hello world")
+    hass.config.allowlist_external_dirs = {str(tmp_path)}
+    calendar = _calendar("Personal")
+    _record_writes(calendar)
+    await _setup(hass, [calendar])
+
+    await hass.services.async_call(
+        DOMAIN,
+        "create_event",
+        {
+            "entity_id": "calendar.personal",
+            "summary": "Standup",
+            "start_date_time": "2026-07-06 09:00:00",
+            "end_date_time": "2026-07-06 10:00:00",
+            "attachments": [{"path": str(file)}],
+        },
+        blocking=True,
+    )
+
+    body = calendar.client.bodies[-1].replace("\r\n ", "")
+    assert "FILENAME=note.txt" in body
+    assert "aGVsbG8gd29ybGQ=" in body
+
+
+INVITATION = ICS.replace(
+    "SUMMARY:Standup\r\n",
+    "SUMMARY:Standup\r\nORGANIZER:mailto:boss@example.com\r\n"
+    "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:iven@example.com\r\n",
+)
+
+
+def _invitation(ics: str) -> Mock:
+    item = Mock()
+    item.vobject_instance = vobject.readOne(ics)
+    return item
+
+
+async def test_the_open_invitations_are_the_events_nobody_answered_for_us(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    entry = await _setup(hass, [calendar])
+    entry.runtime_data.address_set = ["mailto:iven@example.com"]
+    calendar.search.return_value = [
+        _invitation(INVITATION),
+        _invitation(
+            INVITATION.replace("uid-1", "uid-2").replace("NEEDS-ACTION", "ACCEPTED")
+        ),
+        _invitation(INVITATION.replace("uid-1", "uid-3").replace("boss@", "iven@")),
+        _invitation(ICS.replace("uid-1", "uid-4")),
+    ]
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "get_invitations",
+        {"entity_id": "calendar.personal", "start": "2026-07-01 00:00:00"},
+        blocking=True,
+        return_response=True,
+    )
+
+    [invitation] = result["calendar.personal"]["invitations"]
+    assert invitation["uid"] == "uid-1"
+    assert invitation["organizer"] == "boss@example.com"
+    assert set(calendar.search.call_args.kwargs) == {"event", "start"}
+
+
+async def test_an_invitation_without_a_reply_status_counts_as_open(
+    hass: HomeAssistant,
+) -> None:
+    """RFC 5545 3.2.12 reads a missing PARTSTAT as NEEDS-ACTION."""
+    calendar = _calendar("Personal")
+    entry = await _setup(hass, [calendar])
+    entry.runtime_data.address_set = ["mailto:iven@example.com"]
+    calendar.search.return_value = [
+        _invitation(INVITATION.replace(";PARTSTAT=NEEDS-ACTION", ""))
+    ]
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "get_invitations",
+        {"entity_id": "calendar.personal", "start": "2026-07-01 00:00:00"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert len(result["calendar.personal"]["invitations"]) == 1
+
+
+async def test_one_occurrence_asked_again_is_listed_beside_its_answered_series(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    entry = await _setup(hass, [calendar])
+    entry.runtime_data.address_set = ["mailto:iven@example.com"]
+    series = INVITATION.replace("NEEDS-ACTION", "ACCEPTED").replace(
+        "SUMMARY:Standup\r\n", "SUMMARY:Standup\r\nRRULE:FREQ=WEEKLY\r\n"
+    )
+    moved = (
+        "BEGIN:VEVENT\r\nUID:uid-1\r\nDTSTAMP:20260101T000000Z\r\n"
+        "RECURRENCE-ID:20260713T090000Z\r\nDTSTART:20260713T110000Z\r\n"
+        "DTEND:20260713T120000Z\r\nSUMMARY:Standup moved\r\n"
+        "ORGANIZER:mailto:boss@example.com\r\n"
+        "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:iven@example.com\r\n"
+        "END:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    calendar.search.return_value = [
+        _invitation(series.replace("END:VCALENDAR\r\n", moved))
+    ]
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "get_invitations",
+        {"entity_id": "calendar.personal", "start": "2026-07-01 00:00:00"},
+        blocking=True,
+        return_response=True,
+    )
+
+    [invitation] = result["calendar.personal"]["invitations"]
+    assert invitation["summary"] == "Standup moved"
+    assert invitation["recurrence_id"] is not None
+
+
+async def test_invitations_need_a_scheduling_server(hass: HomeAssistant) -> None:
+    await _setup(hass)
+
+    with pytest.raises(ServiceValidationError) as refusal:
+        await hass.services.async_call(
+            DOMAIN,
+            "get_invitations",
+            {"entity_id": "calendar.personal"},
+            blocking=True,
+            return_response=True,
+        )
+
+    assert refusal.value.translation_key == "no_scheduling"
+
+
+async def test_a_reply_forwards_the_occurrence_it_names(hass: HomeAssistant) -> None:
+    entry = await _setup(hass)
+    entry.runtime_data.address_set = ["mailto:iven@example.com"]
+
+    with patch("custom_components.ha_caldav.services.respond_to_invitation") as respond:
+        await hass.services.async_call(
+            DOMAIN,
+            "respond_to_invitation",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "recurrence_id": "2026-07-13 09:00:00+00:00",
+                "response": "tentative",
+            },
+            blocking=True,
+        )
+
+    assert respond.call_args.args[2:] == (
+        "TENTATIVE",
+        ["mailto:iven@example.com"],
+        "2026-07-13 09:00:00+00:00",
+    )
+
+
+def _busy(periods: str = "") -> Mock:
+    return Mock(
+        icalendar_instance=icalendar.Calendar.from_ical(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n"
+            "BEGIN:VFREEBUSY\r\nDTSTART:20260706T000000Z\r\nDTEND:20260707T000000Z\r\n"
+            f"{periods}END:VFREEBUSY\r\nEND:VCALENDAR\r\n"
+        )
+    )
+
+
+async def test_free_busy_asks_the_server_about_the_attendees_named(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.freebusy_request.return_value = _busy()
+    entry = await _setup(hass, [calendar])
+    entry.runtime_data.address_set = ["mailto:iven@example.com"]
+    busy = {"ann@example.com": [], "nobody@example.com": None}
+
+    with patch(
+        "custom_components.ha_caldav.services.attendee_free_busy", return_value=busy
+    ) as ask:
+        result = await hass.services.async_call(
+            DOMAIN,
+            "get_free_busy",
+            {
+                "entity_id": "calendar.personal",
+                "start": "2026-07-06 00:00:00",
+                "end": "2026-07-07 00:00:00",
+                "attendees": ["ann@example.com", "nobody@example.com"],
+            },
+            blocking=True,
+            return_response=True,
+        )
+
+    assert result["calendar.personal"] == {"periods": [], "attendees": busy}
+    assert ask.call_args.args[3:] == (
+        ["ann@example.com", "nobody@example.com"],
+        ["mailto:iven@example.com"],
+    )
+
+
+async def test_free_busy_of_others_needs_a_scheduling_server(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.freebusy_request.return_value = _busy()
+    await _setup(hass, [calendar])
+
+    with pytest.raises(ServiceValidationError) as refusal:
+        await hass.services.async_call(
+            DOMAIN,
+            "get_free_busy",
+            {
+                "entity_id": "calendar.personal",
+                "start": "2026-07-06 00:00:00",
+                "end": "2026-07-07 00:00:00",
+                "attendees": ["ann@example.com"],
+            },
+            blocking=True,
+            return_response=True,
+        )
+
+    assert refusal.value.translation_key == "no_scheduling"

@@ -6,18 +6,22 @@ libraries model parameters differently, so the paths stay apart.
 
 from __future__ import annotations
 
+from base64 import b64encode
 from contextlib import suppress
 from datetime import UTC, date, datetime, time, timedelta
+from pathlib import Path
 import re
 from typing import Any
 
 from dateutil.rrule import rrulestr
 from homeassistant.util import dt as dt_util
-from icalendar import Alarm as ICalAlarm, vCalAddress, vText
+from icalendar import Alarm as ICalAlarm, vCalAddress, vText, vUri
 from icalendar.prop import vRecur
 
 from .const import (
+    ALARM_ACTIONS,
     ATTR_ALARMS,
+    ATTR_ATTACHMENTS,
     ATTR_ATTENDEES,
     ATTR_CATEGORIES,
     ATTR_CLASSIFICATION,
@@ -229,6 +233,8 @@ def read_extras(vevent: Any) -> dict[str, Any]:
         extras[ATTR_ORGANIZER] = strip_scheme(str(organizer.value))
     if alarms := _read_alarms(vevent):
         extras[ATTR_ALARMS] = alarms
+    if attachments := _read_attachments(vevent):
+        extras[ATTR_ATTACHMENTS] = attachments
     return extras
 
 
@@ -282,28 +288,110 @@ def _read_attendees(vevent: Any) -> list[dict[str, Any]]:
 
 
 def _read_alarms(vevent: Any) -> list[dict[str, Any]]:
-    """Return the relative alarms as minutes before the event.
+    """Return the alarms, an offset as minutes before and a fixed time as it is."""
+    found = (_read_alarm(valarm) for valarm in getattr(vevent, "valarm_list", []) or [])
+    return [alarm for alarm in found if alarm is not None]
 
-    An absolute trigger has no offset to report and is left out.
-    """
-    alarms = []
-    for valarm in getattr(vevent, "valarm_list", []) or []:
-        trigger = getattr(valarm, "trigger", None)
-        if trigger is None or not isinstance(trigger.value, timedelta):
-            continue
+
+def _read_alarm(valarm: Any) -> dict[str, Any] | None:
+    trigger = getattr(valarm, "trigger", None)
+    alarm: dict[str, Any] = {}
+    if trigger is not None and isinstance(trigger.value, timedelta):
         # Rounded away from zero, so a sub-minute offset stays "before".
-        alarm: dict[str, Any] = {
-            "minutes_before": -int(trigger.value.total_seconds() // 60)
-        }
+        alarm["minutes_before"] = -int(trigger.value.total_seconds() // 60)
         related = _param(getattr(trigger, "params", {}) or {}, "RELATED")
         if related and related.upper() == "END":
             alarm["related"] = "END"
-        if (action := _text(valarm, "action")) is not None:
-            alarm["action"] = action.upper()
-        if (description := _text(valarm, "description")) is not None:
-            alarm["description"] = description
-        alarms.append(alarm)
-    return alarms
+    elif trigger is not None and isinstance(trigger.value, datetime):
+        alarm["at"] = dt_util.as_local(trigger.value).isoformat()
+    else:
+        return None
+    if (action := _text(valarm, "action")) is not None:
+        alarm["action"] = action.upper()
+    if (description := _text(valarm, "description")) is not None:
+        alarm["description"] = description
+    if alarm.get("action") == "EMAIL":
+        if (summary := _text(valarm, "summary")) is not None:
+            alarm["summary"] = summary
+        alarm["attendees"] = [
+            strip_scheme(str(holder.value))
+            for holder in getattr(valarm, "attendee_list", []) or []
+        ]
+    return alarm
+
+
+_MAX_REPEATS = 100
+
+
+def alarm_moments(
+    component: Any, start: Any, end: Any
+) -> list[tuple[datetime, dict[str, Any]]]:
+    """Return when each alarm of a vobject component fires, with the alarm.
+
+    RFC 5545 3.8.6.3 counts an offset from the start, or from the end with
+    RELATED=END, and 3.8.6.2 repeats an alarm REPEAT more times, DURATION apart.
+    """
+    moments = []
+    for valarm in getattr(component, "valarm_list", []) or []:
+        if (alarm := _read_alarm(valarm)) is None:
+            continue
+        trigger = valarm.trigger.value
+        if isinstance(trigger, timedelta):
+            ends = alarm.get("related") == "END"
+            # Clients put an offset on a to-do that has only one of the two.
+            base = (end if ends else start) or start or end
+            if base is None:
+                continue
+            first = to_utc(base) + trigger
+        else:
+            first = to_utc(trigger)
+        gap = getattr(getattr(valarm, "duration", None), "value", None)
+        repeats = 0
+        if isinstance(gap, timedelta):
+            with suppress(TypeError, ValueError):
+                repeats = int(valarm.repeat.value)
+        for count in range(min(max(repeats, 0), _MAX_REPEATS) + 1):
+            moments.append((first + count * gap if count else first, alarm))
+    return moments
+
+
+# RFC 8607 names the file FILENAME; Thunderbird and Evolution have their own.
+_FILE_NAMES = ("FILENAME", "X-FILENAME", "X-LABEL")
+
+
+def _read_attachments(vevent: Any) -> list[dict[str, Any]]:
+    """Return the attachments, a link by its url and an embedded file by its size."""
+    attachments = []
+    for holder in getattr(vevent, "attach_list", []) or []:
+        params = getattr(holder, "params", {}) or {}
+        value = str(holder.value)
+        entry: dict[str, Any] = {}
+        if str(_param(params, "VALUE") or "").upper() == "BINARY":
+            entry["size"] = len(value) * 3 // 4 - value.count("=")
+        else:
+            entry["url"] = value
+        if name := next(filter(None, (_param(params, key) for key in _FILE_NAMES)), ""):
+            entry["name"] = name
+        if media_type := _param(params, "FMTTYPE"):
+            entry["media_type"] = media_type
+        attachments.append(entry)
+    return attachments
+
+
+def awaits_reply(vevent: Any, addresses: list[str]) -> bool:
+    """Return whether a vobject VEVENT is an invitation the account has not answered.
+
+    RFC 5545 3.2.12: an attendee without a PARTSTAT is at NEEDS-ACTION.
+    """
+    own = {comparable_address(address) for address in addresses}
+    organizer = getattr(vevent, "organizer", None)
+    if organizer is not None and comparable_address(str(organizer.value)) in own:
+        return False
+    for holder in getattr(vevent, "attendee_list", []) or []:
+        if comparable_address(str(holder.value)) in own:
+            status = _param(getattr(holder, "params", {}) or {}, "PARTSTAT")
+            return (status or "NEEDS-ACTION").upper() == "NEEDS-ACTION"
+    return False
 
 
 def strip_scheme(value: str) -> str:
@@ -342,7 +430,9 @@ def apply_extras(
     if ATTR_ORGANIZER in data:
         _set_organizer(component, data[ATTR_ORGANIZER])
     if ATTR_ALARMS in data:
-        _set_alarms(component, data[ATTR_ALARMS] or [])
+        _set_alarms(component, data[ATTR_ALARMS] or [], own_address)
+    if ATTR_ATTACHMENTS in data:
+        _set_attachments(component, data[ATTR_ATTACHMENTS] or [])
     _name_an_organizer(component, own_address)
 
 
@@ -374,7 +464,7 @@ def _set_organizer(component: Any, organizer: Any) -> None:
         del component["ORGANIZER"]
     if not organizer:
         return
-    address = vCalAddress(_mailto(_one_line(organizer)))
+    address = vCalAddress(mailto(_one_line(organizer)))
     if held is not None and comparable_address(str(held)) == comparable_address(
         str(address)
     ):
@@ -418,7 +508,7 @@ def _set_attendees(component: Any, attendees: list[Any]) -> None:
         spec = {"email": attendee} if isinstance(attendee, str) else dict(attendee)
         email = _one_line(spec["email"])
         kept = held.get(comparable_address(email))
-        address = kept or vCalAddress(_mailto(email))
+        address = kept or vCalAddress(mailto(email))
         _set_param(address, "CN", spec.get("name"), None)
         _set_param(address, "ROLE", spec.get("role"), "REQ-PARTICIPANT")
         _set_param(address, "PARTSTAT", spec.get("status"), "NEEDS-ACTION")
@@ -441,42 +531,156 @@ def _set_param(address: Any, name: str, value: Any, default: str | None) -> None
         address.params[name] = vText(default)
 
 
-def _set_alarms(component: Any, alarms: list[Any]) -> None:
-    """Replace the relative alarms with the given offsets.
+def _set_alarms(
+    component: Any, alarms: list[Any], own_address: str | None = None
+) -> None:
+    """Replace the alarms with the given ones, keeping those that stay.
 
-    RFC 5545 requires a DESCRIPTION on a DISPLAY alarm and forbids one on
-    AUDIO. Absolute triggers and email alarms stay: nothing here writes them.
+    A kept alarm keeps what this integration does not model, the UID and the
+    ACKNOWLEDGED of RFC 9074 among it. An alarm with another action stays too.
     """
-    component.subcomponents = [
-        sub
-        for sub in component.subcomponents
-        if sub.name != "VALARM" or not _is_relative(sub) or not _written_here(sub)
-    ]
+    held: dict[tuple[Any, ...], list[Any]] = {}
+    others = []
+    for sub in component.subcomponents:
+        if sub.name == "VALARM" and (key := _alarm_key(sub)) is not None:
+            held.setdefault(key, []).append(sub)
+        else:
+            others.append(sub)
+    wanted = []
     for alarm in alarms:
         spec = {"minutes_before": alarm} if isinstance(alarm, int) else dict(alarm)
         action = (spec.get("action") or "DISPLAY").upper()
-        valarm = ICalAlarm()
-        valarm.add("ACTION", action)
-        trigger = timedelta(minutes=-int(spec["minutes_before"]))
-        valarm.add("TRIGGER", trigger)
-        if str(spec.get("related", "")).upper() == "END":
-            valarm["TRIGGER"].params["RELATED"] = vText("END")
-        if action == "DISPLAY":
-            valarm.add("DESCRIPTION", spec.get("description") or "Reminder")
-        component.add_component(valarm)
+        if (at := spec.get("at")) is not None:
+            trigger: Any = dt_util.as_utc(at)
+            related = False
+        else:
+            trigger = timedelta(minutes=-int(spec["minutes_before"]))
+            related = str(spec.get("related", "")).upper() == "END"
+        kept = held.get((action, trigger, related))
+        valarm = kept.pop(0) if kept else _new_alarm(action, trigger, related)
+        _describe_alarm(valarm, action, spec, component, own_address)
+        wanted.append(valarm)
+    component.subcomponents = [*others, *wanted]
 
 
-def _written_here(valarm: Any) -> bool:
-    return str(valarm.get("ACTION", "")).upper() in ("DISPLAY", "AUDIO")
+def _alarm_key(valarm: Any) -> tuple[Any, ...] | None:
+    """Return what tells one alarm from another, None for one never written here."""
+    action = str(valarm.get("ACTION", "")).upper()
+    trigger = getattr(valarm.get("TRIGGER"), "dt", None)
+    if action not in ALARM_ACTIONS or trigger is None:
+        return None
+    if isinstance(trigger, timedelta):
+        related = str(valarm["TRIGGER"].params.get("RELATED", "")).upper() == "END"
+        return (action, trigger, related)
+    return (action, to_utc(trigger), False)
 
 
-def _is_relative(valarm: Any) -> bool:
-    """Return whether an alarm fires at an offset rather than at a fixed time."""
-    trigger = valarm.get("TRIGGER")
-    return trigger is not None and isinstance(getattr(trigger, "dt", None), timedelta)
+def _new_alarm(action: str, trigger: Any, related: bool) -> Any:
+    valarm = ICalAlarm()
+    valarm.add("ACTION", action)
+    valarm.add("TRIGGER", trigger)
+    if related:
+        valarm["TRIGGER"].params["RELATED"] = vText("END")
+    if isinstance(trigger, datetime):
+        # RFC 5545 3.8.6.3: a TRIGGER is a DURATION unless it says otherwise.
+        valarm["TRIGGER"].params["VALUE"] = vText("DATE-TIME")
+    return valarm
 
 
-def _mailto(address: str) -> str:
+def _describe_alarm(
+    valarm: Any,
+    action: str,
+    spec: dict[str, Any],
+    component: Any,
+    own_address: str | None,
+) -> None:
+    """Write the texts and recipients RFC 5545 3.6.6 asks of each action.
+
+    DISPLAY needs a DESCRIPTION and AUDIO must not have one. EMAIL needs a
+    DESCRIPTION, a SUMMARY and somebody to send it to.
+    """
+    if action == "AUDIO":
+        return
+    if spec.get("description") or "DESCRIPTION" not in valarm:
+        replace(valarm, "description", spec.get("description") or "Reminder")
+    if action != "EMAIL":
+        return
+    if spec.get("summary") or "SUMMARY" not in valarm:
+        summary = spec.get("summary") or str(component.get("SUMMARY", "")) or "Reminder"
+        replace(valarm, "summary", summary)
+    recipients = spec.get("attendees") or (
+        [] if "ATTENDEE" in valarm else [own_address] if own_address else []
+    )
+    if recipients:
+        valarm.pop("ATTENDEE", None)
+        for recipient in recipients:
+            address = vCalAddress(mailto(_one_line(recipient)))
+            valarm.add("ATTENDEE", address, encode=False)
+    if "ATTENDEE" not in valarm:
+        raise Refused("email_alarm_needs_recipient")
+
+
+def _set_attachments(component: Any, attachments: list[Any]) -> None:
+    """Rewrite the attachments, keeping the lines of those that stay.
+
+    A link is known by its url and an embedded file by its name, which is how
+    reading reports one back.
+    """
+    held = component.get("ATTACH")
+    stored = [] if held is None else held if isinstance(held, list) else [held]
+    component.pop("ATTACH", None)
+    for attachment in attachments:
+        spec = {"url": attachment} if isinstance(attachment, str) else dict(attachment)
+        if path := spec.get("path"):
+            line = _embedded(path)
+            spec.setdefault("name", Path(path).name)
+        elif url := spec.get("url"):
+            url = _one_line(url)
+            line = next(
+                (item for item in stored if str(item) == url and not _binary(item)),
+                None,
+            ) or vUri(url)
+        else:
+            line = next(
+                (
+                    item
+                    for item in stored
+                    if _binary(item) and _file_name(item) == spec.get("name")
+                ),
+                None,
+            )
+            if line is None:
+                raise Refused("attachment_not_found", name=str(spec.get("name")))
+        if spec.get("name") and _file_name(line) != spec["name"]:
+            line.params["FILENAME"] = vText(spec["name"])
+        if spec.get("media_type"):
+            line.params["FMTTYPE"] = vText(spec["media_type"])
+        component.add("ATTACH", line, encode=False)
+
+
+def _binary(line: Any) -> bool:
+    return str(line.params.get("VALUE", "")).upper() == "BINARY"
+
+
+def _file_name(line: Any) -> str | None:
+    return next(
+        (str(line.params[key]) for key in _FILE_NAMES if key in line.params), None
+    )
+
+
+def _embedded(path: str) -> Any:
+    """Return a file as the base64 line RFC 5545 3.8.1.1 embeds it in."""
+    try:
+        content = Path(path).read_bytes()
+    except OSError as err:
+        raise Refused("attachment_unreadable", path=path) from err
+    line = vUri(b64encode(content).decode("ascii"))
+    line.params["ENCODING"] = vText("BASE64")
+    line.params["VALUE"] = vText("BINARY")
+    return line
+
+
+def mailto(address: str) -> str:
     # A CAL-ADDRESS is a URI, and RFC 6638 lets the address set name a
     # principal by its path.
     if ":" in address or address.startswith("/"):

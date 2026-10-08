@@ -8,19 +8,22 @@ import logging
 from math import isfinite
 import re
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 import caldav
 from caldav.davclient import requests
-from caldav.elements import dav, ical
+from caldav.elements import cdav, dav, ical
 from caldav.lib import vcal
 from caldav.lib.error import DeleteError, NotFoundError, PutError, errmsg
+from caldav.lib.namespace import ns
 from dateutil.rrule import rruleset
 from homeassistant.util import dt as dt_util
 from icalendar import (
     Calendar as ICalCalendar,
+    FreeBusy as ICalFreeBusy,
     Timezone as ICalTimezone,
+    vCalAddress,
     vDDDLists,
     vRecur,
 )
@@ -39,6 +42,7 @@ from .event import (
     comparable_address,
     date_values,
     framed_rule,
+    mailto,
     replace,
     rule_from,
     shifted,
@@ -106,16 +110,18 @@ def _filtered(calendar: caldav.Calendar, uid: str, todo: bool | None) -> Any:
     """
     if todo is not None:
         return calendar.todo_by_uid(uid) if todo else calendar.event_by_uid(uid)
-    try:
-        return calendar.event_by_uid(uid)
-    except NotFoundError:
-        return calendar.todo_by_uid(uid)
+    for lookup in (calendar.event_by_uid, calendar.todo_by_uid):
+        try:
+            return lookup(uid)
+        except NotFoundError:
+            continue
+    return calendar.journal_by_uid(uid)
 
 
 def _scan(calendar: caldav.Calendar, todo: bool | None) -> Iterator[tuple[Any, str]]:
     """Yield every object of the collection with the uid it carries.
 
-    Two filtered requests for both kinds: a filter naming only VCALENDAR is
+    A filtered request for each kind: a filter naming only VCALENDAR is
     answered with nothing at all by a good few servers.
     """
     tagged = {"props": [dav.GetEtag()]}
@@ -123,6 +129,7 @@ def _scan(calendar: caldav.Calendar, todo: bool | None) -> Iterator[tuple[Any, s
         found = [
             *calendar.search(event=True, **tagged),
             *calendar.search(todo=True, include_completed=True, **tagged),
+            *calendar.search(journal=True, **tagged),
         ]
     else:
         found = (
@@ -816,8 +823,11 @@ def zoned_document(instance: ICalCalendar) -> ICalCalendar:
     return _document(parts, zones, instance.get("PRODID"), carried=instance)
 
 
+_IMPORTED = ("VEVENT", "VTODO", "VJOURNAL")
+
+
 def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
-    """Write every VEVENT and VTODO in a document to the calendar.
+    """Write every event, to-do and journal entry in a document to the calendar.
 
     Components sharing a uid are one resource (RFC 4791). A uid already on
     the calendar aborts the whole import.
@@ -828,7 +838,7 @@ def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
     zones = {str(zone.get("TZID", "")): zone for zone in document.walk("VTIMEZONE")}
     groups: dict[str, list[Any]] = {}
     for component in document.walk():
-        if component.name not in ("VEVENT", "VTODO"):
+        if component.name not in _IMPORTED:
             continue
         uid = str(_first(component.get("UID", "")))
         if not uid:
@@ -913,8 +923,10 @@ def export_ics(calendar: caldav.Calendar, uid: str | None) -> str:
     components: list[Any] = []
     zones: dict[str, Any] = {}
     seen: set[str] = set()
-    for item in calendar.search(event=True) + calendar.search(
-        todo=True, include_completed=True
+    for item in (
+        *calendar.search(event=True),
+        *calendar.search(todo=True, include_completed=True),
+        *calendar.search(journal=True),
     ):
         # A resource holding both kinds answers both filters.
         url = str(getattr(item, "url", "") or "")
@@ -937,31 +949,92 @@ def export_ics(calendar: caldav.Calendar, uid: str | None) -> str:
     return _document(components, zones, None).to_ical().decode("utf-8")
 
 
-def respond_to_invitation(
-    calendar: caldav.Calendar, uid: str, partstat: str, addresses: list[str]
-) -> None:
-    """Set our own participation status on an event we were invited to."""
-    event = object_by_uid(calendar, uid)
-    tag = held_etag(event, None)
-    instance = event.icalendar_instance
-    wanted = {comparable_address(address) for address in addresses}
-    changed = False
-    for component in instance.walk("VEVENT"):
-        attendees = component.get("ATTENDEE")
-        if attendees is None:
+def busy_periods(instance: Any) -> list[dict[str, str]]:
+    """Flatten the FREEBUSY lines of a VFREEBUSY into start/end pairs.
+
+    A period's second half is an end or a duration, and icalendar hands back
+    a bare value for one period and a list for several.
+    """
+    periods = []
+    for component in instance.walk("VFREEBUSY"):
+        entries = component.get("FREEBUSY")
+        if entries is None:
             continue
-        for attendee in attendees if isinstance(attendees, list) else [attendees]:
-            if comparable_address(str(attendee)) not in wanted:
+        for entry in entries if isinstance(entries, list) else [entries]:
+            value = getattr(entry, "dt", None)
+            if not isinstance(value, tuple) or len(value) != 2:
                 continue
-            attendee.params["PARTSTAT"] = partstat
-            # An RFC 6638 server relays the reply only once RSVP is off.
-            attendee.params["RSVP"] = "FALSE"
-            changed = True
-    if not changed:
-        raise Refused("not_an_attendee")
-    # The document, not its text, which caldav would run through vcal.fix.
-    event.icalendar_instance = instance
-    put_resource(event, tag)
+            start, second = value
+            end = second if isinstance(second, datetime) else start + second
+            periods.append({"start": start.isoformat(), "end": end.isoformat()})
+    return periods
+
+
+def attendee_free_busy(
+    client: caldav.DAVClient,
+    start: datetime,
+    end: datetime,
+    attendees: list[str],
+    addresses: list[str],
+) -> dict[str, list[dict[str, str]] | None]:
+    """Ask the server when other people are busy, by RFC 6638 5.
+
+    None for somebody the server could not answer for, which is not the
+    same as free. sabre/dav takes the request only from an organizer spelled
+    the way it lists the account's own addresses, a path left relative.
+    """
+    organizer = next(
+        (address for address in addresses if address.lower().startswith("mailto:")),
+        urlparse(addresses[0]).path or addresses[0],
+    )
+    request = ICalCalendar()
+    request.add("prodid", "-//ha_caldav//EN")
+    request.add("version", "2.0")
+    request.add("method", "REQUEST")
+    query = ICalFreeBusy()
+    query.add("uid", str(uuid4()))
+    query.add("dtstamp", datetime.now(tz=UTC))
+    query.add("dtstart", start.astimezone(UTC))
+    query.add("dtend", end.astimezone(UTC))
+    query.add("organizer", vCalAddress(organizer), encode=False)
+    for attendee in attendees:
+        query.add("attendee", vCalAddress(mailto(attendee)), encode=False)
+    request.add_component(query)
+    response = client.post(
+        _outbox(client), request.to_ical(), {"Content-Type": _CALENDAR_TYPE}
+    )
+    if response.status != 200 or response.tree is None:
+        raise PutError(errmsg(response))
+    answered: dict[str, list[dict[str, str]] | None] = {}
+    for entry in response.tree.iter(ns("C", "response")):
+        # SOGo writes the address into the recipient itself, without an href.
+        named = entry.find(ns("C", "recipient"))
+        recipient = "" if named is None else "".join(named.itertext()).strip()
+        data = entry.findtext(ns("C", "calendar-data"))
+        status = entry.findtext(ns("C", "request-status")) or ""
+        periods = None
+        if data and status.startswith("2"):
+            periods = busy_periods(ICalCalendar.from_ical(data))
+        answered[comparable_address(recipient)] = periods
+    return {
+        attendee: answered.get(comparable_address(attendee)) for attendee in attendees
+    }
+
+
+def _outbox(client: caldav.DAVClient) -> str:
+    """Return where the account posts scheduling requests, by RFC 6638 2.1.
+
+    Asked for directly: caldav logs an error with a traceback before it
+    reports a server that has none.
+    """
+    principal = client.principal()
+    response = principal.get_properties(
+        [cdav.ScheduleOutboxURL()], parse_response_xml=False
+    )
+    for holder in response.tree.iter(cdav.ScheduleOutboxURL.tag):
+        if href := holder.findtext(dav.Href.tag):
+            return str(principal.url.join(href))
+    raise Refused("no_scheduling")
 
 
 def set_calendar_color(calendar: caldav.Calendar, color: str) -> None:

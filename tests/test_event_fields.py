@@ -6,6 +6,7 @@ from icalendar import Calendar as ICalCalendar, Event as ICalEvent
 import pytest
 import vobject
 
+from custom_components.ha_caldav.errors import Refused
 from custom_components.ha_caldav.event import apply_extras, read_extras
 
 
@@ -127,7 +128,7 @@ def test_relative_alarms_are_reported_as_minutes_before() -> None:
     ]
 
 
-def test_an_absolute_alarm_has_no_offset_to_report() -> None:
+def test_an_alarm_at_a_fixed_time_reads_as_that_time() -> None:
     vevent = vobject.readOne(
         "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\nBEGIN:VEVENT\n"
         "UID:a\nDTSTAMP:20260101T000000Z\nDTSTART:20260706T090000Z\n"
@@ -136,7 +137,27 @@ def test_an_absolute_alarm_has_no_offset_to_report() -> None:
         "DESCRIPTION:Soon\nEND:VALARM\nEND:VEVENT\nEND:VCALENDAR\n"
     ).vevent
 
-    assert "alarms" not in read_extras(vevent)
+    at = dt_util.as_local(datetime(2026, 7, 6, 8, 45, tzinfo=UTC)).isoformat()
+    assert read_extras(vevent)["alarms"] == [
+        {"at": at, "action": "DISPLAY", "description": "Soon"}
+    ]
+
+
+def test_an_email_alarm_reads_with_its_subject_and_recipients() -> None:
+    vevent = _vevent(
+        "BEGIN:VALARM\nACTION:EMAIL\nTRIGGER:-P1D\nSUMMARY:Tomorrow\n"
+        "DESCRIPTION:Standup\nATTENDEE:mailto:ann@example.com\nEND:VALARM"
+    )
+
+    assert read_extras(vevent)["alarms"] == [
+        {
+            "minutes_before": 1440,
+            "action": "EMAIL",
+            "description": "Standup",
+            "summary": "Tomorrow",
+            "attendees": ["ann@example.com"],
+        }
+    ]
 
 
 def test_a_field_nobody_named_is_left_alone() -> None:
@@ -187,13 +208,202 @@ def test_writing_attendees_replaces_the_previous_list() -> None:
 def test_alarms_become_valarms_with_a_negative_trigger() -> None:
     component = _component()
 
-    apply_extras(component, {"alarms": [15, {"minutes_before": 60, "action": "EMAIL"}]})
+    apply_extras(component, {"alarms": [15, {"minutes_before": 60, "action": "AUDIO"}]})
 
     written = _written(component)
     assert written.count("BEGIN:VALARM") == 2
     assert "TRIGGER:-PT15M" in written
     assert "TRIGGER:-PT1H" in written
+    assert "ACTION:AUDIO" in written
+
+
+def test_an_alarm_at_a_fixed_time_is_written_in_utc() -> None:
+    """RFC 5545 3.8.6.3 wants an absolute trigger in UTC and marked as a DATE-TIME."""
+    component = _component()
+    at = datetime(2026, 7, 6, 10, 45, tzinfo=ZoneInfo("Europe/Berlin"))
+
+    apply_extras(component, {"alarms": [{"at": at}]})
+
+    assert "TRIGGER;VALUE=DATE-TIME:20260706T084500Z" in _written(component)
+
+
+def test_an_email_alarm_goes_to_the_attendees_it_names() -> None:
+    component = _component()
+
+    apply_extras(
+        component,
+        {
+            "alarms": [
+                {
+                    "minutes_before": 60,
+                    "action": "EMAIL",
+                    "attendees": ["ann@example.com"],
+                }
+            ]
+        },
+    )
+
+    written = _written(component)
     assert "ACTION:EMAIL" in written
+    assert "ATTENDEE:mailto:ann@example.com" in written
+    assert "SUMMARY:x" in written
+    assert "DESCRIPTION:Reminder" in written
+
+
+def test_an_email_alarm_without_attendees_goes_to_the_account() -> None:
+    component = _component()
+
+    apply_extras(
+        component,
+        {"alarms": [{"minutes_before": 60, "action": "EMAIL"}]},
+        "mailto:me@example.com",
+    )
+
+    assert "ATTENDEE:mailto:me@example.com" in _written(component)
+
+
+def test_an_email_alarm_with_nobody_to_send_it_to_is_refused() -> None:
+    component = _component()
+
+    with pytest.raises(Refused, match="email_alarm_needs_recipient"):
+        apply_extras(component, {"alarms": [{"minutes_before": 60, "action": "EMAIL"}]})
+
+
+def test_an_alarm_named_again_keeps_what_another_client_stored_on_it() -> None:
+    """RFC 9074 has a client record on the alarm that it was dismissed."""
+    component = ICalCalendar.from_ical(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VEVENT\r\n"
+        "UID:e-1\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:20260706T090000Z\r\n"
+        "BEGIN:VALARM\r\nUID:alarm-1\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\n"
+        "DESCRIPTION:Soon\r\nACKNOWLEDGED:20260706T085000Z\r\nEND:VALARM\r\n"
+        "END:VEVENT\r\nEND:VCALENDAR\r\n"
+    ).walk("VEVENT")[0]
+
+    apply_extras(component, {"alarms": [15, 30]})
+
+    written = _written(component)
+    assert written.count("BEGIN:VALARM") == 2
+    assert "UID:alarm-1" in written
+    assert "ACKNOWLEDGED:20260706T085000Z" in written
+    assert "DESCRIPTION:Soon" in written
+
+
+def test_setting_the_alarms_replaces_one_at_a_fixed_time() -> None:
+    component = _component()
+    apply_extras(
+        component, {"alarms": [{"at": datetime(2026, 7, 6, 8, 0, tzinfo=UTC)}]}
+    )
+
+    apply_extras(component, {"alarms": [30]})
+
+    written = _written(component)
+    assert written.count("BEGIN:VALARM") == 1
+    assert "TRIGGER:-PT30M" in written
+
+
+def test_attachments_are_read_as_links_and_embedded_files() -> None:
+    vevent = _vevent(
+        "ATTACH;FMTTYPE=application/pdf;FILENAME=agenda.pdf:"
+        "https://example.com/agenda.pdf\n"
+        "ATTACH;FMTTYPE=text/plain;ENCODING=BASE64;VALUE=BINARY;X-FILENAME=n.txt:"
+        "aGVsbG8gd29ybGQ="
+    )
+
+    assert read_extras(vevent)["attachments"] == [
+        {
+            "url": "https://example.com/agenda.pdf",
+            "name": "agenda.pdf",
+            "media_type": "application/pdf",
+        },
+        {"size": 11, "name": "n.txt", "media_type": "text/plain"},
+    ]
+
+
+def test_a_link_is_attached_with_its_name_and_type() -> None:
+    component = _component()
+
+    apply_extras(
+        component,
+        {
+            "attachments": [
+                "https://example.com/plain",
+                {
+                    "url": "https://example.com/agenda.pdf",
+                    "name": "agenda.pdf",
+                    "media_type": "application/pdf",
+                },
+            ]
+        },
+    )
+
+    written = _written(component)
+    assert "ATTACH:https://example.com/plain" in written
+    assert (
+        "ATTACH;FILENAME=agenda.pdf;FMTTYPE=application/pdf:"
+        "https://example.com/agenda.pdf" in written
+    )
+
+
+def test_a_file_is_embedded_and_reads_back_with_its_size(tmp_path) -> None:
+    file = tmp_path / "note.txt"
+    file.write_bytes(b"hello world")
+    component = _component()
+    component.add("DTSTART", datetime(2026, 7, 6, 9, 0, tzinfo=UTC))
+
+    apply_extras(
+        component, {"attachments": [{"path": str(file), "media_type": "text/plain"}]}
+    )
+
+    written = _written(component)
+    assert "ENCODING=BASE64" in written
+    assert "aGVsbG8gd29ybGQ=" in written
+    assert read_extras(vobject.readOne(written).vevent)["attachments"] == [
+        {"size": 11, "name": "note.txt", "media_type": "text/plain"}
+    ]
+
+
+def test_a_file_that_is_not_there_is_refused(tmp_path) -> None:
+    with pytest.raises(Refused, match="attachment_unreadable"):
+        apply_extras(_component(), {"attachments": [{"path": str(tmp_path / "no")}]})
+
+
+def test_attachments_read_back_and_written_again_stay_as_they_are() -> None:
+    """A stored line keeps the parameters this integration does not model."""
+    component = ICalCalendar.from_ical(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VEVENT\r\n"
+        "UID:e-1\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:20260706T090000Z\r\n"
+        "ATTACH;FMTTYPE=application/pdf;MANAGED-ID=m1:https://example.com/a.pdf\r\n"
+        "ATTACH;ENCODING=BASE64;VALUE=BINARY;X-FILENAME=n.txt:aGVsbG8gd29ybGQ=\r\n"
+        "END:VEVENT\r\nEND:VCALENDAR\r\n"
+    ).walk("VEVENT")[0]
+    read = read_extras(vobject.readOne(_written(component)).vevent)["attachments"]
+
+    apply_extras(component, {"attachments": read})
+
+    written = _written(component)
+    assert "MANAGED-ID=m1" in written
+    assert "X-FILENAME=n.txt:aGVsbG8gd29ybGQ=" in written
+    assert written.count("ATTACH") == 2
+
+
+def test_an_embedded_file_no_longer_named_is_dropped() -> None:
+    component = ICalCalendar.from_ical(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VEVENT\r\n"
+        "UID:e-1\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:20260706T090000Z\r\n"
+        "ATTACH;ENCODING=BASE64;VALUE=BINARY;X-FILENAME=n.txt:aGVsbG8gd29ybGQ=\r\n"
+        "END:VEVENT\r\nEND:VCALENDAR\r\n"
+    ).walk("VEVENT")[0]
+
+    apply_extras(component, {"attachments": ["https://example.com/a.pdf"]})
+
+    written = _written(component)
+    assert "BINARY" not in written
+    assert "ATTACH:https://example.com/a.pdf" in written
+
+
+def test_an_embedded_file_the_item_does_not_hold_is_refused() -> None:
+    with pytest.raises(Refused, match="attachment_not_found"):
+        apply_extras(_component(), {"attachments": [{"name": "gone.txt"}]})
 
 
 def test_clearing_alarms_removes_every_valarm() -> None:

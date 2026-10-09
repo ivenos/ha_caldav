@@ -8,6 +8,10 @@ All notable changes to this project are documented in this file, in the format o
 
 - Listing invitations on Radicale gave nothing instead of a clear message.
 
+### Dependencies
+
+- hypothesis 6.168.4 -> 6.168.5
+
 ## [1.5.0] - 2026-10-08
 
 ### Added

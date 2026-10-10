@@ -11,7 +11,7 @@ All notable changes to this project are documented in this file, in the format o
 ### Dependencies
 
 - hypothesis 6.168.4 -> 6.168.5
-- pytest-homeassistant-custom-component 0.13.368 -> 0.13.369
+- pytest-homeassistant-custom-component 0.13.368 -> 0.13.370
 
 ## [1.5.0] - 2026-10-08
 

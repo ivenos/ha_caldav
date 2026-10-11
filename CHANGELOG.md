@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file, in the format o
 
 ## [Unreleased]
 
+### Dependencies
+
+- pytest-homeassistant-custom-component 0.13.370 -> 0.13.371
+
 ## [1.5.1] - 2026-10-11
 
 ### Fixed

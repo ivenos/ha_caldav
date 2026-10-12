@@ -11,6 +11,7 @@ All notable changes to this project are documented in this file, in the format o
 ### Dependencies
 
 - pytest-homeassistant-custom-component 0.13.370 -> 0.13.371
+- ruff 0.16.10 -> 0.17.0
 
 ## [1.5.1] - 2026-10-11
 

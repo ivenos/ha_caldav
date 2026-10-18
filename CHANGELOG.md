@@ -11,7 +11,7 @@ All notable changes to this project are documented in this file, in the format o
 ### Dependencies
 
 - pytest-homeassistant-custom-component 0.13.370 -> 0.13.372
-- ruff 0.16.10 -> 0.17.0
+- ruff 0.16.10 -> 0.17.1
 - hypothesis 6.168.5 -> 6.169.4
 - mcr.microsoft.com/playwright v1.64.0-noble -> v1.64.1-noble
 

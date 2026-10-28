@@ -91,6 +91,49 @@ An alarm of an event within the days ahead or of an open to-do fires the event `
 
 ✅ is tested, 🟡 is expected to work but not tested, ❌ is not available on the server. Other servers are not tested, iCloud is in use with the integration. Not supported: signing in with OAuth, and publishing a calendar under a public link.
 
+## Roadmap to Home Assistant Core
+
+The goal is to bring these features into the built-in CalDAV integration of Home Assistant. Each step is a small pull request that waits for a review by the Home Assistant team. There are no dates. Until then CalDAV Complete gets fixes and new features as usual.
+
+### To-do lists
+
+| Feature | Status | Pull requests |
+|---|---|---|
+| Show when a to-do was completed | ✅ In Home Assistant 2026.11 | [core#187925](https://github.com/home-assistant/core/pull/187925) |
+| Save when a to-do was completed in Home Assistant | ✅ In Home Assistant 2026.11 | [core#188236](https://github.com/home-assistant/core/pull/188236) |
+| Unchanged to-do lists are not reloaded on every poll | ✅ In Home Assistant 2026.11 | [core#188540](https://github.com/home-assistant/core/pull/188540) |
+| Sort to-dos | 👀 Waits for review | [core#189018](https://github.com/home-assistant/core/pull/189018), [core#189017](https://github.com/home-assistant/core/pull/189017), [docs#49947](https://github.com/home-assistant/home-assistant.io/pull/49947) |
+| Recurring to-dos move to their next date | 🔗 Waits for a fix in the caldav library: [caldav#765](https://github.com/python-caldav/caldav/issues/765) |  |
+| Subtasks | 💬 Waits for a [decision](https://github.com/home-assistant/architecture/discussions/1453) for all to-do lists |  |
+| Priority for to-dos | 💬 Waits for a [decision](https://github.com/home-assistant/architecture/discussions/1349) for all to-do lists, already discussed by the architecture team |  |
+
+### Calendars and events
+
+| Feature | Status | Pull requests |
+|---|---|---|
+| Calendar colors from the server | ✅ In Home Assistant 2026.11 | [core#188287](https://github.com/home-assistant/core/pull/188287) |
+| Unchanged calendars are not reloaded on every poll | ⏭️ Up next |  |
+| Recurring events show up as a series | 🔗 Waits for fixes in the [ical](https://github.com/allenporter/ical) library: [ical#676](https://github.com/allenporter/ical/pull/676), [ical#692](https://github.com/allenporter/ical/pull/692) |  |
+| Change and delete events, one occurrence of a series or all later ones | 🔗 Waits for the step above, and for fixes in ical after [ical#728](https://github.com/allenporter/ical/pull/728) |  |
+| Change and delete events from automations | 💬 Waits for changing events, and a [decision](https://github.com/home-assistant/architecture/discussions/1224) for all calendars |  |
+| Reminders can trigger automations | 💬 Waits for a proposal, there is none yet |  |
+| Attendees | 💬 Waits for a [decision](https://github.com/home-assistant/architecture/discussions/1099) for all calendars, open since 2024 |  |
+| Attachments | 💬 Waits for a proposal, the [discussion](https://github.com/home-assistant/architecture/discussions/1353) so far was not accepted as one |  |
+
+### Setup and troubleshooting
+
+| Feature | Status | Pull requests |
+|---|---|---|
+| Change the server or password without setting it up again | ✅ In Home Assistant 2026.11 | [core#188159](https://github.com/home-assistant/core/pull/188159), [docs#49680](https://github.com/home-assistant/home-assistant.io/pull/49680) |
+| Diagnostics for bug reports | ✅ In Home Assistant 2026.11 | [core#188158](https://github.com/home-assistant/core/pull/188158) |
+
+### Everything else
+
+| Feature | Status | Pull requests |
+|---|---|---|
+| Invitations, free/busy, journal entries, import and export, creating calendars | ⏳ After the steps above, as CalDAV actions |  |
+| Choose the poll interval, share calendars, delegated calendars | ❌ Not planned: Home Assistant doesn't allow a poll interval option, and the library can't share or delegate |  |
+
 ## License
 
 Copyright © Iven Schlösser. CalDAV Complete is free software, licensed under the [GNU General Public License v3.0 only](LICENSE). You may use, modify and redistribute it. Anyone distributing a modified version must release it under the same license and make its source code available.

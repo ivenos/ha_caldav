@@ -50,7 +50,24 @@ jobs:
           zip -r ../../ha_caldav.zip .
 
       - name: Write the release notes
-        run: sh .github/scripts/changelog.sh notes "${VERSION#v}" > "$RUNNER_TEMP/notes.md"
+        run: |
+          notes=$(sh .github/scripts/changelog.sh notes "${VERSION#v}")
+          link=$(printf '%s\n' "$notes" | grep '^\*\*Full changelog:\*\*' || true)
+          roadmap() {
+            git show "$1:README.md" | sed -n '/^## Roadmap to Home Assistant Core/,/^## /p' | grep '^| ' | grep -vxF '| Feature | Status | Pull requests |'
+          }
+          changes=
+          previous=$(git describe --tags --abbrev=0 HEAD^ 2> /dev/null || true)
+          if [ -n "$previous" ] && before=$(roadmap "$previous") && [ -n "$before" ]; then
+            changes=$(roadmap HEAD | grep -vxF "$before" | sed -e 's/^| \([^|]*\) | \([^|]*\) | \([^|]*\) |$/- \1: \2 (\3)/' -e 's/ ()$//' || true)
+          fi
+          {
+            printf '%s\n' "$(printf '%s\n' "$notes" | grep -v '^\*\*Full changelog:\*\*' || true)"
+            printf '\n## 🗺️ Roadmap to Home Assistant Core\n\n'
+            printf 'The goal is to bring these features into Home Assistant Core. The [roadmap](https://github.com/ivenos/ha_caldav#roadmap-to-home-assistant-core) shows each step and what it waits for.\n'
+            if [ -n "$changes" ]; then printf '\nProgress since the last release:\n\n%s\n' "$changes"; fi
+            if [ -n "$link" ]; then printf '\n%s\n' "$link"; fi
+          } > "$RUNNER_TEMP/notes.md"
 
       - name: Push the commit and the tag
         if: github.event_name == 'workflow_dispatch'

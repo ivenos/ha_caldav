@@ -6,14 +6,7 @@ All notable changes to this project are documented in this file, in the format o
 
 ### Fixed
 
-- A password or user name with umlauts or other non-English characters was rejected
-
-### Dependencies
-
-- pytest-homeassistant-custom-component 0.13.370 -> 0.13.374
-- ruff 0.16.10 -> 0.17.2
-- hypothesis 6.168.5 -> 6.170.9
-- mcr.microsoft.com/playwright v1.64.0-noble -> v1.64.1-noble
+- A password or user name with umlauts or other non-English characters was rejected.
 
 ## [1.5.1] - 2026-10-11
 
@@ -21,11 +14,6 @@ All notable changes to this project are documented in this file, in the format o
 
 - Listing invitations on Radicale gave nothing instead of a clear message.
 - Changing or deleting an event took minutes on a large iCloud calendar (#31).
-
-### Dependencies
-
-- hypothesis 6.168.4 -> 6.168.5 (#28)
-- pytest-homeassistant-custom-component 0.13.368 -> 0.13.370 (#29, #30)
 
 ## [1.5.0] - 2026-10-08
 
@@ -61,13 +49,6 @@ All notable changes to this project are documented in this file, in the format o
 - iCloud calendars with events were unavailable on Home Assistant 2026.10 (#27).
 - A time with a UTC offset was stored with a time zone no other app understands.
 
-### Dependencies
-
-- ruff 0.16.9 -> 0.16.10 (#23)
-- pytest-homeassistant-custom-component 0.13.367 -> 0.13.368 (#22)
-- hypothesis 6.168.3 -> 6.168.4 (#25)
-- mcr.microsoft.com/playwright v1.63.0-noble -> v1.64.0-noble (#26)
-
 ## [1.4.2] - 2026-10-02
 
 ### Fixed
@@ -84,13 +65,6 @@ All notable changes to this project are documented in this file, in the format o
 ### Fixed
 
 - On Home Assistant 2026.10 the built-in CalDAV integration failed to load next to this one, until the restart after this update.
-
-### Dependencies
-
-- caldav 2.1.0 -> 3.3.0a1 (tests only)
-- ruff 0.16.8 -> 0.16.9 (#17)
-- pytest-homeassistant-custom-component 0.13.366 -> 0.13.367 (#19)
-- hypothesis 6.168.1 -> 6.168.3 (#18, #20)
 
 ## [1.4.0] - 2026-09-26
 
@@ -178,12 +152,6 @@ All notable changes to this project are documented in this file, in the format o
 - New items get random IDs instead of ones that contain the network address of the host.
 - Session cookies are hidden in the debug log.
 
-### Dependencies
-
-- ruff 0.16.7 -> 0.16.8 (#12)
-- pytest-homeassistant-custom-component 0.13.365 -> 0.13.366 (#15)
-- hypothesis 6.168.0 -> 6.168.1 (#16)
-
 ## [1.3.1] - 2026-09-16
 
 ### Added
@@ -193,12 +161,6 @@ All notable changes to this project are documented in this file, in the format o
 ### Changed
 
 - The English UI spells the event status "Canceled".
-
-### Dependencies
-
-- ruff 0.16.6 -> 0.16.7 (#10)
-- pytest-homeassistant-custom-component 0.13.364 -> 0.13.365 (#11)
-- hypothesis 6.167.1 -> 6.168.0 (#9)
 
 ## [1.3.0] - 2026-09-08
 
@@ -219,13 +181,6 @@ All notable changes to this project are documented in this file, in the format o
 ### Fixed
 
 - A space after the server URL or the username broke the connection.
-
-### Dependencies
-
-- ruff 0.15.21 -> 0.16.6 (#6)
-- pytest-homeassistant-custom-component 0.13.346 -> 0.13.364 (#7)
-- hypothesis 6.165.2 -> 6.167.1 (#7)
-- actions/setup-python v6 -> v7 (#8)
 
 ## [1.2.0] - 2026-08-08
 

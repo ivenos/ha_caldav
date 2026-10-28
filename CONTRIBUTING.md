@@ -79,6 +79,7 @@ Fixed
 
 - Run the Release workflow with the new version, such as `1.5.0`. It turns `Unreleased` into that version, tags the commit and builds a draft release with `ha_caldav.zip` and the notes from `CHANGELOG.md`.
 - A tag pushed by hand builds the draft too, from the section of its version.
+- The release notes also carry the roadmap from the README, with the rows that changed since the last release.
 - The workflow sets the version in `manifest.json`. The one in the repository is a placeholder.
 - HACS shows the README of the latest release.
 - Rebuild the README screenshots before every release.
@@ -86,7 +87,7 @@ Fixed
 ## Dependencies
 
 - GitHub Actions stay on version tags, never commit SHAs. hassfest has no tagged release and runs from `master`.
-- Renovate opens the bumps and adds each one to the changelog. The release adds the numbers of their pull requests. Other PRs leave dependencies alone.
+- Renovate opens the bumps and adds those that reach users to the changelog, not GitHub Actions or test tools. The release adds the numbers of their pull requests. Other PRs leave dependencies alone.
 - `caldav`, `icalendar` and `vobject` follow Home Assistant core. `manifest.json` lists them as minimum versions, the ones the oldest supported Home Assistant pins. `requirements_test.txt` pins the versions the newest Home Assistant pins, its beta included. Both move by hand, with `.github/scripts/changelog.sh dependency NAME FROM TO` for the changelog.
 - `python-dateutil` is not listed in `manifest.json` or `requirements_test.txt`.
 
@@ -96,4 +97,4 @@ Fixed
 - Only the PR author and the maintainer commit to it.
 - `pytest`, `ruff check` and `ruff format --check` must pass.
 - The test plan names the CalDAV server and what you exercised: the calendar, the to-do list or which actions.
-- Fill in the PR template, including the CLA checkbox.
+- Fill in the PR template, including the test plan and the CLA checkbox.

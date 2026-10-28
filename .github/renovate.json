@@ -19,7 +19,17 @@
       "matchManagers": ["github-actions"],
       "groupName": "GitHub Actions",
       "commitMessagePrefix": "ci:",
-      "automerge": true
+      "automerge": true,
+      "postUpgradeTasks": { "commands": [] }
+    },
+    {
+      "description": "Test tools reach no user, so they get no changelog line.",
+      "matchFileNames": ["test/**", "tests/**"],
+      "postUpgradeTasks": { "commands": [] }
+    },
+    {
+      "matchDepTypes": ["devDependencies"],
+      "postUpgradeTasks": { "commands": [] }
     },
     {
       "description": "Runs on releases only, so no pull request check covers it.",
@@ -35,7 +45,12 @@
       "matchManagers": ["pip_requirements"],
       "groupName": "Test dependencies",
       "commitMessagePrefix": "ci:",
-      "automerge": true
+      "automerge": true,
+      "postUpgradeTasks": { "commands": [] }
+    },
+    {
+      "matchFileNames": [".github/scripts/screenshots.sh"],
+      "postUpgradeTasks": { "commands": [] }
     },
     {
       "description": "Last, because a later rule wins and the rule above matches ruff too.",

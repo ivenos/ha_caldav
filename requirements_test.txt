@@ -2,5 +2,5 @@ pytest-homeassistant-custom-component==0.13.375
 caldav==3.5.0a0
 icalendar==6.3.1
 vobject==0.9.9
-hypothesis==6.170.11
+hypothesis==6.170.12
 ruff==0.17.2

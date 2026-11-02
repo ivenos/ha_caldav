@@ -79,7 +79,7 @@ Fixed
 
 - Run the Release workflow with the new version, such as `1.5.0`. It turns `Unreleased` into that version, tags the commit and builds a draft release with `ha_caldav.zip` and the notes from `CHANGELOG.md`.
 - A tag pushed by hand builds the draft too, from the section of its version.
-- The release notes also carry the roadmap from the README, with the rows that changed since the last release.
+- The release notes also link the roadmap to Home Assistant Core on ivenos.de.
 - The workflow sets the version in `manifest.json`. The one in the repository is a placeholder.
 - HACS shows the README of the latest release.
 - Rebuild the README screenshots before every release.

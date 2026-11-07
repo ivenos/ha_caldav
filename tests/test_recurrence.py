@@ -3402,7 +3402,7 @@ def test_stripping_the_zone_off_a_local_time_stays_an_exact_inverse(
     new_york, instant: datetime
 ) -> None:
     """PEP 495 puts fold on the value, not on the zone, so it survives the strip."""
-    from custom_components.ha_caldav.event import to_utc
+    from custom_components.ha_caldav.extras import to_utc
 
     walled = dt_util.as_local(instant).replace(tzinfo=None)
 

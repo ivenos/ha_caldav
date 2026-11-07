@@ -81,7 +81,7 @@ Fixed
 - A tag pushed by hand builds the draft too, from the section of its version.
 - The release notes also link the roadmap to Home Assistant Core on ivenos.de.
 - The workflow sets the version in `manifest.json`. The one in the repository is a placeholder.
-- HACS shows the README of the latest release.
+- HACS and the Marketplace show the README of the latest release, the Marketplace without the parts between the `ha-marketplace:exclude` comments.
 - Rebuild the README screenshots before every release.
 
 ## Dependencies

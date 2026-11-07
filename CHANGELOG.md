@@ -4,9 +4,14 @@ All notable changes to this project are documented in this file, in the format o
 
 ## [Unreleased]
 
+### Added
+
+- Each calendar gets a reminder entity that automations can use as a trigger in the editor.
+
 ### Fixed
 
 - A password or user name with umlauts or other non-English characters was rejected.
+- Canceled events turned the calendar on and set off automations and reminders.
 
 ## [1.5.1] - 2026-10-11
 

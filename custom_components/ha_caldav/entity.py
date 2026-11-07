@@ -1,10 +1,11 @@
-"""The entity base both platforms share."""
+"""The entity bases the platforms share."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timedelta
 import logging
+from typing import Any
 
 from caldav.lib.error import NotFoundError
 from homeassistant.core import CALLBACK_TYPE, callback
@@ -23,54 +24,24 @@ _LOGGER = logging.getLogger(__name__)
 _LATE = timedelta(minutes=15)
 
 
-class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
-    """One entity for one calendar."""
+class RemindingEntity(CoordinatorEntity[HaCaldavCoordinator]):
+    """An entity that tells when the alarms in its halves come due."""
 
     _attr_has_entity_name = True
-    # Which half of the collection this entity reads.
-    _half: str
-    runtime_data: HaCaldavRuntimeData
-    _name_in_registry: str | None = None
-    _name_noted = False
+    _halves: tuple[str, ...] = ()
     _reminding_since: datetime | None = None
     _next_reminder: CALLBACK_TYPE | None = None
-
-    @property
-    def addresses(self) -> list[str]:
-        """Return the calendar user addresses of whoever owns this calendar."""
-        if self.managed.addresses is not None:
-            return self.managed.addresses
-        return self.runtime_data.address_set
-
-    @property
-    def available(self) -> bool:
-        """Whether this entity's own half of the collection is being read."""
-        return super().available and not self.coordinator.halves[self._half].dead
 
     def __init__(self, managed: ManagedCalendar) -> None:
         """Initialize the entity."""
         super().__init__(managed.coordinator)
         self.managed = managed
         self.calendar = managed.calendar
-        self._attr_name = managed.name
         self._reminded: set[tuple[object, ...]] = set()
 
     async def async_added_to_hass(self) -> None:
-        """Note the name the registry holds, to tell a rename from it.
-
-        Core re-adds the same entity when its entity_id changes, and a name
-        saved along with it arrives that way instead of as an update. It is
-        checked once added: a reload while core is still adding it leaves a copy.
-        """
-        readded = self._name_noted
-        if not readded and (entry := self.registry_entry):
-            self._name_in_registry = entry.name
-        self._name_noted = True
+        """Start telling of the alarms that come due from now on."""
         await super().async_added_to_hass()
-        if readded:
-            self.async_on_remove(
-                async_call_later(self.hass, 0, self._async_recheck_name)
-            )
         self._reminding_since = self._reminding_since or dt_util.utcnow()
         self.async_on_remove(self._async_stop_reminding)
         self._async_remind()
@@ -100,20 +71,73 @@ class HaCaldavEntity(CoordinatorEntity[HaCaldavCoordinator]):
             earliest = max(earliest, self._reminding_since)
         upcoming: datetime | None = None
         known = set()
-        for reminder in self.coordinator.reminders[self._half]:
-            known.add(reminder.key)
-            if reminder.at > now:
-                upcoming = min(upcoming or reminder.at, reminder.at)
-            elif reminder.at > earliest and reminder.key not in self._reminded:
-                self._reminded.add(reminder.key)
-                self.hass.bus.async_fire(
-                    EVENT_REMINDER, {"entity_id": self.entity_id, **reminder.data}
-                )
+        for half in self._halves:
+            for reminder in self.coordinator.reminders[half]:
+                key = (half, *reminder.key)
+                known.add(key)
+                if reminder.at > now:
+                    upcoming = min(upcoming or reminder.at, reminder.at)
+                elif reminder.at > earliest and key not in self._reminded:
+                    self._reminded.add(key)
+                    self._async_fire(half, reminder.data)
         self._reminded &= known
         if upcoming is not None:
             self._next_reminder = async_track_point_in_utc_time(
                 self.hass, self._async_remind, upcoming
             )
+
+    @callback
+    def _async_fire(self, half: str, data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+
+class HaCaldavEntity(RemindingEntity):
+    """One entity for one half of a calendar."""
+
+    # Which half of the collection this entity reads.
+    _half: str
+    runtime_data: HaCaldavRuntimeData
+    _name_in_registry: str | None = None
+    _name_noted = False
+
+    @property
+    def addresses(self) -> list[str]:
+        """Return the calendar user addresses of whoever owns this calendar."""
+        if self.managed.addresses is not None:
+            return self.managed.addresses
+        return self.runtime_data.address_set
+
+    @property
+    def available(self) -> bool:
+        """Whether this entity's own half of the collection is being read."""
+        return super().available and not self.coordinator.halves[self._half].dead
+
+    def __init__(self, managed: ManagedCalendar) -> None:
+        """Initialize the entity."""
+        super().__init__(managed)
+        self._halves = (self._half,)
+        self._attr_name = managed.name
+
+    async def async_added_to_hass(self) -> None:
+        """Note the name the registry holds, to tell a rename from it.
+
+        Core re-adds the same entity when its entity_id changes, and a name
+        saved along with it arrives that way instead of as an update. It is
+        checked once added: a reload while core is still adding it leaves a copy.
+        """
+        readded = self._name_noted
+        if not readded and (entry := self.registry_entry):
+            self._name_in_registry = entry.name
+        self._name_noted = True
+        await super().async_added_to_hass()
+        if readded:
+            self.async_on_remove(
+                async_call_later(self.hass, 0, self._async_recheck_name)
+            )
+
+    @callback
+    def _async_fire(self, half: str, data: dict[str, Any]) -> None:
+        self.hass.bus.async_fire(EVENT_REMINDER, {"entity_id": self.entity_id, **data})
 
     @callback
     def _async_recheck_name(self, _now: datetime) -> None:

@@ -2024,7 +2024,11 @@ async def test_deleting_a_calendar_whose_path_ends_in_todo_spares_its_neighbor(
         )
         await hass.async_block_till_done()
 
-    assert sorted(removed) == ["calendar.work_todo", "todo.work_todo"]
+    assert sorted(removed) == [
+        "calendar.work_todo",
+        "event.work_todo_reminders",
+        "todo.work_todo",
+    ]
 
 
 async def test_a_search_without_a_text_returns_every_event_of_the_window(

@@ -149,6 +149,21 @@
       "description": "Il server dietro {account} non supporta il report sync-collection (RFC 6578), quindi ogni interrogazione deve scaricare l'intera finestra invece delle sole modifiche. Funziona tutto, ma costa di più. Un intervallo di interrogazione più lungo riduce il carico."
     }
   },
+  "entity": {
+    "event": {
+      "reminder": {
+        "name": "{calendar} promemoria",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "event": "Evento",
+              "todo": "Attività"
+            }
+          }
+        }
+      }
+    }
+  },
   "exceptions": {
     "alarm_needs_date": {
       "message": "Un promemoria ha bisogno di una data di inizio o di scadenza da cui contare."

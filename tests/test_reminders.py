@@ -294,3 +294,105 @@ async def test_an_unloaded_account_stops_reminding(
     await _move_to(hass, freezer, NOW + timedelta(minutes=105))
 
     assert fired == []
+
+
+async def test_an_event_alarm_reaches_the_reminder_entity(
+    hass: HomeAssistant, freezer
+) -> None:
+    calendar = _calendar(
+        events=[
+            _event(
+                "DTSTART:20260706T100000Z\nDTEND:20260706T110000Z\n"
+                "LOCATION:Office\n" + _alarm("TRIGGER:-PT15M")
+            )
+        ]
+    )
+    await _setup(hass, calendar)
+    state = hass.states.get("event.personal_reminders")
+    assert state.name == "Personal reminders"
+    assert state.state == "unknown"
+    assert state.attributes["event_types"] == ["event", "todo"]
+
+    await _move_to(hass, freezer, NOW + timedelta(minutes=105))
+
+    state = hass.states.get("event.personal_reminders")
+    assert datetime.fromisoformat(state.state) == NOW + timedelta(minutes=105)
+    assert state.attributes["event_type"] == "event"
+    assert state.attributes["uid"] == "uid-1"
+    assert state.attributes["summary"] == "Standup"
+    assert state.attributes["location"] == "Office"
+    assert state.attributes["alarm"]["minutes_before"] == 15
+    assert "entity_id" not in state.attributes
+
+
+async def test_a_to_do_alarm_reaches_the_reminder_entity_as_a_to_do(
+    hass: HomeAssistant, freezer
+) -> None:
+    calendar = _calendar(
+        todos=[_todo("DUE:20260706T090000Z\n" + _alarm("TRIGGER;RELATED=END:-PT30M"))]
+    )
+    await _setup(hass, calendar)
+
+    await _move_to(hass, freezer, NOW + timedelta(minutes=30))
+
+    state = hass.states.get("event.personal_reminders")
+    assert state.attributes["event_type"] == "todo"
+    assert state.attributes["summary"] == "Bins"
+    assert datetime.fromisoformat(state.attributes["due"]) == NOW + timedelta(hours=1)
+
+
+async def test_alarms_due_together_change_the_reminder_entity_once_each(
+    hass: HomeAssistant, freezer
+) -> None:
+    """An automation on the entity runs once per state change."""
+    trigger = "DTSTART:20260706T100000Z\nDTEND:20260706T110000Z\n" + _alarm(
+        "TRIGGER:-PT15M"
+    )
+    calendar = _calendar(
+        events=[_event(trigger, uid="uid-1"), _event(trigger, uid="uid-2")]
+    )
+    await _setup(hass, calendar)
+    changes = async_capture_events(hass, "state_changed")
+
+    await _move_to(hass, freezer, NOW + timedelta(minutes=105))
+
+    told = [
+        change.data["new_state"].attributes["uid"]
+        for change in changes
+        if change.data["entity_id"] == "event.personal_reminders"
+    ]
+    assert sorted(told) == ["uid-1", "uid-2"]
+
+
+async def test_a_calendar_without_to_dos_offers_only_event_reminders(
+    hass: HomeAssistant,
+) -> None:
+    from custom_components.ha_caldav.capability import Capability
+
+    with patch(
+        "custom_components.ha_caldav.fetch_capabilities",
+        return_value={
+            "/remote.php/dav/Personal": Capability(frozenset({"VEVENT"}), True)
+        },
+    ):
+        await _setup(hass, _calendar())
+
+    state = hass.states.get("event.personal_reminders")
+    assert state.attributes["event_types"] == ["event"]
+
+
+async def test_a_canceled_event_does_not_remind(hass: HomeAssistant, freezer) -> None:
+    calendar = _calendar(
+        events=[
+            _event(
+                "DTSTART:20260706T100000Z\nDTEND:20260706T110000Z\n"
+                "STATUS:CANCELLED\n" + _alarm("TRIGGER:-PT15M")
+            )
+        ]
+    )
+    fired = await _setup(hass, calendar)
+
+    await _move_to(hass, freezer, NOW + timedelta(minutes=105))
+
+    assert fired == []
+    assert hass.states.get("event.personal_reminders").state == "unknown"

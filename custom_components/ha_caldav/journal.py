@@ -26,7 +26,7 @@ from .const import (
 )
 from .coordinator import get_attr_value, master_of, to_local
 from .errors import Refused
-from .event import apply_extras, read_extras, replace
+from .extras import apply_extras, read_extras, replace
 
 # What a journal entry shares with an event; STATUS has its own vocabulary.
 _SHARED = (

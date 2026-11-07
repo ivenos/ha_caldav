@@ -702,7 +702,7 @@ def test_sort_order_survives_a_round_trip(calendar) -> None:
 
 
 def test_an_event_with_alarms_and_attendees_is_accepted(calendar) -> None:
-    from custom_components.ha_caldav.event import read_extras
+    from custom_components.ha_caldav.extras import read_extras
 
     create_event(
         calendar,
@@ -996,7 +996,7 @@ OTHER = os.environ.get("CALDAV_OTHER_USERNAME", "")
 
 
 def _extras(calendar) -> dict:
-    from custom_components.ha_caldav.event import read_extras
+    from custom_components.ha_caldav.extras import read_extras
 
     found = calendar.search(start=RANGE_START, end=RANGE_END, event=True)
     return read_extras(found[0].vobject_instance.vevent)

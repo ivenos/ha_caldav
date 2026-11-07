@@ -59,7 +59,7 @@ from custom_components.ha_caldav.coordinator import (
     to_todo,
 )
 from custom_components.ha_caldav.errors import Refused
-from custom_components.ha_caldav.event import apply_extras, read_extras, rule_from
+from custom_components.ha_caldav.extras import apply_extras, read_extras, rule_from
 from custom_components.ha_caldav.recurrence import (
     delete_event,
     respond_to_invitation,

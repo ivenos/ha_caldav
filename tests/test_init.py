@@ -531,7 +531,7 @@ async def test_a_calendar_the_user_unticked_loses_its_entities(
     kept = {
         e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)
     }
-    assert kept == {"calendar.personal", "todo.personal"}
+    assert kept == {"calendar.personal", "todo.personal", "event.personal_reminders"}
 
 
 async def test_the_migration_is_reachable_at_all(hass: HomeAssistant) -> None:
@@ -1052,6 +1052,18 @@ async def test_the_entities_of_a_calendar_deleted_on_the_server_go(
     await _next_poll(hass)
     assert registry.async_get("calendar.personal") is None
     assert registry.async_get("todo.personal") is None
+    assert registry.async_get("event.personal_reminders") is None
+
+
+async def test_the_reminder_entity_stays_while_its_calendar_is_listed(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    await _setup_on_account(hass)
+
+    for _ in range(3):
+        await _next_poll(hass)
+
+    assert er.async_get(hass).async_get("event.personal_reminders") is not None
 
 
 async def test_a_selected_calendar_the_listing_missed_is_loaded_at_the_next_poll(

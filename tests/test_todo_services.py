@@ -491,6 +491,28 @@ async def test_a_calendar_that_holds_both_is_exported_once(hass: HomeAssistant) 
     export.assert_called_once()
 
 
+async def test_a_list_that_holds_no_events_is_exported_once_with_its_reminders(
+    hass: HomeAssistant,
+) -> None:
+    """A call naming an area or a label reaches the reminder entity too."""
+    await _setup(hass, [_todo_list("Tasks")], todos_only=("Tasks",))
+    assert hass.states.get("event.tasks_reminders") is not None
+
+    with patch(
+        "custom_components.ha_caldav.services.export_ics", return_value=ICS
+    ) as export:
+        result = await hass.services.async_call(
+            DOMAIN,
+            "export_ics",
+            {"entity_id": ["todo.tasks", "event.tasks_reminders"]},
+            blocking=True,
+            return_response=True,
+        )
+
+    assert list(result) == ["todo.tasks"]
+    export.assert_called_once()
+
+
 async def test_the_todo_actions_exist_while_the_account_retries(
     hass: HomeAssistant,
 ) -> None:

@@ -13,6 +13,7 @@ from homeassistant.components.calendar import (
     CalendarEntity,
     CalendarEvent,
 )
+from homeassistant.components.event import DOMAIN as EVENT_DOMAIN
 from homeassistant.components.todo import DOMAIN as TODO_DOMAIN
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import (
@@ -127,13 +128,14 @@ from .coordinator import (
     components_of,
     master_of,
     occurrences,
+    reminder_unique_id,
     sort_order,
     to_event,
     to_todo,
     todo_unique_id,
 )
 from .errors import as_reported
-from .event import awaits_reply, read_extras
+from .extras import awaits_reply, read_extras
 from .journal import create_journal, delete_journal, read_journals, update_journal
 from .options import account_settings
 from .recurrence import respond_to_invitation
@@ -613,6 +615,8 @@ def _collection_entities(hass: HomeAssistant) -> dict[str, Any]:
     """
     found: dict[str, Any] = {}
     for platform in async_get_platforms(hass, DOMAIN):
+        if platform.domain not in (CALENDAR_DOMAIN, TODO_DOMAIN):
+            continue
         for entity_id, entity in platform.entities.items():
             if (
                 platform.domain == CALENDAR_DOMAIN
@@ -1407,6 +1411,7 @@ def _async_forget_entities(
     for domain, unique_id in (
         (CALENDAR_DOMAIN, calendar_unique_id(entry.entry_id, url)),
         (TODO_DOMAIN, todo_unique_id(entry.entry_id, url)),
+        (EVENT_DOMAIN, reminder_unique_id(entry.entry_id, url)),
     ):
         if entity_id := registry.async_get_entity_id(domain, DOMAIN, unique_id):
             registry.async_remove(entity_id)

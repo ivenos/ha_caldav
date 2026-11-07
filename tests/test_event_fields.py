@@ -7,7 +7,7 @@ import pytest
 import vobject
 
 from custom_components.ha_caldav.errors import Refused
-from custom_components.ha_caldav.event import apply_extras, read_extras
+from custom_components.ha_caldav.extras import apply_extras, read_extras
 
 
 def _vevent(body: str):
@@ -575,7 +575,7 @@ def test_a_sub_minute_alarm_still_reads_as_one_minute_before() -> None:
 
 
 def test_an_address_is_compared_without_its_scheme_or_case() -> None:
-    from custom_components.ha_caldav.event import comparable_address
+    from custom_components.ha_caldav.extras import comparable_address
 
     assert comparable_address(" MailTo:User@Example.com ") == "user@example.com"
 
@@ -597,7 +597,7 @@ def test_categories_are_reported_without_blanks_or_padding() -> None:
 
 def test_an_all_day_until_keeps_its_date_wherever_this_runs() -> None:
     """Google writes a DATE start with a UTC UNTIL."""
-    from custom_components.ha_caldav.event import rule_from
+    from custom_components.ha_caldav.extras import rule_from
 
     document = ICalCalendar.from_ical(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
@@ -616,7 +616,7 @@ def test_an_all_day_until_keeps_its_date_wherever_this_runs() -> None:
 
 def test_a_floating_until_is_read_in_local_terms_not_in_utc() -> None:
     """RFC 5545 3.3.10 has the UNTIL of a floating series be local time too."""
-    from custom_components.ha_caldav.event import rule_from
+    from custom_components.ha_caldav.extras import rule_from
 
     document = ICalCalendar.from_ical(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
@@ -699,7 +699,7 @@ def test_an_attendee_added_for_the_first_time_is_asked_to_reply() -> None:
 def test_attendees_written_without_an_organizer_get_one() -> None:
     """RFC 5546 3 requires ORGANIZER wherever ATTENDEE appears, and sabre/dav
     answers 500 on deleting an object without one."""
-    from custom_components.ha_caldav.event import apply_extras
+    from custom_components.ha_caldav.extras import apply_extras
 
     component = ICalEvent()
     apply_extras(
@@ -712,7 +712,7 @@ def test_attendees_written_without_an_organizer_get_one() -> None:
 
 
 def test_an_organizer_the_server_already_holds_is_not_claimed() -> None:
-    from custom_components.ha_caldav.event import apply_extras
+    from custom_components.ha_caldav.extras import apply_extras
 
     component = ICalEvent()
     component.add("organizer", "mailto:ada@example.com")
@@ -726,7 +726,7 @@ def test_an_organizer_the_server_already_holds_is_not_claimed() -> None:
 
 
 def test_an_event_without_attendees_gets_no_organizer() -> None:
-    from custom_components.ha_caldav.event import apply_extras
+    from custom_components.ha_caldav.extras import apply_extras
 
     component = ICalEvent()
     apply_extras(component, {"summary": "Alone"}, own_address="mailto:iven@example.com")
@@ -737,7 +737,7 @@ def test_an_event_without_attendees_gets_no_organizer() -> None:
 @pytest.mark.parametrize("interval", ["1", "2", "12"])
 def test_an_ordinary_interval_is_accepted(interval: str) -> None:
     """Many clients write INTERVAL=1 out explicitly."""
-    from custom_components.ha_caldav.event import rule_from
+    from custom_components.ha_caldav.extras import rule_from
 
     document = ICalCalendar.from_ical(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
@@ -756,7 +756,7 @@ def test_an_ordinary_interval_is_accepted(interval: str) -> None:
 
 def test_a_line_break_in_the_organizer_does_not_reach_the_content_line() -> None:
     """icalendar asserts on an unescaped line break."""
-    from custom_components.ha_caldav.event import apply_extras
+    from custom_components.ha_caldav.extras import apply_extras
 
     component = ICalEvent()
 
@@ -771,7 +771,7 @@ def test_a_line_break_in_the_organizer_does_not_reach_the_content_line() -> None
 
 
 def test_a_line_break_in_the_url_does_not_reach_the_content_line() -> None:
-    from custom_components.ha_caldav.event import apply_extras
+    from custom_components.ha_caldav.extras import apply_extras
 
     component = ICalEvent()
 
@@ -788,7 +788,7 @@ def test_a_line_break_in_the_url_does_not_reach_the_content_line() -> None:
 def test_a_line_break_in_an_attendee_does_not_reach_the_content_line() -> None:
     """A YAML folded scalar leaves a trailing newline, and icalendar asserts on a
     line feed but writes a bare carriage return into the document."""
-    from custom_components.ha_caldav.event import apply_extras
+    from custom_components.ha_caldav.extras import apply_extras
 
     component = ICalEvent()
 

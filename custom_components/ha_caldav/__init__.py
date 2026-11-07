@@ -52,6 +52,7 @@ from .coordinator import (
     HaCaldavRuntimeData,
     ManagedCalendar,
     calendar_unique_id,
+    reminder_unique_id,
     todo_unique_id,
 )
 from .errors import rejected
@@ -61,7 +62,9 @@ from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.CALENDAR, Platform.TODO]
+PLATFORMS = [Platform.CALENDAR, Platform.TODO, Platform.EVENT]
+
+_SUFFIXES = {Platform.TODO: "-todo", Platform.EVENT: "-reminder"}
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -118,21 +121,19 @@ def _normalized_unique_id(entry_id: str, unique_id: str, domain: str) -> str | N
     """Return a unique id rebuilt on the calendar key, or None if it is not ours."""
     if (key := _registered_key(entry_id, unique_id, domain)) is None:
         return None
-    suffix = "-todo" if domain == Platform.TODO else ""
-    return f"{entry_id}-{calendar_key(key)}{suffix}"
+    return f"{entry_id}-{calendar_key(key)}{_SUFFIXES.get(domain, '')}"
 
 
 def _registered_key(entry_id: str, unique_id: str, domain: str) -> str | None:
     """Return the calendar part of an entity's unique id, or None if it is not ours.
 
-    The half comes from the registry domain: a collection url may itself end
+    The suffix comes from the registry domain: a collection url may itself end
     in "-todo".
     """
     prefix = f"{entry_id}-"
     if not unique_id.startswith(prefix):
         return None
-    rest = unique_id.removeprefix(prefix)
-    return rest.removesuffix("-todo") if domain == Platform.TODO else rest
+    return unique_id.removeprefix(prefix).removesuffix(_SUFFIXES.get(domain, ""))
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> bool:
@@ -478,6 +479,11 @@ def _async_prune_entities(
                 todo_unique_id(entry.entry_id, url),
                 item.capability.supports_todos,
             ),
+            (
+                Platform.EVENT,
+                reminder_unique_id(entry.entry_id, url),
+                item.capability.supports_events or item.capability.supports_todos,
+            ),
         ):
             if supported:
                 continue
@@ -512,6 +518,7 @@ def _async_prune_deselected(
         for pair in (
             (Platform.CALENDAR, calendar_unique_id(entry.entry_id, calendar.url)),
             (Platform.TODO, todo_unique_id(entry.entry_id, calendar.url)),
+            (Platform.EVENT, reminder_unique_id(entry.entry_id, calendar.url)),
         )
     }
     for record in er.async_entries_for_config_entry(registry, entry.entry_id):

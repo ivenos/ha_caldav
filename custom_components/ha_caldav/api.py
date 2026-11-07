@@ -35,7 +35,7 @@ from .const import (
     SORT_ORDER_PROPERTY,
 )
 from .errors import NETWORK_ERRORS, WRITE_ERRORS, Refused, rejected
-from .event import (
+from .extras import (
     apply_extras,
     as_datetime,
     check_rule,

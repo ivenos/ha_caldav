@@ -149,6 +149,21 @@
       "description": "Le serveur derrière {account} ne prend pas en charge le rapport sync-collection (RFC 6578) ; chaque interrogation doit donc récupérer toute la fenêtre au lieu des seules modifications. Tout fonctionne, mais cela demande plus de ressources. Un intervalle d'interrogation plus long limite la charge."
     }
   },
+  "entity": {
+    "event": {
+      "reminder": {
+        "name": "{calendar} rappels",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "event": "Événement",
+              "todo": "Tâche"
+            }
+          }
+        }
+      }
+    }
+  },
   "exceptions": {
     "alarm_needs_date": {
       "message": "Un rappel a besoin d'une date de début ou d'échéance à partir de laquelle compter."

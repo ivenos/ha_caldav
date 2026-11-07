@@ -149,6 +149,21 @@
       "description": "El servidor de {account} no admite el informe sync-collection (RFC 6578), así que cada sondeo tiene que traer toda la ventana en lugar de solo lo que cambió. Todo funciona, pero cuesta más. Un intervalo de sondeo más largo reduce la carga."
     }
   },
+  "entity": {
+    "event": {
+      "reminder": {
+        "name": "{calendar} recordatorios",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "event": "Evento",
+              "todo": "Tarea"
+            }
+          }
+        }
+      }
+    }
+  },
   "exceptions": {
     "alarm_needs_date": {
       "message": "Un recordatorio necesita una fecha de inicio o de vencimiento desde la que contar."

@@ -31,11 +31,15 @@ CalDAV Complete is a Home Assistant integration that connects calendars and to-d
 
 ## Installation
 
-Requires Home Assistant 2026.3 or newer, HACS and an account on a CalDAV server.
+Requires Home Assistant 2026.3 or newer and an account on a CalDAV server.
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ivenos&repository=ha_caldav&category=integration)
+<!-- ha-marketplace:exclude-start -->
+[![Open your Home Assistant instance and open a repository inside the Marketplace.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ivenos&repository=ha_caldav&category=integration)
 
-Or add `https://github.com/ivenos/ha_caldav` to HACS as a custom repository of type **Integration**. Download it, restart Home Assistant and add the integration:
+Or open **Settings → Marketplace → Add from link** and add `https://github.com/ivenos/ha_caldav` as an **Integration**. Before Home Assistant 2026.11, add it to HACS as a custom repository of type **Integration**.
+<!-- ha-marketplace:exclude-end -->
+
+Install it, restart Home Assistant and add the integration:
 
 [![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=ha_caldav)
 
@@ -76,7 +80,7 @@ Called as `ha_caldav.<action>` on a calendar or to-do list, `create_calendar` an
 | `share_calendar`, `unshare_calendar`, `get_calendar_shares` | Share a calendar with another account on the server for reading or writing, or stop sharing it, administrators only. Returns its `shares` |
 | `create_calendar`, `delete_calendar` | Create a calendar for events, to-dos or journal entries, or delete one, administrators only |
 
-An alarm of an event within the days ahead or of an open to-do fires the event `ha_caldav_reminder` with `entity_id`, `uid`, `recurrence_id`, `summary`, `description`, `location`, `start`, `end` or `due`, and the `alarm`. Completing, canceling or deleting a to-do does the same to its subtasks, and reopening one reopens the to-dos above it.
+An alarm of an event within the days ahead or of an open to-do fires the event `ha_caldav_reminder` with `entity_id`, `uid`, `recurrence_id`, `summary`, `description`, `location`, `start`, `end` or `due`, and the `alarm`. Each calendar also gets a reminder entity named after it, which gets the same fields except `entity_id`, with the event type `event` or `todo`, and can be picked as a trigger in the automation editor. Completing, canceling or deleting a to-do does the same to its subtasks, and reopening one reopens the to-dos above it.
 
 ## Compatibility
 

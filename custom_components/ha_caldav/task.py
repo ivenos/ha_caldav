@@ -28,7 +28,7 @@ from .const import (
     TODO_STATUSES,
 )
 from .errors import Refused
-from .event import apply_extras, check_rule, framed_rule, read_extras, replace, to_utc
+from .extras import apply_extras, check_rule, framed_rule, read_extras, replace, to_utc
 
 # RFC 5545 knows four states where Home Assistant has two.
 SETTLED = frozenset({"COMPLETED", "CANCELLED"})

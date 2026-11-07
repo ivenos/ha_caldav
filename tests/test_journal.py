@@ -248,6 +248,7 @@ async def test_a_calendar_of_nothing_but_journal_entries_shows_the_dated_ones(
     state = hass.states.get("calendar.diary")
     assert state.attributes["supported_features"] == 0
     assert hass.states.get("todo.diary") is None
+    assert hass.states.get("event.diary_reminders") is None
     client = await hass_client()
     response = await client.get(
         "/api/calendars/calendar.diary?start=2026-07-01T00:00:00Z&end=2026-08-01T00:00:00Z"
@@ -361,3 +362,24 @@ async def test_an_entry_cannot_have_two_dates(hass: HomeAssistant) -> None:
             },
             blocking=True,
         )
+
+
+async def test_a_canceled_journal_entry_is_left_out_of_the_calendar(
+    hass: HomeAssistant, hass_client
+) -> None:
+    calendars = await _setup(hass, {"Diary": {"VJOURNAL"}})
+    calendars["Diary"].search.return_value = [
+        stored(ENTRY),
+        stored(
+            ENTRY.replace("note-1", "dropped").replace(
+                "SUMMARY:Monday", "STATUS:CANCELLED\r\nSUMMARY:Dropped"
+            )
+        ),
+    ]
+
+    client = await hass_client()
+    response = await client.get(
+        "/api/calendars/calendar.diary?start=2026-07-01T00:00:00Z&end=2026-08-01T00:00:00Z"
+    )
+
+    assert [event["summary"] for event in await response.json()] == ["Monday"]

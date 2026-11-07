@@ -16,7 +16,7 @@ import vobject
 from custom_components.ha_caldav.api import zoned_document
 from custom_components.ha_caldav.coordinator import sort_key, to_event
 from custom_components.ha_caldav.errors import Refused
-from custom_components.ha_caldav.event import apply_extras, read_extras, to_utc
+from custom_components.ha_caldav.extras import apply_extras, read_extras, to_utc
 from custom_components.ha_caldav.recurrence import delete_event, update_event
 
 UID = "prop-1"

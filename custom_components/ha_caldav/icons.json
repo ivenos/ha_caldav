@@ -1,4 +1,11 @@
 {
+  "entity": {
+    "event": {
+      "reminder": {
+        "default": "mdi:bell-ring-outline"
+      }
+    }
+  },
   "services": {
     "create_event": "mdi:calendar-plus",
     "update_event": "mdi:calendar-edit",

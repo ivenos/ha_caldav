@@ -43,7 +43,7 @@ from .api import (
 )
 from .const import ATTR_ORGANIZER, ATTR_TIME_ZONE
 from .errors import NETWORK_ERRORS, WRITE_ERRORS, Refused
-from .event import (
+from .extras import (
     apply_extras,
     as_datetime,
     check_rule,

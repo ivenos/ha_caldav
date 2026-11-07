@@ -149,6 +149,21 @@
       "description": "Der Server hinter {account} unterstützt den sync-collection-Report (RFC 6578) nicht. Deshalb muss bei jeder Abfrage der gesamte Zeitraum geladen werden statt nur der Änderungen. Es funktioniert alles, kostet aber mehr. Ein längeres Abfrageintervall hält die Last klein."
     }
   },
+  "entity": {
+    "event": {
+      "reminder": {
+        "name": "{calendar} Erinnerungen",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "event": "Termin",
+              "todo": "Aufgabe"
+            }
+          }
+        }
+      }
+    }
+  },
   "exceptions": {
     "alarm_needs_date": {
       "message": "Eine Erinnerung braucht ein Start- oder Fälligkeitsdatum, von dem aus sie zählt."

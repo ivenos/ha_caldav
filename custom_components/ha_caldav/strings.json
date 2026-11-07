@@ -149,6 +149,21 @@
       "description": "The server behind {account} does not support the sync-collection report (RFC 6578), so every poll has to fetch the whole window instead of only what changed. Everything works, it just costs more. A longer poll interval keeps the load down."
     }
   },
+  "entity": {
+    "event": {
+      "reminder": {
+        "name": "{calendar} reminders",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "event": "Event",
+              "todo": "To-do"
+            }
+          }
+        }
+      }
+    }
+  },
   "exceptions": {
     "alarm_needs_date": {
       "message": "A reminder needs a start or a due date to count from."

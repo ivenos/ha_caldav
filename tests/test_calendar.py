@@ -166,6 +166,67 @@ async def test_a_window_holding_only_past_events_has_no_upcoming_one(
     assert _entity(hass, "calendar.personal").event is None
 
 
+def _canceled(summary: str, start_offset: timedelta):
+    start = dt_util.utcnow() + start_offset
+    end = start + timedelta(hours=1)
+    return stored(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
+        f"BEGIN:VEVENT\nUID:{summary}\nDTSTAMP:20260101T000000Z\n"
+        f"DTSTART:{start:%Y%m%dT%H%M%S}Z\nDTEND:{end:%Y%m%dT%H%M%S}Z\n"
+        f"STATUS:CANCELLED\nSUMMARY:{summary}\nEND:VEVENT\nEND:VCALENDAR\n"
+    )
+
+
+async def test_a_canceled_event_does_not_turn_the_calendar_on(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.search.return_value = [
+        _canceled("Canceled", timedelta(minutes=-30)),
+        _search_item("Later", timedelta(hours=4)),
+    ]
+    await _setup(hass, [calendar])
+
+    assert hass.states.get("calendar.personal").state == "off"
+    assert _entity(hass, "calendar.personal").event.summary == "Later"
+
+
+async def test_a_canceled_occurrence_is_left_out_of_the_panel(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    start = (dt_util.utcnow() + timedelta(days=1)).replace(microsecond=0)
+    second = start + timedelta(days=1)
+    calendar.search.side_effect = lambda **kw: (
+        []
+        if kw.get("todo")
+        else [
+            stored(
+                "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n"
+                "BEGIN:VEVENT\nUID:series-1\nDTSTAMP:20260101T000000Z\n"
+                f"DTSTART:{start:%Y%m%dT%H%M%S}Z\n"
+                f"DTEND:{start + timedelta(hours=1):%Y%m%dT%H%M%S}Z\n"
+                "RRULE:FREQ=DAILY;COUNT=3\nSUMMARY:Standup\nEND:VEVENT\n"
+                "BEGIN:VEVENT\nUID:series-1\nDTSTAMP:20260101T000000Z\n"
+                f"RECURRENCE-ID:{second:%Y%m%dT%H%M%S}Z\n"
+                f"DTSTART:{second:%Y%m%dT%H%M%S}Z\n"
+                f"DTEND:{second + timedelta(hours=1):%Y%m%dT%H%M%S}Z\n"
+                "STATUS:CANCELLED\nSUMMARY:Standup\nEND:VEVENT\n"
+                "END:VCALENDAR\n",
+                '"e"',
+            )
+        ]
+    )
+    await _setup(hass, [calendar])
+    entity = _entity(hass, "calendar.personal")
+
+    events = await entity.async_get_events(
+        hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
+    )
+
+    assert [event.start for event in events] == [start, start + timedelta(days=2)]
+
+
 async def test_next_event_ignores_server_result_order(hass: HomeAssistant) -> None:
     # caldav's search makes no ordering promise.
     calendar = _calendar("Personal")

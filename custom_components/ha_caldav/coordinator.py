@@ -25,7 +25,7 @@ from .capability import Capability
 from .color import Collection, fetch_collections
 from .connection import calendar_key, display_name
 from .errors import rejected
-from .event import alarm_moments, check_expandable, read_extras, to_utc
+from .extras import alarm_moments, check_expandable, read_extras, to_utc
 
 try:
     from homeassistant.components.calendar import CalendarEventStatus
@@ -174,6 +174,11 @@ def todo_unique_id(entry_id: str, url: object) -> str:
     return f"{calendar_unique_id(entry_id, url)}-todo"
 
 
+def reminder_unique_id(entry_id: str, url: object) -> str:
+    """Return the unique id of a reminder entity."""
+    return f"{calendar_unique_id(entry_id, url)}-reminder"
+
+
 class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
     """Fetch the events and to-do items of a single calendar.
 
@@ -292,7 +297,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             event
             for entry in entries
             if entry is not None
-            and _dated(entry)
+            and _shown(entry)
             and (event := to_event(entry)) is not None
         ]
 
@@ -481,7 +486,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
                     etags[uid] = etag
             # RFC 5545 makes DTSTART optional once the object carries a METHOD.
             vevents.extend(
-                vevent for vevent in occurrences(item, start, end) if _dated(vevent)
+                vevent for vevent in occurrences(item, start, end) if _shown(vevent)
             )
         if items and not etags:
             _LOGGER.debug("The window came back without an etag on anything")
@@ -794,6 +799,16 @@ def _dated(vevent: Any) -> bool:
     """
     start = getattr(getattr(vevent, "dtstart", None), "value", None)
     return isinstance(start, date)
+
+
+def _shown(component: Any) -> bool:
+    """Return whether a calendar entity lists the component.
+
+    Core's CalendarEventStatus has no value for a canceled event, which a
+    calendar entity leaves out.
+    """
+    status = str(get_attr_value(component, "status") or "").upper()
+    return _dated(component) and status != "CANCELLED"
 
 
 def sort_key(vevent: Any) -> datetime:

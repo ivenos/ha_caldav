@@ -31,7 +31,7 @@ from custom_components.ha_caldav.api import (
 )
 from custom_components.ha_caldav.const import EVENT_ATTRIBUTES, SORT_ORDER_PROPERTY
 from custom_components.ha_caldav.errors import Refused
-from custom_components.ha_caldav.event import apply_extras
+from custom_components.ha_caldav.extras import apply_extras
 from custom_components.ha_caldav.recurrence import delete_event, respond_to_invitation
 
 EVENT = (

@@ -79,8 +79,15 @@ def share_calendar(calendar: caldav.Calendar, user: str, write: bool) -> None:
     """
     dialect, _ = _invite(calendar)
     href = _href(dialect, user)
+    before = {(share["href"], share["access"]) for share in read_shares(calendar)}
     _post(calendar, dialect, href, "read-write" if write else "read")
-    listed = [share for share in read_shares(calendar) if _same(share["href"], href)]
+    after = read_shares(calendar)
+    listed = [share for share in after if _same(share["href"], href)] or [
+        # Nextcloud takes an email address and lists the account it belongs to.
+        share
+        for share in after
+        if (share["href"], share["access"]) not in before
+    ]
     if not listed or listed[0].get("invalid"):
         if listed:
             _post(calendar, dialect, href, None)

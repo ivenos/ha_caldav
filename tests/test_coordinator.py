@@ -1,6 +1,11 @@
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import patch
+import warnings
 from zoneinfo import ZoneInfo
 
+import caldav
+from caldav.davclient import requests
 from conftest import stored
 from homeassistant.components.todo import TodoItemStatus
 from homeassistant.util import dt as dt_util
@@ -8,6 +13,7 @@ import pytest
 import vobject
 
 from custom_components.ha_caldav.coordinator import (
+    HaCaldavCoordinator,
     calendar_unique_id,
     components_of,
     get_attr_value,
@@ -268,8 +274,8 @@ def test_to_todo_without_due() -> None:
     assert to_todo(vtodo("SUMMARY:x")).due is None
 
 
-def test_to_todo_skips_items_home_assistant_cannot_address() -> None:
-    assert to_todo(vtodo("STATUS:NEEDS-ACTION")) is None
+def test_a_todo_without_a_summary_is_shown_untitled_as_nextcloud_tasks_does() -> None:
+    assert to_todo(vtodo("STATUS:NEEDS-ACTION")).summary == ""
 
 
 @pytest.mark.parametrize(
@@ -380,6 +386,23 @@ def test_a_series_in_a_zone_of_its_own_keeps_it_through_the_expansion() -> None:
     )
 
     assert [v.dtstart.value.astimezone(UTC).hour for v in found] == [7, 7]
+
+
+def test_a_series_is_expanded_without_the_call_caldav_deprecated() -> None:
+    item = stored(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
+        "BEGIN:VEVENT\nUID:series\nDTSTAMP:20260101T000000Z\n"
+        "DTSTART:20260706T090000Z\nDTEND:20260706T100000Z\n"
+        "RRULE:FREQ=WEEKLY;COUNT=2\nSUMMARY:Standup\nEND:VEVENT\nEND:VCALENDAR\n"
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        found = occurrences(
+            item, datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 8, 1, tzinfo=UTC)
+        )
+
+    assert [v.dtstart.value.day for v in found] == [6, 13]
 
 
 def test_the_unique_id_shapes_are_pinned() -> None:
@@ -524,3 +547,26 @@ def test_each_occurrence_under_a_ranged_exception_carries_the_id_of_its_own_slot
             datetime(2026, 7, 27, 9, 0, tzinfo=UTC),
         ),
     ]
+
+
+def test_a_failed_sync_report_does_not_read_the_whole_collection() -> None:
+    client = caldav.DAVClient(url="https://dav.example.com/")
+    calendar = caldav.Calendar(client=client, url="https://dav.example.com/cal/")
+    bodies: list[bytes] = []
+
+    def send(self, request, **kwargs) -> requests.Response:
+        bodies.append(request.body or b"")
+        reply = requests.Response()
+        reply.status_code = 504
+        reply.reason = "Gateway Timeout"
+        reply._content = b""
+        reply.url = request.url
+        reply.request = request
+        return reply
+
+    poller = SimpleNamespace(_sync_collection=True, _sync_token="t1", calendar=calendar)
+    with patch.object(requests.adapters.HTTPAdapter, "send", send):
+        assert HaCaldavCoordinator._sync_changed(poller) == (True, None)
+
+    assert bodies
+    assert all(b"sync-collection" in body for body in bodies)

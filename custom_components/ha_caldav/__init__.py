@@ -37,9 +37,12 @@ from .connection import (
     url_candidates,
 )
 from .const import (
+    CONF_BUSY_ONLY,
+    CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
     CONF_DAYS,
     CONF_INCLUDE_ALL_DAY,
+    CONF_PRINCIPAL,
     CONF_READ_ONLY,
     DOMAIN,
     ISSUE_BUILTIN_CALDAV,
@@ -140,6 +143,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
     """Set up the CalDAV account from a config entry."""
     client, calendars, delegations = await _async_connect(hass, entry)
     _async_key_by_url(hass, entry, calendars)
+    _async_follow_copies(hass, entry, delegations)
+    await _async_remember_principal(hass, entry, client)
 
     async def close_client() -> None:
         # Tearing down pooled sockets blocks.
@@ -177,6 +182,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
             continue
         capability = capability_for(capabilities, calendar)
         settings = calendar_settings(entry, calendar)
+        owner = _owner_addresses(calendar, delegations)
         managed.append(
             ManagedCalendar(
                 calendar=calendar,
@@ -190,9 +196,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
                     settings[CONF_INCLUDE_ALL_DAY],
                     scan_interval,
                     sync_collection,
+                    settings[CONF_BUSY_ONLY],
+                    address_set if owner is None else owner,
                 ),
                 read_only=settings[CONF_READ_ONLY],
-                addresses=_owner_addresses(calendar, delegations),
+                addresses=owner,
             )
         )
 
@@ -291,6 +299,24 @@ async def _async_connect(
     )
 
 
+async def _async_remember_principal(
+    hass: HomeAssistant, entry: HaCaldavConfigEntry, client: caldav.DAVClient
+) -> None:
+    """Store the principal url the flow tells this account apart by.
+
+    An entry set up by an earlier version does not have it yet.
+    """
+    principal = await hass.async_add_executor_job(_principal_url, client)
+    if entry.data.get(CONF_PRINCIPAL) != principal:
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_PRINCIPAL: principal}
+        )
+
+
+def _principal_url(client: caldav.DAVClient) -> str:
+    return str(client.principal().url)
+
+
 @callback
 def _async_key_by_url(
     hass: HomeAssistant, entry: HaCaldavConfigEntry, calendars: list[caldav.Calendar]
@@ -314,6 +340,38 @@ def _async_key_by_url(
         options[CONF_CALENDARS] = rewritten
     if options != entry.options:
         _LOGGER.debug("Keying the calendars of %s by url", entry.title)
+        hass.config_entries.async_update_entry(entry, options=options)
+
+
+@callback
+def _async_follow_copies(
+    hass: HomeAssistant, entry: HaCaldavConfigEntry, delegations: list[Delegation]
+) -> None:
+    """Move what the options say about SOGo's copies onto the calendars copied.
+
+    Earlier versions listed both, and the copies are left out now.
+    """
+    moved = {
+        copy: theirs
+        for delegation in delegations
+        for copy, theirs in delegation.copies.items()
+    }
+    if not moved:
+        return
+    options = dict(entry.options)
+    if selected := options.get(CONF_CALENDARS):
+        options[CONF_CALENDARS] = list(
+            dict.fromkeys(moved.get(key, key) for key in selected)
+        )
+    if isinstance(per_calendar := options.get(CONF_CALENDAR_OPTIONS), dict):
+        options[CONF_CALENDAR_OPTIONS] = {
+            **{
+                moved[key]: value for key, value in per_calendar.items() if key in moved
+            },
+            **{key: value for key, value in per_calendar.items() if key not in moved},
+        }
+    if options != entry.options:
+        _LOGGER.debug("Moving the options of SOGo's copies of %s", entry.title)
         hass.config_entries.async_update_entry(entry, options=options)
 
 

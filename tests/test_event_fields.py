@@ -734,6 +734,31 @@ def test_an_event_without_attendees_gets_no_organizer() -> None:
     assert component.get("ORGANIZER") is None
 
 
+def test_an_edit_leaving_the_attendees_alone_claims_no_organizer() -> None:
+    from custom_components.ha_caldav.extras import apply_extras
+
+    component = ICalEvent()
+    component.add("attendee", "mailto:ada@example.com")
+    apply_extras(
+        component,
+        {"url": "https://example.com/notes", "categories": ["work"]},
+        own_address="mailto:iven@example.com",
+    )
+
+    assert component.get("ORGANIZER") is None
+
+
+def test_clearing_the_organizer_of_attendees_names_the_account() -> None:
+    from custom_components.ha_caldav.extras import apply_extras
+
+    component = ICalEvent()
+    component.add("organizer", "mailto:ada@example.com")
+    component.add("attendee", "mailto:bob@example.com")
+    apply_extras(component, {"organizer": None}, own_address="mailto:iven@example.com")
+
+    assert str(component["ORGANIZER"]) == "mailto:iven@example.com"
+
+
 @pytest.mark.parametrize("interval", ["1", "2", "12"])
 def test_an_ordinary_interval_is_accepted(interval: str) -> None:
     """Many clients write INTERVAL=1 out explicitly."""
@@ -808,8 +833,11 @@ def test_an_organizer_named_by_principal_url_stays_a_url() -> None:
     """RFC 6638 lets calendar-user-address-set name a principal by its url, which
     sabre/dav and Nextcloud return for an account with no mail address."""
     component = _component()
-    component.add("ATTENDEE", "mailto:ann@example.com")
 
-    apply_extras(component, {}, "/remote.php/dav/principals/users/iven/")
+    apply_extras(
+        component,
+        {"attendees": ["ann@example.com"]},
+        "/remote.php/dav/principals/users/iven/",
+    )
 
     assert str(component["ORGANIZER"]) == "/remote.php/dav/principals/users/iven/"

@@ -164,15 +164,52 @@ def test_a_start_of_another_kind_than_the_due_date_is_refused() -> None:
     """RFC 5545 3.8.2.3 has DUE share the value type of DTSTART."""
     vtodo = _written("DUE;VALUE=DATE:20260710")
 
-    with pytest.raises(Refused, match="mixed_time_types"):
+    with pytest.raises(Refused, match="mixed_start_and_due"):
         apply_fields(vtodo, {"start": datetime(2026, 7, 6, 9, 0, tzinfo=UTC)})
 
 
 def test_a_start_after_the_due_date_is_refused() -> None:
     vtodo = _written("DUE;VALUE=DATE:20260710")
 
-    with pytest.raises(Refused, match="end_before_start"):
+    with pytest.raises(Refused, match="due_before_start"):
         apply_fields(vtodo, {"start": date(2026, 7, 11)})
+
+
+def test_a_refused_due_date_names_the_start_home_assistant_does_not_show() -> None:
+    vtodo = _written("DTSTART;VALUE=DATE:20260710")
+
+    with pytest.raises(Refused) as refusal:
+        apply_fields(vtodo, {"due": date(2026, 7, 9)})
+
+    assert refusal.value.key == "due_before_start"
+    assert refusal.value.placeholders == {"start": "2026-07-10"}
+
+
+def test_clearing_the_only_date_of_a_recurring_todo_is_refused() -> None:
+    vtodo = _written("DUE;VALUE=DATE:20260710", "RRULE:FREQ=WEEKLY")
+
+    with pytest.raises(Refused, match="rrule_needs_date"):
+        apply_fields(vtodo, {"due": None})
+
+
+def test_an_empty_status_takes_the_status_and_the_completion_away() -> None:
+    """RFC 5545 3.8.1.11 lets a VTODO go without STATUS."""
+    vtodo = _written(
+        "STATUS:COMPLETED", "COMPLETED:20260701T090000Z", "PERCENT-COMPLETE:100"
+    )
+
+    apply_fields(vtodo, {"status": None})
+
+    assert not {"STATUS", "COMPLETED", "PERCENT-COMPLETE"} & set(vtodo)
+
+
+def test_an_empty_percentage_leaves_the_status_as_it_is() -> None:
+    vtodo = _written("STATUS:COMPLETED", "PERCENT-COMPLETE:100")
+
+    apply_fields(vtodo, {"percent_complete": None})
+
+    assert str(vtodo["STATUS"]) == "COMPLETED"
+    assert "PERCENT-COMPLETE" not in vtodo
 
 
 def test_a_rule_is_counted_from_the_due_date_where_there_is_no_start() -> None:

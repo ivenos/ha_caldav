@@ -75,7 +75,9 @@
       "unknown": "Error inesperado",
       "invalid_url": "La URL no es una dirección http o https",
       "certificate_not_found": "Una ruta en Certificados no lleva a ningún archivo",
-      "certificate_failed": "La conexión TLS falló: no se pudo verificar el certificado del servidor o el servidor rechazó el certificado de cliente"
+      "certificate_failed": "La conexión TLS falló: no se pudo verificar el certificado del servidor o el servidor rechazó el certificado de cliente",
+      "no_tls": "El servidor no usa TLS en esta dirección. Si solo ofrece HTTP sin cifrar, introduce la dirección empezando por http://, con lo que la contraseña se envía sin cifrar",
+      "too_many_attempts": "El servidor bloquea los inicios de sesión desde esta dirección tras demasiados intentos fallidos. Espera a que caduque el bloqueo o pide que lo levanten en el servidor y vuelve a intentarlo"
     },
     "abort": {
       "already_configured": "Esta cuenta ya está configurada",
@@ -101,6 +103,7 @@
           "timeout": "Segundos por petición",
           "days": "Días de antelación",
           "include_all_day": "Incluir eventos de todo el día",
+          "busy_only": "Solo eventos ocupados",
           "read_only": "Solo lectura"
         },
         "data_description": {
@@ -109,6 +112,7 @@
           "timeout": "Cuánto tiempo se espera la respuesta del servidor a una sola petición.",
           "days": "Con cuánta antelación se busca el próximo evento.",
           "include_all_day": "Si un evento de todo el día puede ser el próximo evento.",
+          "busy_only": "Omite los eventos que aparecen como libres y las invitaciones que rechazaste, también en la vista de calendario, en las automatizaciones y en los recordatorios.",
           "read_only": "Oculta los controles de crear, editar y eliminar, y las acciones se niegan a escribir. Un cambio de nombre en Home Assistant se queda entonces ahí."
         }
       },
@@ -124,12 +128,14 @@
         "data": {
           "days": "Días de antelación",
           "include_all_day": "Incluir eventos de todo el día",
+          "busy_only": "Solo eventos ocupados",
           "read_only": "Solo lectura",
           "reset": "Usar los ajustes de la cuenta"
         },
         "data_description": {
           "days": "Con cuánta antelación se busca el próximo evento.",
           "include_all_day": "Si un evento de todo el día puede ser el próximo evento.",
+          "busy_only": "Omite los eventos que aparecen como libres y las invitaciones que rechazaste, también en la vista de calendario, en las automatizaciones y en los recordatorios.",
           "read_only": "Oculta los controles de crear, editar y eliminar, y las acciones se niegan a escribir. Un cambio de nombre en Home Assistant se queda entonces ahí.",
           "reset": "Descarta todo lo ajustado aquí y vuelve a seguir la cuenta."
         }
@@ -152,7 +158,7 @@
   "entity": {
     "event": {
       "reminder": {
-        "name": "{calendar} recordatorios",
+        "name": "Recordatorios de {calendar}",
         "state_attributes": {
           "event_type": {
             "state": {
@@ -183,6 +189,9 @@
     "document_no_uid": {
       "message": "El documento contiene un componente sin UID."
     },
+    "due_before_start": {
+      "message": "El vencimiento de una tarea no puede ser anterior a su inicio ({start})."
+    },
     "duplicate_uid": {
       "message": "El documento contiene más de un elemento con el UID {uid}."
     },
@@ -198,6 +207,9 @@
     "last_selected_calendar": {
       "message": "{name} es el único calendario incluido en esta cuenta. Incluye primero otro en las opciones."
     },
+    "mixed_start_and_due": {
+      "message": "El inicio ({start}) y el vencimiento de una tarea deben ser del mismo tipo: los dos un día, o los dos un día con hora."
+    },
     "mixed_time_types": {
       "message": "El inicio y el fin deben ser del mismo tipo: dos fechas para un evento de todo el día, o dos fechas con hora."
     },
@@ -210,6 +222,9 @@
     "no_scheduling": {
       "message": "Este servidor no admite la planificación CalDAV, así que las invitaciones no se pueden responder desde aquí."
     },
+    "no_free_busy": {
+      "message": "Este servidor no admite la planificación CalDAV, así que no puede decir cuándo están ocupadas otras personas."
+    },
     "no_start_in_object": {
       "message": "Este evento no tiene fecha de inicio, así que no se puede cambiar aquí."
     },
@@ -220,7 +235,7 @@
       "message": "Este evento no incluye tu cuenta entre los asistentes."
     },
     "not_found": {
-      "message": "Ese elemento ya no está en el servidor."
+      "message": "Ese elemento no está en el servidor."
     },
     "not_recurring": {
       "message": "Este evento no es una serie recurrente."
@@ -293,6 +308,9 @@
     },
     "no_journals": {
       "message": "{name} no admite entradas de diario."
+    },
+    "no_events": {
+      "message": "{name} no admite eventos."
     },
     "no_journal_in_object": {
       "message": "Este elemento no está guardado como entrada de diario, así que no se puede cambiar aquí."

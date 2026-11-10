@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import caldav
 from caldav.davclient import requests
+from caldav.elements import cdav
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
@@ -44,10 +45,12 @@ from .connection import (
     connection_kwargs,
     display_name,
     distinctive,
+    principal_key,
     url_candidates,
     without_userinfo,
 )
 from .const import (
+    CONF_BUSY_ONLY,
     CONF_CA_BUNDLE,
     CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
@@ -55,12 +58,13 @@ from .const import (
     CONF_CLIENT_KEY,
     CONF_DAYS,
     CONF_INCLUDE_ALL_DAY,
+    CONF_PRINCIPAL,
     CONF_READ_ONLY,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_TIMEOUT,
     DOMAIN,
 )
-from .errors import NETWORK_ERRORS, rejected
+from .errors import NETWORK_ERRORS, rejected, without_tls
 from .options import account_settings, request_timeout
 
 _LOGGER = logging.getLogger(__name__)
@@ -117,23 +121,25 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Ask for connection details and validate them."""
         errors: dict[str, str] = {}
+        schema = DATA_SCHEMA
         if user_input is not None:
             cleaned = _cleaned(user_input)
-            error, url = await self.hass.async_add_executor_job(
+            error, url, principal = await self.hass.async_add_executor_job(
                 _test_connection, cleaned
             )
             if error is None:
                 # The url that answered, so a bootstrapped account matches itself.
                 await self.async_set_unique_id(account_key(url, cleaned[CONF_USERNAME]))
                 self._abort_if_unique_id_configured()
+                if self._held_elsewhere(principal):
+                    return self.async_abort(reason="already_configured")
                 return self.async_create_entry(
                     title=_title(url, cleaned[CONF_USERNAME]),
-                    data={**cleaned, CONF_URL: url},
+                    data={**cleaned, CONF_URL: url, CONF_PRINCIPAL: principal},
                 )
             errors["base"] = error
-        return self.async_show_form(
-            step_id="user", data_schema=DATA_SCHEMA, errors=errors
-        )
+            schema = self.add_suggested_values_to_schema(schema, _suggested(cleaned))
+        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
@@ -146,6 +152,7 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         errors: dict[str, str] = {}
         entry = self._get_reconfigure_entry()
+        suggested: Mapping[str, Any] = entry.data
         if user_input is not None:
             cleaned = {
                 **_cleaned(user_input),
@@ -153,14 +160,13 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
             }
             if not cleaned.get(CONF_PASSWORD):
                 cleaned[CONF_PASSWORD] = entry.data[CONF_PASSWORD]
-            error, url = await self.hass.async_add_executor_job(
+            error, url, principal = await self.hass.async_add_executor_job(
                 _test_connection, cleaned, request_timeout(entry)
             )
             if error is None:
                 unique_id = account_key(url, cleaned[CONF_USERNAME])
                 await self.async_set_unique_id(unique_id)
-                # Only landing on a url another entry holds is a conflict.
-                if any(
+                if self._held_elsewhere(principal, entry.entry_id) or any(
                     other.unique_id == unique_id and other.entry_id != entry.entry_id
                     for other in self._async_current_entries()
                 ):
@@ -173,13 +179,14 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
                     entry,
                     unique_id=unique_id,
                     title=title,
-                    data={**cleaned, CONF_URL: url},
+                    data={**cleaned, CONF_URL: url, CONF_PRINCIPAL: principal},
                 )
             errors["base"] = error
+            suggested = cleaned
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
-                RECONFIGURE_SCHEMA, _suggested(entry.data)
+                RECONFIGURE_SCHEMA, _suggested(suggested)
             ),
             errors=errors,
         )
@@ -197,7 +204,7 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         entry = self._get_reauth_entry()
         if user_input is not None:
-            error, _ = await self.hass.async_add_executor_job(
+            error, _, _ = await self.hass.async_add_executor_job(
                 _test_connection, {**entry.data, **user_input}, request_timeout(entry)
             )
             if error is None:
@@ -210,6 +217,20 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=REAUTH_SCHEMA,
             errors=errors,
             description_placeholders={CONF_USERNAME: entry.data[CONF_USERNAME]},
+        )
+
+    def _held_elsewhere(self, principal: str, entry_id: str | None = None) -> bool:
+        """Return whether another entry holds the account of this principal url.
+
+        Entered as its calendar home or a calendar url, an account answers
+        under another url but with the same principal.
+        """
+        key = principal_key(principal)
+        return any(
+            (held := other.data.get(CONF_PRINCIPAL))
+            and principal_key(held) == key
+            and other.entry_id != entry_id
+            for other in self._async_current_entries()
         )
 
     @staticmethod
@@ -392,6 +413,7 @@ def _calendar_fields(values: Mapping[str, Any]) -> dict[Any, Any]:
         vol.Optional(
             CONF_INCLUDE_ALL_DAY, default=values[CONF_INCLUDE_ALL_DAY]
         ): cv.boolean,
+        vol.Optional(CONF_BUSY_ONLY, default=values[CONF_BUSY_ONLY]): cv.boolean,
         vol.Optional(CONF_READ_ONLY, default=values[CONF_READ_ONLY]): cv.boolean,
     }
 
@@ -512,16 +534,16 @@ def _is_http_url(url: str) -> bool:
 
 def _test_connection(
     user_input: Mapping[str, Any], timeout: float = DEFAULT_TIMEOUT
-) -> tuple[str | None, str]:
-    """Return (error key or None, the url that worked). Blocking."""
+) -> tuple[str | None, str, str]:
+    """Return (error key or None, the url that worked, its principal). Blocking."""
     entered = user_input[CONF_URL]
     if not _is_http_url(entered):
-        return "invalid_url", entered
+        return "invalid_url", entered, ""
     if any(
         (path := user_input.get(key)) and not os.path.isfile(path)
         for key in CERTIFICATE_PATHS
     ):
-        return "certificate_not_found", entered
+        return "certificate_not_found", entered, ""
     kwargs = connection_kwargs(user_input, timeout)
     error = "cannot_connect"
     unexpected: Exception | None = None
@@ -532,10 +554,11 @@ def _test_connection(
             url, user_input[CONF_USERNAME], user_input[CONF_PASSWORD], kwargs
         )
         try:
-            client.principal()
+            principal = client.principal()
+            home = principal.get_property(cdav.CalendarHomeSet())
         except requests.exceptions.SSLError as err:
             _LOGGER.debug("CalDAV TLS error: %s", err)
-            candidate_error = "certificate_failed"
+            candidate_error = "no_tls" if without_tls(err) else "certificate_failed"
         except NETWORK_ERRORS as err:
             if rejected(err):
                 # Remembered, not returned: a bare host may sit behind another
@@ -548,9 +571,15 @@ def _test_connection(
             unexpected = err
             candidate_error = "unknown"
         else:
-            return None, client.session.moved_to or url
+            if home:
+                return None, client.session.moved_to or url, str(principal.url)
+            # caldav takes any url for the principal once nothing names one.
+            _LOGGER.debug("No calendar home at %s", url)
         finally:
             client.close()
+        if client.session.throttled:
+            error = "too_many_attempts"
+            break
         # Rejected credentials outrank a candidate that would not answer.
         if error != "invalid_auth":
             error = candidate_error
@@ -560,4 +589,4 @@ def _test_connection(
         _LOGGER.error(
             "Unexpected error connecting to the CalDAV server", exc_info=unexpected
         )
-    return error, entered
+    return error, entered, ""

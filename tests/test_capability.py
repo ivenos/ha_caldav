@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
+from urllib.parse import unquote, urlparse
 
 import caldav
 from caldav.davclient import DAVResponse
 from caldav.elements import dav
+from caldav.lib.error import DAVError
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 import pytest
@@ -21,7 +23,12 @@ from custom_components.ha_caldav.capability import (
     supports_scheduling,
     supports_sync_collection,
 )
-from custom_components.ha_caldav.connection import build_client, display_name
+from custom_components.ha_caldav.color import fetch_collections
+from custom_components.ha_caldav.connection import (
+    build_client,
+    calendar_key,
+    display_name,
+)
 from custom_components.ha_caldav.const import DOMAIN
 
 ENTRY_DATA = {
@@ -217,11 +224,36 @@ def test_sync_collection_probe_trusts_a_server_that_did_not_answer() -> None:
     assert supports_sync_collection(calendar) is True
 
 
+def test_sync_collection_probe_trusts_a_server_that_did_not_find_the_property() -> None:
+    calendar = Mock()
+    calendar.get_properties.return_value = _multistatus(
+        '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">'
+        f"<d:response><d:href>{HOME}/x/</d:href><d:propstat><d:prop>"
+        "<d:supported-report-set/></d:prop>"
+        "<d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>"
+        "</d:multistatus>"
+    )
+
+    assert supports_sync_collection(calendar) is True
+
+
 def test_sync_collection_probe_gives_a_broken_lookup_the_benefit_of_the_doubt() -> None:
     calendar = Mock()
     calendar.get_properties.side_effect = AssertionError("weird xml")
 
     assert supports_sync_collection(calendar) is True
+
+
+def test_a_calendar_listed_without_a_name_is_named_without_asking_the_server() -> None:
+    client = caldav.DAVClient(url=ENTRY_DATA[CONF_URL])
+    calendar = caldav.Calendar(client=client, url=f"{ENTRY_DATA[CONF_URL]}/x/")
+
+    with patch.object(
+        requests.adapters.HTTPAdapter, "send", side_effect=AssertionError
+    ) as send:
+        assert display_name(calendar) == "CalDAV"
+
+    send.assert_not_called()
 
 
 def _setup_calendar(name: str, url: str) -> Mock:
@@ -643,6 +675,20 @@ def test_an_account_named_as_reader_and_writer_is_listed_once() -> None:
     assert len(calendars) == len(delegations) == 1
 
 
+def test_a_calendar_reached_through_two_delegations_is_listed_once() -> None:
+    absolute = f"https://cloud.example.com{BOSS}"
+    client = _delegating_client(_proxy_response(write_for=BOSS, read_for=absolute), [])
+    theirs = _setup_calendar("Team", f"https://cloud.example.com{BOSS_HOME}/team/")
+
+    with patch(
+        "custom_components.ha_caldav.capability.caldav.Principal",
+        return_value=_delegator([theirs]),
+    ):
+        calendars, _ = account_calendars(client)
+
+    assert [display_name(item) for item in calendars] == ["Team (boss)"]
+
+
 def test_a_server_without_delegation_lists_only_the_accounts_own_calendars() -> None:
     own = _setup_calendar("Personal", f"https://cloud.example.com{HOME}/personal/")
     client = _delegating_client(_proxy_response(), [own])
@@ -705,7 +751,9 @@ def _sharded(delegator_home: str = ""):
             proxy = f"<cs:calendar-proxy-write-for>{boss}</cs:calendar-proxy-write-for>"
             return props(path, me + home(f"{SHARD}/1/calendars/") + proxy)
         if path == "/2/principal/":
-            return props(path, home(delegator_home))
+            boss = "<d:href>mailto:boss@icloud.test</d:href>"
+            boss = f"<c:calendar-user-address-set>{boss}</c:calendar-user-address-set>"
+            return props(path, home(delegator_home) + boss)
         if path == "/1/calendars/":
             return props(
                 path, "<d:resourcetype><d:collection/></d:resourcetype>"
@@ -832,3 +880,166 @@ def test_a_delegated_calendar_already_named_after_its_owner_keeps_its_name() -> 
         calendars, _ = account_calendars(client)
 
     assert display_name(calendars[0]) == "Team (Boss <boss@example.com>)"
+
+
+def test_a_delegation_that_fails_leaves_the_own_calendars_their_capabilities() -> None:
+    client = _client(_home_set_response(_entry(f"{HOME}/tasks/", ["VTODO"], ["read"])))
+    theirs = Mock()
+    theirs.home.url = "https://cloud.example.com/remote.php/dav/calendars/boss/"
+    theirs.home.get_properties.side_effect = DAVError("timed out")
+
+    capabilities = fetch_capabilities(client, [theirs])
+
+    assert capabilities[f"{HOME}/tasks"] == Capability(
+        frozenset({"VTODO"}), writable=False
+    )
+
+
+def _sogo(login: str = "admin", own: dict[str, str] | None = None, owners: bool = True):
+    """Answer like SOGo, which subscribes a delegate to what it may act on.
+
+    Own is the delegate's own calendars by name and owner; the delegator holds
+    "personal". Without owners the question for them gets an empty answer.
+    Returns the patch and the requests it was asked.
+    """
+    held = {"personal": "other", f"{login}_personal": login} if own is None else own
+    asked: list[tuple[str, str, str]] = []
+
+    def props(href: str, found: str) -> str:
+        return (
+            f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>{found}</d:prop>"
+            "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+        )
+
+    def calendar(home: str, name: str, owner: str) -> str:
+        return props(
+            f"{home}{name}/",
+            "<d:resourcetype><d:collection/><c:calendar/></d:resourcetype>"
+            f"<d:displayname>{name}</d:displayname>"
+            f"<d:owner><d:href>/SOGo/dav/{owner}/</d:href></d:owner>",
+        )
+
+    def principal(account: str, extra: str = "") -> str:
+        return props(
+            f"/SOGo/dav/{account}/",
+            "<d:current-user-principal><d:href>/SOGo/dav/other/</d:href>"
+            "</d:current-user-principal><c:calendar-home-set>"
+            f"<d:href>/SOGo/dav/{account}/Calendar/</d:href></c:calendar-home-set>"
+            "<c:calendar-user-address-set>"
+            f"<d:href>mailto:{account}@example.com</d:href>"
+            f"</c:calendar-user-address-set>{extra}",
+        )
+
+    def answer(request: requests.PreparedRequest) -> str:
+        path = unquote(urlparse(request.url).path)
+        body = request.body.decode() if isinstance(request.body, bytes) else ""
+        asked.append((request.method, path, body))
+        home = "<d:resourcetype><d:collection/></d:resourcetype>"
+        if path == "/SOGo/dav/other/":
+            delegator = f"<d:href>/SOGo/dav/{login}/</d:href>"
+            return principal(
+                "other",
+                f"<cs:calendar-proxy-write-for>{delegator}</cs:calendar-proxy-write-for>",
+            )
+        if path == f"/SOGo/dav/{login}/":
+            return principal(login)
+        if path == "/SOGo/dav/other/Calendar/":
+            return props(path, home) + "".join(
+                calendar(path, name, owner) for name, owner in held.items()
+            )
+        if path == f"/SOGo/dav/{login}/Calendar/":
+            return props(path, home) + calendar(path, "personal", login)
+        return principal("other")
+
+    def send(self, request: requests.PreparedRequest, **kwargs) -> requests.Response:
+        reply = requests.Response()
+        reply.status_code = 207
+        reply.reason = "Multi-Status"
+        reply.headers["Content-Type"] = "text/xml; charset=UTF-8"
+        reply._content = (
+            '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" '
+            'xmlns:c="urn:ietf:params:xml:ns:caldav" '
+            f'xmlns:cs="http://calendarserver.org/ns/">{answer(request)}</d:multistatus>'
+        ).encode()
+        if not owners and b"owner" in (request.body or b""):
+            reply._content = b""
+        reply.url = request.url
+        reply.request = request
+        return reply
+
+    return patch.object(requests.adapters.HTTPAdapter, "send", send), asked
+
+
+def _sogo_listing(
+    login: str = "admin", own: dict[str, str] | None = None, owners: bool = True
+):
+    transport, asked = _sogo(login, own, owners)
+    with transport:
+        client = build_client("https://mail.example.com/SOGo/dav/", "other", "x", {})
+        calendars, delegations = account_calendars(client)
+        collections = fetch_collections(client, delegations)
+    return (
+        [calendar_key(item.url) for item in calendars],
+        delegations,
+        collections,
+        asked,
+    )
+
+
+@pytest.mark.parametrize(
+    ("login", "copy"),
+    [
+        ("admin", "admin_personal"),
+        ("john.doe_x", "john_D_doe_U_x_personal"),
+        ("2nd@example.com", "_2nd_A_example_D_com_personal"),
+    ],
+)
+def test_sogo_lists_a_delegated_calendar_once_as_the_owners(login, copy) -> None:
+    listed, [delegation], _, _ = _sogo_listing(
+        login, {"personal": "other", copy: login}
+    )
+
+    assert listed == [
+        "/SOGo/dav/other/Calendar/personal",
+        f"/SOGo/dav/{login}/Calendar/personal",
+    ]
+    assert delegation.copies == {
+        f"/SOGo/dav/other/Calendar/{copy}": f"/SOGo/dav/{login}/Calendar/personal"
+    }
+
+
+def test_the_color_poll_leaves_out_what_the_listing_left_out() -> None:
+    _, _, collections, _ = _sogo_listing()
+
+    assert "/SOGo/dav/other/Calendar/admin_personal" not in collections
+    assert collections["/SOGo/dav/admin/Calendar/personal"].calendar is True
+
+
+def test_an_own_calendar_named_like_a_copy_stays_listed() -> None:
+    listed, _, collections, _ = _sogo_listing(
+        own={"personal": "other", "admin_personal": "other"}
+    )
+
+    assert "/SOGo/dav/other/Calendar/admin_personal" in listed
+    assert "/SOGo/dav/other/Calendar/admin_personal" in collections
+
+
+def test_a_subscription_to_a_calendar_the_delegation_does_not_list_stays() -> None:
+    listed, _, _, _ = _sogo_listing(own={"personal": "other", "admin_work": "admin"})
+
+    assert "/SOGo/dav/other/Calendar/admin_work" in listed
+
+
+def test_a_listing_with_nothing_named_like_a_copy_asks_for_no_owner() -> None:
+    listed, _, _, asked = _sogo_listing(
+        own={"personal": "other", "work_shared_by_admin": "admin"}
+    )
+
+    assert "/SOGo/dav/other/Calendar/work_shared_by_admin" in listed
+    assert not any("owner" in body for _, _, body in asked)
+
+
+def test_owners_the_server_will_not_name_leave_the_listing_as_it_was() -> None:
+    listed, _, _, _ = _sogo_listing(owners=False)
+
+    assert "/SOGo/dav/other/Calendar/admin_personal" in listed

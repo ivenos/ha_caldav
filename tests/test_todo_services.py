@@ -2,11 +2,11 @@ from datetime import date
 from unittest.mock import Mock, patch
 
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import ServiceValidationError, Unauthorized
 from homeassistant.util import dt as dt_util
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 import vobject
 import voluptuous as vol
 
@@ -180,7 +180,7 @@ async def test_update_todo_finds_the_item_by_name_and_forwards_only_what_was_nam
 
     assert update.call_args.args[1] == "l1"
     assert update.call_args.args[2] == {"summary": "Washing"}
-    assert update.call_args.kwargs == {"as_shown": False}
+    assert update.call_args.kwargs == {"as_shown": False, "addresses": []}
 
 
 async def test_a_field_given_empty_is_cleared(hass: HomeAssistant) -> None:
@@ -210,6 +210,49 @@ async def test_a_field_given_empty_is_cleared(hass: HomeAssistant) -> None:
         "rrule": None,
         "url": None,
     }
+
+
+@pytest.mark.parametrize(
+    "field", ["priority", "classification", "status", "percent_complete", "categories"]
+)
+@pytest.mark.parametrize("empty", ["", None])
+async def test_a_property_given_empty_is_cleared_like_the_other_fields(
+    hass: HomeAssistant, field: str, empty: str | None
+) -> None:
+    await _setup(hass, [_groceries()])
+
+    with patch("custom_components.ha_caldav.todo.update_todo") as update:
+        await hass.services.async_call(
+            DOMAIN,
+            "update_todo",
+            {"entity_id": "todo.personal", "item": "l1", field: empty},
+            blocking=True,
+        )
+
+    assert update.call_args.args[2] == {field: None}
+
+
+async def test_a_property_given_empty_leaves_a_new_item_without_it(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass, [_groceries()])
+
+    with patch("custom_components.ha_caldav.todo.create_todo") as create:
+        await hass.services.async_call(
+            DOMAIN,
+            "create_todo",
+            {
+                "entity_id": "todo.personal",
+                "item": "Eggs",
+                "priority": "",
+                "classification": "",
+                "status": "",
+                "percent_complete": "",
+            },
+            blocking=True,
+        )
+
+    assert create.call_args.args[1] == {"summary": "Eggs"}
 
 
 async def test_an_action_is_not_held_to_the_etag_the_list_cached(
@@ -331,6 +374,23 @@ async def test_search_returns_every_item_with_what_is_stored_on_it(
     }
 
 
+async def test_an_item_without_a_summary_is_listed_and_found_untitled(
+    hass: HomeAssistant,
+) -> None:
+    untitled = Mock()
+    untitled.vobject_instance = vobject.readOne(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VTODO\r\n"
+        "UID:u1\r\nDTSTAMP:20260101T000000Z\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+    untitled.props = {}
+    await _setup(hass, [_todo_list("Personal", _item("g1", "Groceries"), untitled)])
+
+    todos = await _search(hass)
+
+    assert hass.states.get("todo.personal").state == "2"
+    assert todos[1] == {"uid": "u1", "summary": "", "status": "needs_action"}
+
+
 @pytest.mark.parametrize(
     ("criteria", "found"),
     [
@@ -376,6 +436,37 @@ async def test_move_todo_writes_to_the_target_list_and_refreshes_it(
 
     assert move.call_args.args == (source, target, "g1", False)
     refresh.assert_called_once()
+
+
+async def test_moving_into_a_list_the_caller_may_not_control_is_refused(
+    hass: HomeAssistant,
+) -> None:
+    from homeassistant.auth.permissions import PolicyPermissions
+
+    await _setup(hass, [_groceries(), _todo_list("Work")])
+    user = MockUser()
+    user.add_to_hass(hass)
+    user.permissions = PolicyPermissions(
+        {"entities": {"entity_ids": {"todo.personal": True}}}, user.id
+    )
+
+    with (
+        patch("custom_components.ha_caldav.services.move_todo") as move,
+        pytest.raises(Unauthorized),
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "move_todo",
+            {
+                "entity_id": "todo.personal",
+                "item": "g1",
+                "target_entity_id": "todo.work",
+            },
+            blocking=True,
+            context=Context(user_id=user.id),
+        )
+
+    move.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -526,3 +617,37 @@ async def test_the_todo_actions_exist_while_the_account_retries(
 
     for service in ("create_todo", "update_todo", "search_todos", "move_todo"):
         assert hass.services.has_service(DOMAIN, service), service
+
+
+async def test_import_on_the_todo_list_of_a_calendar_with_events_writes(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass, [_groceries()])
+    assert hass.states.get("calendar.personal") is not None
+
+    with patch("custom_components.ha_caldav.services.import_ics") as importer:
+        await hass.services.async_call(
+            DOMAIN,
+            "import_ics",
+            {"entity_id": "todo.personal", "ics": ICS},
+            blocking=True,
+        )
+
+    importer.assert_called_once()
+
+
+async def test_export_on_the_todo_list_of_a_calendar_with_events_answers_there(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass, [_groceries()])
+
+    with patch("custom_components.ha_caldav.services.export_ics", return_value=ICS):
+        result = await hass.services.async_call(
+            DOMAIN,
+            "export_ics",
+            {"entity_id": "todo.personal"},
+            blocking=True,
+            return_response=True,
+        )
+
+    assert list(result) == ["todo.personal"]

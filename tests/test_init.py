@@ -29,9 +29,12 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.ha_caldav import async_migrate_entry
+from custom_components.ha_caldav.capability import Delegation
 from custom_components.ha_caldav.connection import calendar_key
 from custom_components.ha_caldav.const import (
+    CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
+    CONF_PRINCIPAL,
     CONF_READ_ONLY,
     DOMAIN,
     ISSUE_BUILTIN_CALDAV,
@@ -1212,3 +1215,53 @@ async def test_an_entry_left_by_a_later_minor_version_is_not_migrated_back(
 
     assert entry.unique_id == "kept"
     assert entry.minor_version == 3
+
+
+async def test_setup_records_the_principal_an_older_entry_lacks(
+    hass: HomeAssistant,
+) -> None:
+    """The flow tells an account entered by another of its urls apart by it."""
+    principal = "https://cloud.example.com/remote.php/dav/principals/users/iven/"
+    entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.return_value.url = principal
+        client.return_value.principal.return_value.calendars.return_value = []
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.data == {**ENTRY_DATA, CONF_PRINCIPAL: principal}
+
+
+async def test_the_options_of_sogos_copy_move_to_the_calendar_it_copies(
+    hass: HomeAssistant,
+) -> None:
+    own, theirs = _calendar("Personal"), _calendar("admin/personal")
+    copy = calendar_key("https://cloud.example.com/remote.php/dav/admin_personal")
+    delegation = Delegation(
+        Mock(url="https://cloud.example.com/remote.php/dav/admin/"),
+        ["mailto:admin@example.com"],
+        "admin",
+        copies={copy: calendar_key(theirs.url)},
+    )
+    options = {
+        CONF_CALENDARS: [calendar_key(own.url), copy],
+        CONF_CALENDAR_OPTIONS: {copy: {CONF_READ_ONLY: True}},
+    }
+    with (
+        patch("custom_components.ha_caldav.fetch_capabilities", return_value={}),
+        patch(
+            "custom_components.ha_caldav.account_calendars",
+            return_value=([own, theirs], [delegation]),
+        ),
+    ):
+        entry = await _setup_with(hass, [], options)
+
+    assert entry.options[CONF_CALENDARS] == [
+        calendar_key(own.url),
+        calendar_key(theirs.url),
+    ]
+    assert entry.options[CONF_CALENDAR_OPTIONS] == {
+        calendar_key(theirs.url): {CONF_READ_ONLY: True}
+    }
+    assert hass.states.get("calendar.admin_personal") is not None

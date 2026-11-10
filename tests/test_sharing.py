@@ -29,6 +29,8 @@ class SharedCalendar:
 
     def __init__(self, dialect: str | None, known: tuple[str, ...] = ("ann",)) -> None:
         self.url = URL("https://dav.test/dav.php/calendars/me/work/")
+        # Nextcloud resolves an email address to the account it belongs to.
+        self.emails = {"ann@example.com": "ann"}
         self.client = self
         self.dialect = dialect
         self.known = known
@@ -83,6 +85,9 @@ class SharedCalendar:
         if self.status == 200 and self.dialect == "oc":
             for change in root:
                 href = change.findtext(f"{D}href")
+                address = href.rsplit("/", 1)[-1]
+                if address in self.emails:
+                    href = f"principal:principals/users/{self.emails[address]}"
                 if etree.QName(change).localname == "remove":
                     self.sharees.pop(href, None)
                 elif self._knows(href):
@@ -118,6 +123,14 @@ def test_nextcloud_is_asked_to_share_with_a_principal() -> None:
             "name": "Ann",
         }
     ]
+
+
+def test_nextcloud_shares_with_the_account_an_email_address_belongs_to() -> None:
+    calendar = SharedCalendar("oc")
+
+    share_calendar(calendar, "ann@example.com", write=False)
+
+    assert [share["user"] for share in read_shares(calendar)] == ["ann"]
 
 
 def test_sabre_is_asked_to_share_with_a_principal_or_an_address() -> None:

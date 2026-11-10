@@ -210,6 +210,31 @@ def test_sort_order_puts_unordered_items_last() -> None:
     assert unparseable == unordered
 
 
+def test_unordered_items_keep_the_order_they_were_created_in() -> None:
+    import vobject
+
+    from custom_components.ha_caldav.coordinator import sort_order
+
+    def vtodo(uid: str, created: str = ""):
+        return vobject.readOne(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n"
+            f"BEGIN:VTODO\r\nUID:{uid}\r\nDTSTAMP:20260101T000000Z\r\nSUMMARY:x\r\n"
+            f"{created}END:VTODO\r\nEND:VCALENDAR\r\n"
+        ).vtodo
+
+    # Radicale lists the item written last at the end.
+    listed = [
+        vtodo("a", "CREATED:20260102T000000Z\r\n"),
+        vtodo("c"),
+        vtodo("b"),
+        vtodo("z", "CREATED:20260101T000000Z\r\n"),
+    ]
+
+    ordered = sorted(listed, key=sort_order)
+
+    assert [str(item.uid.value) for item in ordered] == ["z", "a", "b", "c"]
+
+
 def test_reorder_writes_nothing_when_the_order_already_holds() -> None:
     from custom_components.ha_caldav.api import reorder_todos
 
@@ -289,6 +314,30 @@ async def test_moving_behind_an_item_that_is_gone_is_refused(
         await entity.async_move_todo_item("a", previous_uid="deleted")
 
     assert refusal.value.translation_key == "unknown_todo_item"
+
+
+async def test_a_move_behind_an_item_deleted_in_the_meantime_writes_nothing(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+    entity = _entity(hass)
+    entity.coordinator.data.todos = [
+        TodoItem(uid="a", summary="a"),
+        TodoItem(uid="b", summary="b"),
+    ]
+    write = entity.async_write
+
+    async def after_a_delete(job, *args, **kwargs):
+        entity.coordinator.data.todos = [TodoItem(uid="b", summary="b")]
+        await write(job, *args, **kwargs)
+
+    with (
+        patch.object(entity, "async_write", after_a_delete),
+        patch("custom_components.ha_caldav.todo.reorder_todos") as reorder,
+    ):
+        await entity.async_move_todo_item("b", previous_uid="a")
+
+    reorder.assert_not_called()
 
 
 async def test_dropping_an_item_where_it_already_is_writes_nothing(
@@ -428,6 +477,25 @@ async def test_completing_a_recurring_task_keeps_a_rename_from_the_same_call(
     assert todo.icalendar_component["DUE"].dt.isoformat() == "2026-07-17"
 
 
+def test_ticking_off_an_untitled_item_writes_no_summary() -> None:
+    from custom_components.ha_caldav.api import update_todo
+    from custom_components.ha_caldav.todo import _item_data
+
+    todo = _vtodo_resource("UID:u1\r\nDTSTAMP:20260101T000000Z\r\n")
+    calendar = Mock()
+    calendar.search.return_value = []
+    calendar.todo_by_uid.return_value = todo
+
+    update_todo(
+        calendar,
+        "u1",
+        _item_data(TodoItem(uid="u1", summary="", status=TodoItemStatus.COMPLETED)),
+    )
+
+    assert "SUMMARY" not in todo.icalendar_component
+    assert str(todo.icalendar_component["STATUS"]) == "COMPLETED"
+
+
 def _vtodo_resource(body: str) -> Mock:
     """Return a caldav-like resource carrying both shapes, as a real one does."""
     from icalendar import Calendar as ICalCalendar
@@ -558,7 +626,7 @@ async def test_an_update_right_after_another_merges_into_what_that_one_wrote(
         )
         return [item]
 
-    def update(calendar, uid, data, expected_etag=None):
+    def update(calendar, uid, data, expected_etag=None, addresses=None):
         server.update(
             summary=data["summary"], due=data.get("due"), version=server["version"] + 1
         )
@@ -597,7 +665,7 @@ async def test_two_quick_edits_of_one_item_do_not_conflict_with_each_other(
     entity.coordinator.todo_etags = {"uid-1": '"e1"'}
     expected: list = []
 
-    def update(calendar, uid, data, expected_etag=None):
+    def update(calendar, uid, data, expected_etag=None, addresses=None):
         expected.append(expected_etag)
         time.sleep(0.05)
 

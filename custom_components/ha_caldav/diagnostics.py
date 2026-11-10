@@ -12,13 +12,14 @@ from homeassistant.core import HomeAssistant
 
 from .capability import account_calendars
 from .color import Collection, fetch_collections
-from .connection import calendar_key
+from .connection import calendar_key, display_name
 from .const import (
     CONF_CA_BUNDLE,
     CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
     CONF_CLIENT_CERT,
     CONF_CLIENT_KEY,
+    CONF_PRINCIPAL,
 )
 from .coordinator import HaCaldavConfigEntry, HaCaldavRuntimeData
 
@@ -29,6 +30,7 @@ TO_REDACT = {
     CONF_CLIENT_CERT,
     CONF_CLIENT_KEY,
     CONF_CA_BUNDLE,
+    CONF_PRINCIPAL,
 }
 
 
@@ -100,7 +102,7 @@ def _calendars(data: HaCaldavRuntimeData) -> Any:
     managed = {item.calendar.url: item for item in data.calendars}
     calendars = []
     for calendar in found:
-        info: dict[str, Any] = {"name": calendar.name}
+        info: dict[str, Any] = {"name": display_name(calendar)}
         # Apart from a missing color, which a server is allowed to report.
         if color_error is not None:
             info["color_error"] = color_error

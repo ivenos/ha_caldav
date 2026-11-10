@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
 import logging
-from math import isfinite
+from math import inf, isfinite
 import threading
 from typing import Any
 
@@ -20,12 +20,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 import homeassistant.util.dt as dt_util
+import recurring_ical_events
 
 from .capability import Capability
 from .color import Collection, fetch_collections
 from .connection import calendar_key, display_name
 from .errors import rejected
-from .extras import alarm_moments, check_expandable, read_extras, to_utc
+from .extras import alarm_moments, check_expandable, own_reply, read_extras, to_utc
 
 try:
     from homeassistant.components.calendar import CalendarEventStatus
@@ -43,6 +44,12 @@ _MAX_AGE = timedelta(hours=1)
 # Entries a uid cache may hold; a panel window is not the polled one, so
 # nothing else evicts what it left behind.
 _CACHE_LIMIT = 2000
+
+_REMINDER_HORIZON = timedelta(days=35)
+
+# Without a zone in the query (RFC 4791 9.9) a server places dates and floating
+# times in one of its own, and UTC offsets reach 14 hours either way.
+FLOATING_MARGIN = timedelta(hours=14)
 
 
 def _bounded[T](cache: dict[str, T]) -> dict[str, T]:
@@ -132,6 +139,7 @@ class _WindowRead:
     etags: dict[str, str] | None
     rules: dict[str, str | None]
     epoch: int = 0
+    reminders: list[Reminder] = field(default_factory=list)
 
 
 @dataclass
@@ -196,6 +204,8 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         include_all_day: bool,
         scan_interval: timedelta,
         sync_collection: bool = True,
+        busy_only: bool = False,
+        addresses: list[str] | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -209,6 +219,8 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         self.capability = capability
         self.days = days
         self.include_all_day = include_all_day
+        self.busy_only = busy_only
+        self.addresses = addresses or []
         self.etags: dict[str, str] = {}
         # The poll and a panel read both merge into the etag caches, from the
         # executor.
@@ -291,13 +303,18 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
     def _dated_journals(
         self, start_date: datetime, end_date: datetime
     ) -> list[CalendarEvent]:
-        found = self.calendar.search(journal=True, start=start_date, end=end_date)
+        found = self.calendar.search(
+            journal=True,
+            start=start_date - FLOATING_MARGIN,
+            end=end_date + FLOATING_MARGIN,
+        )
         entries = (master_of(item, "vjournal") for item in found)
         return [
             event
             for entry in entries
             if entry is not None
             and _shown(entry)
+            and within(entry, start_date, end_date)
             and (event := to_event(entry)) is not None
         ]
 
@@ -398,7 +415,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         events, todos = self.halves["events"], self.halves["todos"]
         window = await self._async_read(
             events,
-            partial(self._read_window, start, end),
+            partial(self._read_window, start, end, max(end, start + _REMINDER_HORIZON)),
             _WindowRead(vevents=[], etags={}, rules={}, epoch=self._etag_epoch),
         )
         if window is not None:
@@ -449,7 +466,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
 
     def _commit_window(self, window: _WindowRead) -> None:
         self.halves["events"].cached = window.vevents
-        self.reminders["events"] = event_reminders(window.vevents)
+        self.reminders["events"] = window.reminders
         self._keep_rules(window.rules)
         # Committing the token without the etags would freeze every etag here.
         if window.etags is None or not self._merge_etags(window.etags, window.epoch):
@@ -464,30 +481,51 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             else:
                 self.todo_etags = read.etags
 
-    def _read_window(self, start: datetime, end: datetime) -> _WindowRead:
+    def _read_window(
+        self, start: datetime, end: datetime, reminding: datetime | None = None
+    ) -> _WindowRead:
         """Read one window in a single REPORT, without keeping any of it. Blocking.
 
         The etags are None when the server did not say. The rules map every
-        uid in the window, to None where it has none, so a series that stopped
-        recurring can be told apart from one this window never saw. They are
-        read first, as the expansion strips RRULE from every occurrence.
+        uid the server returned, to None where it has none, so a series that
+        stopped recurring can be told apart from one this window never saw.
+        They are read first, as the expansion strips RRULE from every
+        occurrence. Up to reminding, the alarms are read as well, and only an
+        object carrying one is expanded that far.
         """
         epoch = self._etag_epoch
+        reach = max(end, reminding or end)
         items = self.calendar.search(
-            start=start, end=end, event=True, props=[dav.GetEtag()]
+            start=start - FLOATING_MARGIN,
+            end=reach + FLOATING_MARGIN,
+            event=True,
+            props=[dav.GetEtag()],
         )
         etags: dict[str, str] = {}
         rules: dict[str, str | None] = {}
         vevents: list[Any] = []
+        alarmed: list[Any] = []
         for item in items:
             if (series := _series(item)) is not None:
                 uid, rules[uid] = series
                 if isinstance(etag := item.props.get(dav.GetEtag.tag), str):
                     etags[uid] = etag
+            ahead = reminding is not None and _has_alarm(item)
             # RFC 5545 makes DTSTART optional once the object carries a METHOD.
-            vevents.extend(
-                vevent for vevent in occurrences(item, start, end) if _shown(vevent)
-            )
+            found = [
+                vevent
+                for vevent in occurrences(
+                    item,
+                    start - FLOATING_MARGIN,
+                    (reach if ahead else end) + FLOATING_MARGIN,
+                )
+                if _shown(vevent) and self._counted(vevent)
+            ]
+            vevents.extend(vevent for vevent in found if within(vevent, start, end))
+            if ahead:
+                alarmed.extend(
+                    vevent for vevent in found if within(vevent, start, reach)
+                )
         if items and not etags:
             _LOGGER.debug("The window came back without an etag on anything")
         return _WindowRead(
@@ -495,6 +533,16 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             etags=etags if etags or not items else None,
             rules=rules,
             epoch=epoch,
+            reminders=event_reminders(alarmed),
+        )
+
+    def _counted(self, vevent: Any) -> bool:
+        if not self.busy_only:
+            return True
+        transparency = str(get_attr_value(vevent, "transp") or "").upper()
+        return (
+            transparency != "TRANSPARENT"
+            and own_reply(vevent, self.addresses) != "DECLINED"
         )
 
     def _keep_rules(self, rules: dict[str, str | None]) -> None:
@@ -571,12 +619,23 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         if not self._sync_collection:
             return True, None
         try:
-            collection = self.calendar.objects_by_sync_token(self._sync_token)
+            collection = _sync_report(self.calendar, self._sync_token)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("sync-collection failed, refreshing in full: %s", err)
             # Dropped: a restored server 403s forever on a token it lost.
             return True, None
         return collection.sync_token != self._sync_token, collection.sync_token
+
+
+def _sync_report(calendar: caldav.Calendar, token: str | None) -> Any:
+    """Run the sync-collection REPORT, failing rather than reading everything.
+
+    caldav 3 answers a failed REPORT with the whole collection and a token it
+    made up, and then never asks the server again.
+    """
+    if callable(getattr(type(calendar), "get_objects_by_sync_token", None)):
+        return calendar.get_objects_by_sync_token(token, disable_fallback=True)
+    return calendar.objects_by_sync_token(token)
 
 
 class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, Collection]]):
@@ -621,30 +680,37 @@ class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, Collection]]):
             ) from err
 
 
-def sort_order(vtodo: Any) -> tuple[int, float]:
-    """Return the sort key of a to-do, unordered items last."""
+def sort_order(vtodo: Any) -> tuple[int, float, float, str]:
+    """Return the sort key of a to-do, unordered items last, oldest first.
+
+    Radicale lists the item written last at the end.
+    """
+    created = get_attr_value(vtodo, "created")
+    since = to_utc(created).timestamp() if isinstance(created, date) else inf
+    uid = str(get_attr_value(vtodo, "uid") or "")
     # vobject lowercases property names and turns dashes into underscores.
     value = get_attr_value(vtodo, "x_apple_sort_order")
-    if value is None:
-        return (1, 0.0)
     try:
         position = float(value)
     except TypeError, ValueError:
-        return (1, 0.0)
+        return (1, 0.0, since, uid)
     # nan compares false against everything, and the write path refuses it too.
-    return (0, position) if isfinite(position) else (1, 0.0)
+    if not isfinite(position):
+        return (1, 0.0, since, uid)
+    return (0, position, since, uid)
 
 
 def to_todo(vtodo: Any) -> TodoItem | None:
     """Map a vobject VTODO onto a Home Assistant to-do item.
 
-    None without a uid or a summary, which core needs, and for a date beyond
-    what a datetime holds once a zone offset reaches it.
+    None without a uid, which core needs, and for a date beyond what a
+    datetime holds once a zone offset reaches it. RFC 5545 3.6.2 leaves
+    SUMMARY optional, and one without has an empty title.
     """
     uid = get_attr_value(vtodo, "uid")
-    summary = get_attr_value(vtodo, "summary")
-    if uid is None or summary is None:
+    if uid is None:
         return None
+    summary = get_attr_value(vtodo, "summary") or ""
     try:
         due: date | datetime | None = None
         if (value := get_attr_value(vtodo, "due")) is not None:
@@ -693,8 +759,9 @@ def event_reminders(vevents: list[Any]) -> list[Reminder]:
             "description": event.description,
             "location": event.location,
         }
-        for index, (at, alarm) in enumerate(moments):
-            key = (event.uid, at, index)
+        for key, (at, alarm) in zip(
+            _alarm_keys(event.uid, moments), moments, strict=True
+        ):
             found.setdefault(key, Reminder(at, key, {**data, "alarm": alarm}))
     return list(found.values())
 
@@ -717,9 +784,21 @@ def todo_reminders(vtodo: Any, item: TodoItem) -> list[Reminder]:
         "description": item.description,
     }
     return [
-        Reminder(at, (item.uid, at, index), {**data, "alarm": alarm})
-        for index, (at, alarm) in enumerate(moments)
+        Reminder(at, key, {**data, "alarm": alarm})
+        for key, (at, alarm) in zip(
+            _alarm_keys(item.uid, moments), moments, strict=True
+        )
     ]
+
+
+def _alarm_keys(uid: Any, moments: list[tuple[datetime, Any]]) -> list[tuple[Any, ...]]:
+    """Return a key per alarm that stays when another alarm is added or removed."""
+    seen: dict[datetime, int] = {}
+    keys = []
+    for at, _ in moments:
+        keys.append((uid, at, seen.get(at, 0)))
+        seen[at] = seen.get(at, 0) + 1
+    return keys
 
 
 def get_attr_value(obj: Any, attribute: str) -> Any | None:
@@ -811,6 +890,20 @@ def _shown(component: Any) -> bool:
     return _dated(component) and status != "CANCELLED"
 
 
+def within(component: Any, start: datetime, end: datetime) -> bool:
+    """Return whether an occurrence overlaps a window, as RFC 4791 9.9 has it.
+
+    Dates and floating times count in Home Assistant's zone.
+    """
+    try:
+        first = to_utc(component.dtstart.value)
+        last = to_utc(get_end_date(component))
+    except _UNMAPPABLE as err:
+        _LOGGER.debug("Skipping an event that cannot be placed: %s", err)
+        return False
+    return first < end and (last > start or start <= first == last)
+
+
 def sort_key(vevent: Any) -> datetime:
     """Return the start as an aware datetime so mixed types sort together."""
     start = vevent.dtstart.value
@@ -871,6 +964,10 @@ def _vevents(item: Any) -> list[Any]:
         return []
 
 
+def _has_alarm(item: Any) -> bool:
+    return any(vevent.walk("VALARM") for vevent in _vevents(item))
+
+
 def _first(value: Any) -> Any:
     """Return one value where a repeated property left icalendar holding a list."""
     return value[0] if isinstance(value, list) and value else value
@@ -890,8 +987,8 @@ def occurrences(item: Any, start: datetime, end: datetime) -> list[Any]:
     """Return the VEVENTs of an object in a window, a series expanded on its own.
 
     caldav's expansion covers a whole search, so one series it cannot expand
-    would take every other event of the window with it. It also drops the
-    VTIMEZONEs, and vobject reads a TZID it never saw as floating.
+    would take every other event of the window with it. The occurrences come
+    without the VTIMEZONEs, and vobject reads a TZID it never saw as floating.
     """
     vevents = _vevents(item)
     ranged = _ranged_offsets(vevents)
@@ -901,13 +998,12 @@ def occurrences(item: Any, start: datetime, end: datetime) -> list[Any]:
                 rule = vevent.get("RRULE")
                 if rule is not None and "RECURRENCE-ID" not in vevent:
                     check_expandable(_first(rule), vevent["DTSTART"].dt)
+            instance = item.icalendar_instance
             zones = [
-                part
-                for part in item.icalendar_instance.subcomponents
-                if part.name == "VTIMEZONE"
+                part for part in instance.subcomponents if part.name == "VTIMEZONE"
             ]
-            item.expand_rrule(start, end)
-            item.icalendar_instance.subcomponents[:0] = zones
+            series = recurring_ical_events.of(instance, components=["VEVENT"])
+            instance.subcomponents = [*zones, *series.between(start, end)]
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Skipping a series that cannot be expanded: %s", err)
             return []

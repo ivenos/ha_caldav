@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import logging
 from math import isfinite
 import re
@@ -26,6 +27,8 @@ from icalendar import (
     vCalAddress,
     vDDDLists,
     vRecur,
+    vText,
+    vUri,
 )
 
 from .const import (
@@ -42,11 +45,13 @@ from .extras import (
     comparable_address,
     date_values,
     framed_rule,
+    holders,
     mailto,
     replace,
     rule_from,
     shifted,
     start_of,
+    to_utc,
 )
 from .task import (
     Tree,
@@ -234,6 +239,7 @@ def create_todo(
     data: dict[str, Any],
     own_address: str | None = None,
     as_shown: bool = True,
+    addresses: list[str] | None = None,
 ) -> None:
     """Create a new to-do item, as a subtask if it names a parent.
 
@@ -244,6 +250,8 @@ def create_todo(
     )
     instance = ICalCalendar.from_ical(ics)
     vtodo = next(iter(instance.walk("VTODO")))
+    if "CREATED" not in vtodo:
+        vtodo.add("CREATED", datetime.now(tz=UTC))
     apply_fields(
         vtodo,
         {key: value for key, value in data.items() if key != "summary"},
@@ -255,7 +263,7 @@ def create_todo(
         if parent not in tree.parents:
             raise Refused("parent_not_found", parent=parent)
         if not closed(vtodo):
-            _reopen(by_uid, [parent, *tree.ancestors(parent)])
+            _reopen(by_uid, [parent, *tree.ancestors(parent)], addresses)
     save_document(calendar, _zoned(instance, vtodo), as_todo=True)
 
 
@@ -278,6 +286,7 @@ def update_todo(
     expected_etag: str | None = None,
     own_address: str | None = None,
     as_shown: bool = True,
+    addresses: list[str] | None = None,
 ) -> None:
     """Apply changed fields to an existing to-do item.
 
@@ -317,10 +326,17 @@ def update_todo(
                     set_status(vtodo, "COMPLETED")
         if closing:
             canceled = str(vtodo.get("STATUS", "")).upper() == "CANCELLED"
-            _close_below(by_uid, tree, uid, "CANCELLED" if canceled else "COMPLETED")
+            _close_below(
+                by_uid,
+                tree,
+                uid,
+                "CANCELLED" if canceled else "COMPLETED",
+                addresses,
+            )
         elif reopening and parent in tree.parents:
-            _reopen(by_uid, [parent, *tree.ancestors(parent)])
-    stamp(vtodo)
+            above = [parent, *tree.ancestors(parent)]
+            _reopen(by_uid, [each for each in above if each != uid], addresses)
+    stamp(vtodo, addresses)
     _save_todo(todo, tag)
 
 
@@ -341,7 +357,13 @@ def _status(resource: Any) -> str:
     return str(vtodo_of(resource).get("STATUS", "")).upper()
 
 
-def _close_below(by_uid: dict[str, Any], tree: Tree, uid: str, status: str) -> None:
+def _close_below(
+    by_uid: dict[str, Any],
+    tree: Tree,
+    uid: str,
+    status: str,
+    addresses: list[str] | None = None,
+) -> None:
     """Close the open subtasks of an item, and theirs, the deepest first.
 
     What sits below a subtask that was closed already is left as it is.
@@ -358,11 +380,13 @@ def _close_below(by_uid: dict[str, Any], tree: Tree, uid: str, status: str) -> N
         tag = held_etag(resource, None)
         if not (status == "COMPLETED" and "RRULE" in vtodo and _roll_todo(vtodo)):
             set_status(vtodo, status)
-        stamp(vtodo)
+        stamp(vtodo, addresses)
         _save_todo(resource, tag)
 
 
-def _reopen(by_uid: dict[str, Any], uids: list[str]) -> None:
+def _reopen(
+    by_uid: dict[str, Any], uids: list[str], addresses: list[str] | None = None
+) -> None:
     """Reopen the closed parents above an item, up to the first open one."""
     for uid in uids:
         resource = by_uid[uid]
@@ -371,7 +395,7 @@ def _reopen(by_uid: dict[str, Any], uids: list[str]) -> None:
             return
         tag = held_etag(resource, None)
         set_status(vtodo, "NEEDS-ACTION")
-        stamp(vtodo)
+        stamp(vtodo, addresses)
         _save_todo(resource, tag)
 
 
@@ -515,7 +539,9 @@ def _sort_position(vtodo: Any) -> float | None:
     return position if isfinite(position) else None
 
 
-def delete_components(resource: Any, kind: str, tag: str | None = None) -> None:
+def delete_components(
+    resource: Any, kind: str, tag: str | None = None, quiet: bool = False
+) -> None:
     """Remove the components of one kind, and the resource once none is left.
 
     A resource may hold a VEVENT beside a VTODO under one uid, and both
@@ -524,13 +550,13 @@ def delete_components(resource: Any, kind: str, tag: str | None = None) -> None:
     instance = resource.icalendar_instance
     kept = [item for item in instance.subcomponents if item.name != kind]
     if not any(item.name != "VTIMEZONE" for item in kept):
-        delete_resource(resource, tag)
+        delete_resource(resource, tag, quiet)
         return
     _LOGGER.debug("Removing the %s of a resource that holds more than one kind", kind)
     instance.subcomponents = kept
     # A zone only the removed component referenced must not stay behind.
     resource.icalendar_instance = zoned_document(instance)
-    put_resource(resource, tag)
+    put_resource(resource, tag, quiet=quiet)
 
 
 def delete_todos(
@@ -581,24 +607,29 @@ def move_todo(
                 str(zone.get("TZID", "")): zone for zone in instance.walk("VTIMEZONE")
             }
             copies[each] = save_document(
-                target, _document(vtodos, zones, instance.get("PRODID")), as_todo=True
+                target,
+                _document(vtodos, zones, instance.get("PRODID")),
+                as_todo=True,
+                quiet=not keep_original,
             )
     except Exception:
         for copy in copies.values():
-            _undo(copy)
+            _undo(copy, quiet=not keep_original)
         raise
     if keep_original:
         return
     pending = list(moved)
     try:
         while pending:
-            delete_components(by_uid[pending[-1]], "VTODO", tags[pending[-1]])
+            delete_components(
+                by_uid[pending[-1]], "VTODO", tags[pending[-1]], quiet=True
+            )
             pending.pop()
     except WRITE_ERRORS:
         # The server may have deleted it before the timeout.
         for each in pending:
             if _still_there(source, each, todo=True):
-                _undo(copies[each])
+                _undo(copies[each], quiet=True)
         raise
 
 
@@ -636,12 +667,18 @@ def held_etag(resource: Any, expected_etag: str | None) -> str | None:
 _CALENDAR_TYPE = 'text/calendar; charset="utf-8"'
 
 
-def put_resource(resource: Any, tag: str | None = None, new: str | None = None) -> None:
+def put_resource(
+    resource: Any,
+    tag: str | None = None,
+    new: str | None = None,
+    quiet: bool = False,
+) -> None:
     """Write a resource's document over the version tagged, or as a new uid.
 
-    caldav's own save sends neither If-Match nor If-None-Match.
+    caldav's own save sends neither If-Match nor If-None-Match. Quiet asks the
+    server to notify no one, as for one half of a move.
     """
-    headers = {"Content-Type": _CALENDAR_TYPE}
+    headers = {"Content-Type": _CALENDAR_TYPE, **_quiet(quiet)}
     if tag is not None:
         headers["If-Match"] = tag
     if new is not None:
@@ -655,12 +692,12 @@ def put_resource(resource: Any, tag: str | None = None, new: str | None = None) 
         raise PutError(errmsg(response))
 
 
-def delete_resource(resource: Any, tag: str | None = None) -> None:
+def delete_resource(resource: Any, tag: str | None = None, quiet: bool = False) -> None:
     """Delete a resource, only the version tagged.
 
     caldav takes a 404 for success, which hides a url that missed the object.
     """
-    headers = {} if tag is None else {"If-Match": tag}
+    headers = _quiet(quiet) if tag is None else {"If-Match": tag, **_quiet(quiet)}
     response = resource.client.request(str(resource.url), "DELETE", "", headers)
     if response.status == 404:
         raise NotFoundError(errmsg(response))
@@ -668,6 +705,11 @@ def delete_resource(resource: Any, tag: str | None = None) -> None:
         raise Refused("etag_conflict")
     if response.status not in (200, 202, 204):
         raise DeleteError(errmsg(response))
+
+
+def _quiet(quiet: bool) -> dict[str, str]:
+    # RFC 6638 8.1, which sabre also applies to the organizer.
+    return {"Schedule-Reply": "F"} if quiet else {}
 
 
 def stamp(component: Any, addresses: list[str] | None = None) -> None:
@@ -712,16 +754,21 @@ def move_event(
     # RFC 4791 gives one uid one resource, and caldav names it after the uid.
     if _already_there(target, {uid}):
         raise Refused("uid_clash", uids=uid)
-    copy = save_document(target, instance, as_todo=False)
+    copy = save_document(
+        target, as_written(instance), as_todo=False, quiet=not keep_original
+    )
     if keep_original:
         return
     try:
-        delete_resource(event, tag)
-    except WRITE_ERRORS:
+        delete_resource(event, tag, quiet=True)
+    except WRITE_ERRORS as err:
         # The server may have deleted it before the timeout.
         if _still_there(source, uid):
-            _undo(copy)
-        raise
+            _undo(copy, quiet=True)
+            raise
+        # SOGo moves an invitation by itself once its uid lands in another calendar.
+        if not isinstance(err, NotFoundError):
+            raise
 
 
 def _still_there(calendar: caldav.Calendar, uid: str, todo: bool = False) -> bool:
@@ -733,10 +780,10 @@ def _still_there(calendar: caldav.Calendar, uid: str, todo: bool = False) -> boo
     return True
 
 
-def _undo(resource: Any) -> None:
+def _undo(resource: Any, quiet: bool = False) -> None:
     """Remove a resource this call wrote before failing further on."""
     try:
-        delete_resource(resource)
+        delete_resource(resource, quiet=quiet)
     except Exception as err:  # noqa: BLE001
         _LOGGER.warning("Could not undo a half-finished write: %s", err)
 
@@ -746,6 +793,7 @@ def save_document(
     document: ICalCalendar,
     as_todo: bool,
     overwrite: bool = False,
+    quiet: bool = False,
 ) -> Any:
     """Write a whole document to a collection as a resource named after its uid.
 
@@ -762,7 +810,7 @@ def save_document(
         data=document,
         parent=calendar,
     )
-    put_resource(stored, new=None if overwrite else uid)
+    put_resource(stored, new=None if overwrite else uid, quiet=quiet)
     return stored
 
 
@@ -842,8 +890,37 @@ def _document(
         if (zone := _timezone(tzid, zones)) is not None:
             document.add_component(zone)
     for component in components:
-        document.add_component(component)
+        document.add_component(as_written(component))
     return document
+
+
+def as_written(component: Any) -> Any:
+    """Return a component whose URI-valued properties go out as they came in.
+
+    icalendar 6 reads a property it does not know as TEXT whatever its VALUE
+    says, and escapes the comma of a geo: URI on the way out.
+    """
+    for name in list(component):
+        held = component[name]
+        values = held if isinstance(held, list) else [held]
+        if not any(_misread(value) for value in values):
+            continue
+        fixed = [_uri(value) if _misread(value) else value for value in values]
+        component[name] = fixed if isinstance(held, list) else fixed[0]
+    for sub in component.subcomponents:
+        as_written(sub)
+    return component
+
+
+def _misread(value: Any) -> bool:
+    params = getattr(value, "params", {})
+    return isinstance(value, vText) and str(params.get("VALUE", "")).upper() == "URI"
+
+
+def _uri(value: Any) -> Any:
+    uri = vUri(str(value))
+    uri.params = value.params
+    return uri
 
 
 def zoned_document(instance: ICalCalendar) -> ICalCalendar:
@@ -1098,43 +1175,163 @@ def delete_calendar(calendar: caldav.Calendar) -> None:
 
 
 def _roll_todo(vtodo: Any) -> bool:
-    """Advance a recurring to-do to its next occurrence; False if none remains."""
+    """Advance a recurring to-do to its next occurrence; False if none remains.
+
+    The series keeps the occurrences it had, less the one completed.
+    """
     anchor_key = "DTSTART" if "DTSTART" in vtodo else "DUE"
     if anchor_key not in vtodo:
         return False
     anchor = vtodo[anchor_key].dt
     start = as_datetime(anchor)
+    zone = anchor.tzinfo if isinstance(anchor, datetime) else None
     rrule = vtodo["RRULE"]
     try:
         rule = rule_from(rrule, anchor)
-        following = _occurrences(vtodo, rule, start).after(start)
+        occurrences = _occurrences(vtodo, rule, start)
+        following = occurrences.after(start)
+        if following is None:
+            return False
+        if following in rule:
+            recur = _counted_down(rrule, rule, start, following)
+        else:
+            following, recur = _onto_added_date(
+                vtodo, anchor, rule, occurrences, following
+            )
     except TypeError, ValueError:
         # A rule malformed beyond what rule_from reconciles, or a date that
         # does not compare with the start.
         return False
-    if following is None:
+    if recur is None:
         return False
-    count = rrule.get("COUNT")
-    # COUNT counts the rule's own slots, the excluded ones included.
-    passed = sum(1 for slot in rule.between(start, following, inc=True) if slot > start)
-    if count and count[0] - passed < 1:
-        return False
-    delta = following - start
-    zone = anchor.tzinfo if isinstance(anchor, datetime) else None
+    delta = _wall_delta(start, following)
     for key in ("DTSTART", "DUE"):
         if key in vtodo:
-            moved = shifted(vtodo[key].dt, delta, zone)
-            del vtodo[key]
-            vtodo.add(key, moved)
-    if count:
-        reduced = vRecur(dict(rrule))
-        reduced["COUNT"] = [count[0] - passed]
-        del vtodo["RRULE"]
-        vtodo.add("RRULE", reduced)
+            replace(vtodo, key.lower(), shifted(vtodo[key].dt, delta, zone))
+    if recur is not rrule:
+        replace(vtodo, "rrule", recur)
+    _drop_dates_through(vtodo, start)
     vtodo["STATUS"] = "NEEDS-ACTION"
     for done in ("COMPLETED", "PERCENT-COMPLETE"):
         vtodo.pop(done, None)
     return True
+
+
+def _counted_down(
+    rrule: Any, rule: Any, start: datetime, following: datetime
+) -> Any | None:
+    """Return the rule as counted from a later slot of its own, None if none is left."""
+    if not (count := rrule.get("COUNT")):
+        return rrule
+    # COUNT counts the rule's own slots, the excluded ones included.
+    passed = sum(1 for slot in rule.between(start, following, inc=True) if slot > start)
+    if count[0] - passed < 1:
+        return None
+    reduced = vRecur(dict(rrule))
+    reduced["COUNT"] = [count[0] - passed]
+    return reduced
+
+
+_COMPARED_OCCURRENCES = 50
+
+
+def _onto_added_date(
+    vtodo: Any, anchor: Any, rule: Any, occurrences: rruleset, added: datetime
+) -> tuple[datetime, Any | None]:
+    """Return where a series goes on from an RDATE its rule lacks, and with what rule.
+
+    RFC 5545 3.8.5.3 leaves a DTSTART off its rule undefined, so the rule
+    spells out what it took from the old start, an UNTIL stands in for COUNT,
+    and the date stays an RDATE. A period an INTERVAL skips cannot hold the
+    start without moving the rule's phase; the series then goes on at the
+    next date of its rule, the added date left as an RDATE before it.
+    """
+    start = as_datetime(anchor)
+    rrule = vtodo["RRULE"]
+    zone = anchor.tzinfo if isinstance(anchor, datetime) else None
+    moved = shifted(anchor, _wall_delta(start, added), zone)
+    pinned = framed_rule(_pinned(rrule, rule, start, added, anchor), moved)
+    expected = list(occurrences.xafter(start, count=_COMPARED_OCCURRENCES))
+    candidate = _occurrences(vtodo, rule_from(pinned, moved), start)
+    if list(candidate.xafter(start, count=_COMPARED_OCCURRENCES)) == expected:
+        return added, pinned
+    regular = next((when for when in occurrences.xafter(start) if when in rule), None)
+    if regular is None:
+        return added, pinned
+    return regular, _counted_down(rrule, rule, start, regular)
+
+
+_WEEKDAYS = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
+_DAY_PARTS = ("BYWEEKNO", "BYYEARDAY", "BYMONTHDAY", "BYDAY")
+_FINER_THAN = {
+    "BYHOUR": ("hour", {"YEARLY", "MONTHLY", "WEEKLY", "DAILY"}),
+    "BYMINUTE": ("minute", {"YEARLY", "MONTHLY", "WEEKLY", "DAILY", "HOURLY"}),
+    "BYSECOND": (
+        "second",
+        {"YEARLY", "MONTHLY", "WEEKLY", "DAILY", "HOURLY", "MINUTELY"},
+    ),
+}
+
+
+def _pinned(
+    rrule: Any, rule: Any, start: datetime, added: datetime, anchor: Any
+) -> Any:
+    """Return the rule with the parts it took from its start written out.
+
+    RFC 5545 3.3.10 fills what a rule leaves open from DTSTART, as dateutil
+    does: the weekday, the day and month together, each part of the time.
+    """
+    pinned = vRecur(dict(rrule))
+    here = added.astimezone(start.tzinfo) if start.tzinfo else added
+    freq = str(rrule["FREQ"][0]).upper()
+    if not any(part in rrule for part in _DAY_PARTS):
+        if freq == "WEEKLY" and here.weekday() != start.weekday():
+            pinned["BYDAY"] = [_WEEKDAYS[start.weekday()]]
+        elif freq == "MONTHLY" and here.day != start.day:
+            pinned["BYMONTHDAY"] = [start.day]
+        elif freq == "YEARLY" and (here.month, here.day) != (start.month, start.day):
+            pinned["BYMONTHDAY"] = [start.day]
+            pinned.setdefault("BYMONTH", [start.month])
+    if isinstance(anchor, datetime):
+        for part, (name, coarser) in _FINER_THAN.items():
+            held = getattr(start, name)
+            if part not in rrule and freq in coarser and getattr(here, name) != held:
+                pinned[part] = [held]
+    if rrule.get("COUNT"):
+        del pinned["COUNT"]
+        last = deque(rule, maxlen=1)
+        pinned["UNTIL"] = [last[0] if last else start]
+    return pinned
+
+
+def _wall_delta(start: datetime, following: datetime) -> timedelta:
+    """Return how far the wall clock of the start moves to reach a later moment."""
+    if start.tzinfo is None:
+        return following - start
+    return following.astimezone(start.tzinfo).replace(tzinfo=None) - start.replace(
+        tzinfo=None
+    )
+
+
+def _drop_dates_through(vtodo: Any, moment: datetime) -> None:
+    """Remove the RDATE values up to and including the occurrence completed."""
+    if "RDATE" not in vtodo:
+        return
+    limit = to_utc(moment)
+    entries = vtodo["RDATE"] if isinstance(vtodo["RDATE"], list) else [vtodo["RDATE"]]
+    kept = []
+    for entry in entries:
+        items = holders(entry)
+        later = [item.dt for item in items if to_utc(start_of(item.dt)) > limit]
+        if len(later) == len(items):
+            kept.append(entry)
+        elif later:
+            rebuilt = vDDDLists(later)
+            rebuilt.params = entry.params
+            kept.append(rebuilt)
+    del vtodo["RDATE"]
+    if kept:
+        vtodo["RDATE"] = kept if len(kept) > 1 else kept[0]
 
 
 def _occurrences(vtodo: Any, rule: Any, start: datetime) -> rruleset:

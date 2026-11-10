@@ -97,6 +97,18 @@ def test_completing_recurring_todo_decrements_count() -> None:
     assert vtodo["RRULE"]["COUNT"] == [2]
 
 
+def test_completing_the_first_of_two_leaves_the_second_open() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo("DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY;COUNT=2")
+    )
+    update_todo(calendar, "t1", COMPLETE)
+
+    vtodo = calendar.todo.stored()
+    assert str(vtodo["STATUS"]) == "NEEDS-ACTION"
+    assert vtodo["DUE"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+    assert vtodo["RRULE"]["COUNT"] == [1]
+
+
 def test_completing_last_recurring_todo_closes_it() -> None:
     calendar = FakeTodoCalendar(
         _vtodo("DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY;COUNT=1")
@@ -139,7 +151,15 @@ def test_completing_misaligned_count_one_closes_without_invalid_count() -> None:
     calendar = FakeTodoCalendar(
         _vtodo("DUE:20260707T090000Z\r\nRRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=1")
     )
-    update_todo(calendar, "t1", {"summary": "Water plants", "status": "COMPLETED"})
+    update_todo(
+        calendar,
+        "t1",
+        {
+            "summary": "Water plants",
+            "status": "COMPLETED",
+            "due": datetime(2026, 7, 7, 9, 0, tzinfo=UTC),
+        },
+    )
 
     vtodo = calendar.todo.stored()
     assert str(vtodo["STATUS"]) == "COMPLETED"
@@ -244,7 +264,7 @@ def test_a_due_date_cannot_be_moved_in_front_of_the_start() -> None:
         _vtodo("DTSTART:20260710T090000Z\r\nDUE:20260711T090000Z")
     )
 
-    with pytest.raises(Refused, match="end_before_start"):
+    with pytest.raises(Refused, match="due_before_start"):
         update_todo(
             calendar,
             "t1",
@@ -349,6 +369,114 @@ def test_completing_a_recurring_todo_takes_an_added_date_first() -> None:
     update_todo(calendar, "t1", COMPLETE)
 
     assert calendar.todo.stored()["DUE"].dt == datetime(2026, 7, 8, 9, 0, tzinfo=UTC)
+
+
+def _completed(calendar: FakeTodoCalendar, times: int) -> list:
+    """Tick the item off as often as asked and return each due it moved to."""
+    dues = []
+    for _ in range(times):
+        update_todo(calendar, "t1", {"status": "COMPLETED"}, as_shown=False)
+        stored = calendar.todo.stored()
+        dues.append(stored["DUE"].dt if str(stored["STATUS"]) != "COMPLETED" else None)
+        calendar.todo = FakeTodo(calendar.todo.data)
+    return dues
+
+
+def test_an_added_date_does_not_move_the_weekday_of_the_rule() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo("DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY\r\nRDATE:20260708T090000Z")
+    )
+
+    assert _completed(calendar, 3) == [
+        datetime(2026, 7, 8, 9, 0, tzinfo=UTC),
+        datetime(2026, 7, 13, 9, 0, tzinfo=UTC),
+        datetime(2026, 7, 20, 9, 0, tzinfo=UTC),
+    ]
+
+
+def test_an_added_date_does_not_stay_behind_once_it_is_done() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo("DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY\r\nRDATE:20260708T090000Z")
+    )
+
+    _completed(calendar, 2)
+
+    assert "RDATE" not in calendar.todo.stored()
+
+
+def test_a_counted_series_with_an_added_date_ends_after_the_same_occurrences() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\n"
+            "RDATE:20260708T090000Z"
+        )
+    )
+
+    assert _completed(calendar, 4) == [
+        datetime(2026, 7, 8, 9, 0, tzinfo=UTC),
+        datetime(2026, 7, 13, 9, 0, tzinfo=UTC),
+        datetime(2026, 7, 20, 9, 0, tzinfo=UTC),
+        None,
+    ]
+
+
+def test_an_added_time_of_day_does_not_move_the_time_of_the_rule() -> None:
+    berlin = ZoneInfo("Europe/Berlin")
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DTSTART;TZID=Europe/Berlin:20260706T090000\r\n"
+            "DUE;TZID=Europe/Berlin:20260706T100000\r\nRRULE:FREQ=MONTHLY\r\n"
+            "RDATE;TZID=Europe/Berlin:20260710T140000"
+        )
+    )
+
+    assert _completed(calendar, 2) == [
+        datetime(2026, 7, 10, 15, 0, tzinfo=berlin),
+        datetime(2026, 8, 6, 10, 0, tzinfo=berlin),
+    ]
+
+
+def test_an_added_date_in_a_week_of_an_interval_keeps_the_rule_on_its_weeks() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY;INTERVAL=2\r\n"
+            "RDATE:20260708T090000Z"
+        )
+    )
+
+    assert _completed(calendar, 2) == [
+        datetime(2026, 7, 8, 9, 0, tzinfo=UTC),
+        datetime(2026, 7, 20, 9, 0, tzinfo=UTC),
+    ]
+
+
+def test_an_added_date_in_a_week_an_interval_skips_leaves_the_rule_where_it_was() -> (
+    None
+):
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY;INTERVAL=2\r\n"
+            "RDATE:20260715T090000Z"
+        )
+    )
+
+    assert _completed(calendar, 2) == [
+        datetime(2026, 7, 20, 9, 0, tzinfo=UTC),
+        datetime(2026, 8, 3, 9, 0, tzinfo=UTC),
+    ]
+
+
+def test_clearing_the_due_of_a_recurring_todo_without_a_start_is_refused() -> None:
+    import pytest
+
+    from custom_components.ha_caldav.errors import Refused
+
+    calendar = FakeTodoCalendar(_vtodo("DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY"))
+
+    with pytest.raises(Refused, match="rrule_needs_date"):
+        update_todo(calendar, "t1", {"summary": "Water plants"})
+
+    assert "DUE" in calendar.todo.stored()
 
 
 def test_a_roll_clears_the_completion_and_marks_the_item_revised() -> None:
@@ -456,3 +584,71 @@ def test_a_moved_floating_due_time_stays_floating() -> None:
     )
 
     assert calendar.todo.stored()["DUE"].dt == datetime(2026, 7, 6, 10, 0)
+
+
+def test_ticking_off_an_item_with_a_start_and_due_of_different_kinds_works() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo("DTSTART:20261118T100000Z\r\nDUE;VALUE=DATE:20261119")
+    )
+
+    # Core sends the whole item for a tick, its due unchanged.
+    update_todo(
+        calendar,
+        "t1",
+        {"summary": "Water plants", "status": "COMPLETED", "due": date(2026, 11, 19)},
+    )
+
+    assert str(calendar.todo.stored()["STATUS"]) == "COMPLETED"
+
+
+def test_ticking_off_an_item_due_before_its_start_works() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo("DTSTART:20261120T100000Z\r\nDUE:20261119T100000Z")
+    )
+
+    update_todo(
+        calendar,
+        "t1",
+        {
+            "summary": "Water plants",
+            "status": "COMPLETED",
+            "due": datetime(2026, 11, 19, 10, 0, tzinfo=UTC),
+        },
+    )
+
+    assert str(calendar.todo.stored()["STATUS"]) == "COMPLETED"
+
+
+def test_editing_an_assigned_todo_without_an_organizer_invites_nobody() -> None:
+    calendar = FakeTodoCalendar(_vtodo("ATTENDEE:mailto:ann@example.com"))
+
+    update_todo(
+        calendar,
+        "t1",
+        {"summary": "Water the plants", "priority": 1, "categories": ["home"]},
+        own_address="mailto:me@example.com",
+        as_shown=False,
+    )
+
+    assert "ORGANIZER" not in calendar.todo.stored()
+    assert int(calendar.todo.stored()["PRIORITY"]) == 1
+
+
+def test_ticking_off_a_todo_someone_else_organizes_keeps_its_sequence() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "ORGANIZER:mailto:boss@example.com\r\n"
+            "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\nSEQUENCE:2"
+        )
+    )
+
+    update_todo(
+        calendar,
+        "t1",
+        {"status": "COMPLETED"},
+        own_address="mailto:me@example.com",
+        as_shown=False,
+        addresses=["mailto:me@example.com"],
+    )
+
+    assert int(calendar.todo.stored()["SEQUENCE"]) == 2

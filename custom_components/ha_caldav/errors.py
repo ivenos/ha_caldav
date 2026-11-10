@@ -7,6 +7,7 @@ alias names the exceptions it raises.
 from __future__ import annotations
 
 import logging
+import ssl
 
 from caldav.davclient import requests
 from caldav.lib.error import AuthorizationError, DAVError, NotFoundError
@@ -18,10 +19,34 @@ _LOGGER = logging.getLogger(__name__)
 
 NETWORK_ERRORS = (requests.RequestException, DAVError)
 
+# What OpenSSL reports when a handshake is answered in plain text.
+_PLAIN_TEXT = frozenset({"WRONG_VERSION_NUMBER", "RECORD_LAYER_FAILURE"})
+
 
 def rejected(err: BaseException | None) -> bool:
     """Return whether an error is a 401; caldav raises the same type for 403."""
     return isinstance(err, AuthorizationError) and err.reason == "Unauthorized"
+
+
+def without_tls(err: BaseException) -> bool:
+    """Return whether a TLS error comes from a server that does not speak TLS.
+
+    The HTTP libraries wrap the ssl error a few levels down.
+    """
+    seen: set[int] = set()
+    pending: list[object] = [err]
+    while pending:
+        item = pending.pop()
+        if not isinstance(item, BaseException) or id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, ssl.SSLError) and item.reason in _PLAIN_TEXT:
+            return True
+        pending.extend(
+            (item.__cause__, item.__context__, getattr(item, "reason", None))
+        )
+        pending.extend(item.args)
+    return False
 
 
 class Refused(ValueError):

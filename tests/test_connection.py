@@ -1,11 +1,18 @@
+import asyncio
 from base64 import b64encode
+from datetime import timedelta
+import threading
 from unittest.mock import Mock, patch
 
+import caldav
 from caldav.davclient import requests
 from caldav.lib.error import AuthorizationError
-from homeassistant.const import CONF_URL, CONF_VERIFY_SSL
+from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
+from homeassistant.core import HomeAssistant
 import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.ha_caldav.capability import Capability
 from custom_components.ha_caldav.connection import (
     HostLockedSession,
     account_key,
@@ -21,7 +28,13 @@ from custom_components.ha_caldav.const import (
     CONF_CLIENT_CERT,
     CONF_CLIENT_KEY,
     DEFAULT_TIMEOUT,
+    DOMAIN,
 )
+from custom_components.ha_caldav.coordinator import (
+    HaCaldavColorCoordinator,
+    HaCaldavCoordinator,
+)
+from custom_components.ha_caldav.errors import rejected
 
 
 def test_plain_account_verifies_against_the_system_store() -> None:
@@ -428,13 +441,44 @@ def test_a_write_redirected_on_the_same_host_goes_on_as_it_was_sent(
     )
 
 
+def test_a_write_follows_every_hop_of_a_redirect_chain() -> None:
+    session = HostLockedSession()
+    hops = [
+        _answer(307, "https://cloud.example.com/dav", location="/dav/"),
+        _answer(307, "https://cloud.example.com/dav/", location="/remote.php/dav/"),
+        _answer(207, "https://cloud.example.com/remote.php/dav/"),
+    ]
+
+    with patch.object(requests.Session, "request", side_effect=hops):
+        response = session.request("PROPFIND", "https://cloud.example.com/dav")
+
+    assert response is hops[-1]
+
+
+def test_the_account_moves_where_its_first_moved_request_went() -> None:
+    session = HostLockedSession()
+    answers = [
+        _answer(301, "https://cloud.example.com/dav", location="/dav/"),
+        _answer(207, "https://cloud.example.com/dav/"),
+        _answer(301, "https://cloud.example.com/dav/home", location="/home/"),
+        _answer(207, "https://cloud.example.com/home/"),
+    ]
+
+    with patch.object(requests.Session, "request", side_effect=answers):
+        session.request("PROPFIND", "https://cloud.example.com/dav")
+        session.request("PROPFIND", "https://cloud.example.com/dav/home")
+
+    assert session.moved_to == "https://cloud.example.com/dav/"
+
+
 @pytest.mark.parametrize(
     ("location", "moved"),
     [
         ("https://elsewhere.example/dav/", 301),
+        ("http://cloud.example.com/dav/", 307),
         ("https://cloud.example.com/dav/", 303),
     ],
-    ids=["another_host", "see_other"],
+    ids=["another_host", "out_of_https", "see_other"],
 )
 def test_a_redirect_the_write_does_not_follow_is_answered_as_it_came(
     location: str, moved: int
@@ -540,3 +584,155 @@ def test_a_basic_login_goes_out_as_utf_8(password: str) -> None:
     for auth in logins:
         prepared = requests.Request("GET", "https://x/", auth=auth).prepare()
         assert prepared.headers["Authorization"] == expected
+
+
+def _radicale():
+    """Answer like Radicale: well-known points at the root, a GET there at the UI."""
+
+    def send(self, request, **kwargs):
+        reply = requests.Response()
+        reply.url = request.url
+        reply.request = request
+        path = "/" + request.url.split("/", 3)[3]
+        if path == "/.well-known/caldav":
+            reply.status_code, reply.headers["Location"] = 301, "/"
+        elif path == "/" and request.method == "GET":
+            reply.status_code, reply.headers["Location"] = 302, ".web"
+        elif path == "/.web":
+            reply.status_code, reply.headers["Location"] = 301, "/.web/"
+        else:
+            reply.status_code = 200
+            reply.headers["Content-Type"] = "text/html"
+            reply._content = b"<html></html>"
+        return reply
+
+    return patch.object(requests.adapters.HTTPAdapter, "send", send)
+
+
+def test_the_bootstrap_stops_where_the_well_known_url_points() -> None:
+    with (
+        patch(
+            "custom_components.ha_caldav.connection.requests.request",
+            new=requests.api.request,
+        ),
+        _radicale(),
+    ):
+        candidates = list(url_candidates("http://radicale.example.com:5232/.web/", {}))
+
+    assert candidates == [
+        "http://radicale.example.com:5232/.web/",
+        "http://radicale.example.com:5232/",
+    ]
+
+
+def _login() -> requests.auth.HTTPBasicAuth:
+    return requests.auth.HTTPBasicAuth("iven", "old")
+
+
+def test_after_a_refused_login_no_request_of_the_account_goes_out() -> None:
+    """Servers block an address after a few refused logins, the right one included."""
+    session = HostLockedSession()
+    refusal = _answer(401, "https://cloud.example.com/dav/")
+
+    with patch.object(requests.Session, "request", return_value=refusal) as sent:
+        session.request("PROPFIND", "https://x/", auth=_login(), data="<x/>")
+        with pytest.raises(AuthorizationError) as raised:
+            session.request("REPORT", "https://x/cal/", auth=_login(), data="<x/>")
+
+    assert sent.call_count == 1
+    assert rejected(raised.value)
+
+
+def test_logins_sent_together_wait_for_the_first_answer() -> None:
+    session = HostLockedSession()
+    asked, release = threading.Event(), threading.Event()
+    calls: list[str] = []
+    outcomes: list[object] = []
+
+    def send(method, url, *args, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            asked.set()
+            release.wait(5)
+        return _answer(401, url)
+
+    def poll(url: str) -> None:
+        try:
+            outcomes.append(session.request("REPORT", url, auth=_login(), data="<x/>"))
+        except AuthorizationError as err:
+            outcomes.append(err)
+
+    with patch.object(requests.Session, "request", side_effect=send):
+        first = threading.Thread(target=poll, args=("https://x/a/",))
+        first.start()
+        asked.wait(5)
+        second = threading.Thread(target=poll, args=("https://x/b/",))
+        second.start()
+        second.join(0.2)
+        waited = second.is_alive()
+        release.set()
+        first.join(5)
+        second.join(5)
+
+    assert waited
+    assert calls == ["https://x/a/"]
+    assert any(isinstance(outcome, AuthorizationError) for outcome in outcomes)
+
+
+def test_a_digest_password_handed_over_as_bytes_is_signed_as_text() -> None:
+    """caldav 2 keeps the password as bytes, which requests hashes as "b'...'"."""
+    auth = requests.auth.HTTPDigestAuth("iven", "pässwort".encode())
+    answer = _answer(207, "https://cloud.example.com/dav/")
+
+    with patch.object(requests.Session, "request", return_value=answer):
+        HostLockedSession().request("PROPFIND", "https://x/", auth=auth, data="<x/>")
+
+    assert auth.password == "pässwort"
+
+
+async def test_one_round_of_polls_after_a_password_change_logs_in_once(
+    hass: HomeAssistant,
+) -> None:
+    url = "https://cloud.example.com/remote.php/dav/"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_URL: url, CONF_USERNAME: "iven", CONF_PASSWORD: "old"},
+        unique_id="x",
+    )
+    entry.add_to_hass(hass)
+    logins: list[str] = []
+
+    def send(self, request, **kwargs):
+        if "Authorization" in request.headers:
+            logins.append(request.url)
+        reply = requests.Response()
+        reply.status_code = 401
+        reply.headers["WWW-Authenticate"] = 'Basic realm="Nextcloud"'
+        reply._content = b""
+        reply.url = request.url
+        reply.request = request
+        return reply
+
+    client = build_client(url, "iven", "old", {})
+    client.auth = requests.auth.HTTPBasicAuth("iven", "old")
+    polls = [HaCaldavColorCoordinator(hass, entry, client, timedelta(minutes=15))]
+    for index in range(4):
+        calendar = caldav.Calendar(client=client, url=f"{url}calendars/iven/c{index}/")
+        coordinator = HaCaldavCoordinator(
+            hass,
+            entry,
+            calendar,
+            Capability(frozenset({"VEVENT", "VTODO"}), True),
+            7,
+            True,
+            timedelta(minutes=15),
+        )
+        for half in coordinator.halves.values():
+            half.cached = []
+        polls.append(coordinator)
+    with patch.object(requests.adapters.HTTPAdapter, "send", send):
+        await asyncio.gather(*(poll.async_refresh() for poll in polls))
+    client.close()
+
+    assert len(logins) == 1
+    assert not any(poll.last_update_success for poll in polls)

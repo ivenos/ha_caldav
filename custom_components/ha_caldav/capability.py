@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
+from functools import cache, partial
 import logging
 from typing import Any, ClassVar
 from urllib.parse import urljoin, urlparse
@@ -73,11 +75,16 @@ UNKNOWN = Capability(frozenset({COMPONENT_EVENT, COMPONENT_TODO}), writable=True
 
 @dataclass(frozen=True)
 class Delegation:
-    """An account this one acts for, by its calendars and its addresses."""
+    """An account this one acts for, by its calendars and its addresses.
+
+    Copies map the keys of what SOGo keeps of these calendars in the
+    account's own home, which the listing leaves out, to the calendar each copies.
+    """
 
     home: Any
     addresses: list[str]
     owner: str
+    copies: Mapping[str, str] = field(default_factory=dict)
 
 
 def fetch_delegations(client: caldav.DAVClient, principal: Any) -> list[Delegation]:
@@ -129,15 +136,19 @@ def account_calendars(
     """Return the calendars of the account and of those it is a delegate of.
 
     A delegated calendar is named with its owner, as it may share its name
-    with one of the account's own. SOGo names it so by itself.
+    with one of the account's own. SOGo names it so by itself, and lists a
+    copy of it among the account's own, which is left out.
     """
     principal = client.principal()
     # caldav moves the client to the host of the home on reading it, as on iCloud.
     principal.calendar_home_set  # noqa: B018
-    calendars = list(principal.calendars())
+    own = list(principal.calendars())
+    calendars = list(own)
     delegations = fetch_delegations(client, principal)
     seen = {calendar_key(calendar.url) for calendar in calendars}
-    for delegation in delegations:
+    own_names = {_name(calendar.url): calendar_key(calendar.url) for calendar in own}
+    owners = cache(partial(_owners, principal.calendar_home_set))
+    for index, delegation in enumerate(delegations):
         try:
             delegated = delegation.home.calendars()
         except Exception as err:  # noqa: BLE001
@@ -145,6 +156,8 @@ def account_calendars(
                 "Could not list the calendars of %s: %s", delegation.owner, err
             )
             continue
+        if found := _copies(own_names, delegation, delegated, owners):
+            delegations[index] = replace(delegation, copies=found)
         for calendar in delegated:
             if (key := calendar_key(calendar.url)) not in seen:
                 seen.add(key)
@@ -159,12 +172,105 @@ def account_calendars(
                         name=name,
                     )
                 )
-    return calendars, delegations
+    hidden = {key for delegation in delegations for key in delegation.copies}
+    return [
+        calendar for calendar in calendars if calendar_key(calendar.url) not in hidden
+    ], delegations
 
 
-def home_sets(client: caldav.DAVClient, delegations: Any = ()) -> list[Any]:
-    """Return the calendar home set of the account and of each delegation."""
-    return [client.principal().calendar_home_set, *(item.home for item in delegations)]
+# SOGo's asCSSIdentifier (NSString+Utilities.m), which it names a subscription by.
+_CSS_ESCAPES = str.maketrans(
+    {
+        "_": "_U_",
+        ".": "_D_",
+        "#": "_H_",
+        "@": "_A_",
+        "*": "_S_",
+        ":": "_C_",
+        ";": "_SC_",
+        ",": "_CO_",
+        " ": "_SP_",
+        "'": "_SQ_",
+        '"': "_DQ_",
+        "(": "_LP_",
+        ")": "_RP_",
+        "[": "_LS_",
+        "]": "_RS_",
+        "{": "_LC_",
+        "}": "_RC_",
+        "&": "_AM_",
+        "+": "_P_",
+        "$": "_DS_",
+    }
+)
+
+
+def _copies(
+    own: dict[str, str],
+    delegation: Delegation,
+    delegated: list[Any],
+    owners: Callable[[], dict[str, str]],
+) -> dict[str, str]:
+    """Return own calendar key -> delegated calendar key, for SOGo's copies.
+
+    SOGo subscribes a delegate to each calendar it may act on, in the
+    delegate's own home as <owner>_<name> and owned by the account it acts for.
+    """
+    login = delegation.owner.translate(_CSS_ESCAPES)
+    if login[:1].isdecimal():
+        login = f"_{login}"
+    named = {
+        key: calendar_key(calendar.url)
+        for calendar in delegated
+        if (key := own.get(f"{login}_{_name(calendar.url)}")) is not None
+    }
+    return {
+        key: theirs
+        for key, theirs in named.items()
+        if owners().get(key) == delegation.owner
+    }
+
+
+def _owners(home: Any) -> dict[str, str]:
+    """Return calendar key -> the account owning it, for the calendars of a home."""
+    try:
+        response = home.get_properties([dav.Owner()], depth=1, parse_response_xml=False)
+        found = objects_and_props(response, home.url)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Could not read who owns the calendars: %s", err)
+        return {}
+    return {
+        key: _name(href)
+        for key, props in found.items()
+        if (holder := props.get(dav.Owner.tag)) is not None
+        and (href := holder.findtext(dav.Href.tag))
+    }
+
+
+def _name(url: Any) -> str:
+    return calendar_key(url).rsplit("/", 1)[-1]
+
+
+def home_properties(
+    client: caldav.DAVClient, delegations: Any, props: list[Any]
+) -> list[tuple[Any, Any]]:
+    """Return each home set with its answer for the calendars it holds.
+
+    A delegation that fails is left out, a failing own home raises.
+    """
+    homes = [client.principal().calendar_home_set, *(item.home for item in delegations)]
+    found = []
+    for index, home in enumerate(homes):
+        try:
+            # The parsed form collapses to the home set itself.
+            response = home.get_properties(props, depth=1, parse_response_xml=False)
+        except Exception as err:
+            if not index:
+                raise
+            _LOGGER.debug("Could not read the calendars of a delegation: %s", err)
+            continue
+        found.append((home, response))
+    return found
 
 
 def fetch_capabilities(
@@ -172,12 +278,11 @@ def fetch_capabilities(
 ) -> dict[str, Capability]:
     """Return calendar key -> capability for everything the home sets report on."""
     capabilities: dict[str, Capability] = {}
-    for home in home_sets(client, delegations):
-        response = home.get_properties(
-            [cdav.SupportedCalendarComponentSet(), CurrentUserPrivilegeSet()],
-            depth=1,
-            parse_response_xml=False,
-        )
+    for home, response in home_properties(
+        client,
+        delegations,
+        [cdav.SupportedCalendarComponentSet(), CurrentUserPrivilegeSet()],
+    ):
         for href, props in objects_and_props(response, home.url).items():
             components = _components(props.get(cdav.SupportedCalendarComponentSet.tag))
             privileges = _privileges(props.get(CurrentUserPrivilegeSet.tag))
@@ -313,13 +418,13 @@ def supports_sync_collection(calendar: caldav.Calendar) -> bool:
             [dav.SupportedReportSet()], parse_response_xml=False
         )
         answered = False
-        for props in response.find_objects_and_props().values():
-            element = props.get(dav.SupportedReportSet.tag)
-            if element is None:
+        for propstat in response.tree.iter(dav.PropStat.tag):
+            if " 200 " not in (propstat.findtext(dav.Status.tag) or ""):
                 continue
-            answered = True
-            if any("sync-collection" in str(node.tag) for node in element.iter()):
-                return True
+            for element in propstat.iter(dav.SupportedReportSet.tag):
+                answered = True
+                if any("sync-collection" in str(node.tag) for node in element.iter()):
+                    return True
     except Exception as err:  # noqa: BLE001
         # Parsing fails on the same servers that answer the property oddly.
         _LOGGER.debug("Could not read the supported report set: %s", err)

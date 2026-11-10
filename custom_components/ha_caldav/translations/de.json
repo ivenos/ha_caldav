@@ -75,7 +75,9 @@
       "unknown": "Unerwarteter Fehler",
       "invalid_url": "Die URL ist keine http- oder https-Adresse",
       "certificate_not_found": "Ein Pfad unter Zertifikate führt zu keiner Datei",
-      "certificate_failed": "Die TLS-Verbindung ist fehlgeschlagen: Das Serverzertifikat ließ sich nicht prüfen, oder der Server hat das Client-Zertifikat abgelehnt"
+      "certificate_failed": "Die TLS-Verbindung ist fehlgeschlagen: Das Serverzertifikat ließ sich nicht prüfen, oder der Server hat das Client-Zertifikat abgelehnt",
+      "no_tls": "Der Server verwendet unter dieser Adresse kein TLS. Bietet er nur unverschlüsseltes HTTP an, gib die Adresse mit http:// am Anfang ein; das Passwort wird dann unverschlüsselt übertragen",
+      "too_many_attempts": "Der Server sperrt Anmeldungen von dieser Adresse nach zu vielen Fehlversuchen. Warte, bis die Sperre abläuft, oder lass sie auf dem Server aufheben, und versuche es dann erneut"
     },
     "abort": {
       "already_configured": "Dieses Konto ist bereits eingerichtet",
@@ -101,6 +103,7 @@
           "timeout": "Sekunden pro Serveranfrage",
           "days": "Tage im Voraus",
           "include_all_day": "Ganztägige Termine einbeziehen",
+          "busy_only": "Nur belegte Termine",
           "read_only": "Schreibgeschützt"
         },
         "data_description": {
@@ -109,6 +112,7 @@
           "timeout": "Wie lange eine einzelne Anfrage an den Server dauern darf.",
           "days": "Wie weit vorausgeschaut wird, um den nächsten Termin zu bestimmen.",
           "include_all_day": "Ob ein ganztägiger Termin der nächste Termin sein kann.",
+          "busy_only": "Lässt Termine, die als frei angezeigt werden, und abgelehnte Einladungen weg, auch in der Kalenderansicht, für Automationen und für Erinnerungen.",
           "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus, und die Aktionen schreiben nichts. Eine Umbenennung in Home Assistant bleibt dann dort."
         }
       },
@@ -124,12 +128,14 @@
         "data": {
           "days": "Tage im Voraus",
           "include_all_day": "Ganztägige Termine einbeziehen",
+          "busy_only": "Nur belegte Termine",
           "read_only": "Schreibgeschützt",
           "reset": "Kontoeinstellungen verwenden"
         },
         "data_description": {
           "days": "Wie weit vorausgeschaut wird, um den nächsten Termin zu bestimmen.",
           "include_all_day": "Ob ein ganztägiger Termin der nächste Termin sein kann.",
+          "busy_only": "Lässt Termine, die als frei angezeigt werden, und abgelehnte Einladungen weg, auch in der Kalenderansicht, für Automationen und für Erinnerungen.",
           "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus, und die Aktionen schreiben nichts. Eine Umbenennung in Home Assistant bleibt dann dort.",
           "reset": "Verwirft alles hier Eingestellte und folgt wieder dem Konto."
         }
@@ -183,6 +189,9 @@
     "document_no_uid": {
       "message": "Das Dokument enthält eine Komponente ohne UID."
     },
+    "due_before_start": {
+      "message": "Die Fälligkeit einer Aufgabe kann nicht vor ihrem Start ({start}) liegen."
+    },
     "duplicate_uid": {
       "message": "Das Dokument enthält mehr als einen Eintrag mit der UID {uid}."
     },
@@ -198,6 +207,9 @@
     "last_selected_calendar": {
       "message": "{name} ist der einzige eingebundene Kalender dieses Kontos. Binde in den Optionen zuerst einen weiteren ein."
     },
+    "mixed_start_and_due": {
+      "message": "Start ({start}) und Fälligkeit einer Aufgabe müssen von derselben Art sein: beide ein Tag oder beide ein Tag mit Uhrzeit."
+    },
     "mixed_time_types": {
       "message": "Start und Ende müssen von derselben Art sein: zwei Datumsangaben für einen ganztägigen Termin oder zwei Zeitpunkte."
     },
@@ -210,6 +222,9 @@
     "no_scheduling": {
       "message": "Dieser Server beherrscht kein CalDAV-Scheduling; Einladungen lassen sich hier also nicht beantworten."
     },
+    "no_free_busy": {
+      "message": "Dieser Server beherrscht kein CalDAV-Scheduling und kann daher nicht sagen, wann andere Personen belegt sind."
+    },
     "no_start_in_object": {
       "message": "Dieser Termin hat kein Startdatum und lässt sich hier nicht ändern."
     },
@@ -220,7 +235,7 @@
       "message": "Dieser Termin führt dein Konto nicht als Teilnehmer."
     },
     "not_found": {
-      "message": "Dieser Eintrag liegt nicht mehr auf dem Server."
+      "message": "Dieser Eintrag liegt nicht auf dem Server."
     },
     "not_recurring": {
       "message": "Dieser Termin ist keine Serie."
@@ -293,6 +308,9 @@
     },
     "no_journals": {
       "message": "{name} nimmt keine Journaleinträge auf."
+    },
+    "no_events": {
+      "message": "{name} nimmt keine Termine auf."
     },
     "no_journal_in_object": {
       "message": "Dieser Eintrag ist nicht als Journaleintrag gespeichert und lässt sich hier nicht ändern."

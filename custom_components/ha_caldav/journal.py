@@ -49,7 +49,12 @@ def create_journal(calendar: caldav.Calendar, data: dict[str, Any]) -> None:
     save_document(calendar, zoned_document(document), as_todo=False)
 
 
-def update_journal(calendar: caldav.Calendar, uid: str, data: dict[str, Any]) -> None:
+def update_journal(
+    calendar: caldav.Calendar,
+    uid: str,
+    data: dict[str, Any],
+    addresses: list[str] | None = None,
+) -> None:
     """Apply changed fields to an existing journal entry."""
     resource = calendar.journal_by_uid(uid)
     tag = held_etag(resource, None)
@@ -58,7 +63,7 @@ def update_journal(calendar: caldav.Calendar, uid: str, data: dict[str, Any]) ->
         raise Refused("no_journal_in_object")
     entry = next((item for item in found if "RECURRENCE-ID" not in item), found[0])
     _apply(entry, data)
-    stamp(entry)
+    stamp(entry, addresses)
     resource.icalendar_instance = zoned_document(resource.icalendar_instance)
     put_resource(resource, tag)
 

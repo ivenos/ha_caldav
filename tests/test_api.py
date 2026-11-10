@@ -380,6 +380,33 @@ def test_responding_to_an_event_we_are_not_on_is_refused() -> None:
         respond_to_invitation(calendar, "uid-1", "ACCEPTED", ["iven@example.com"])
 
 
+INVITED_SERIES = (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n"
+    "BEGIN:VEVENT\r\nUID:inv-1\r\nDTSTAMP:20260101T000000Z\r\n"
+    "DTSTART:20260706T090000Z\r\nDTEND:20260706T100000Z\r\nRRULE:FREQ=WEEKLY\r\n"
+    "SUMMARY:Review\r\nORGANIZER:mailto:boss@example.com\r\n"
+    "ATTENDEE:mailto:iven@example.com\r\nEND:VEVENT\r\n"
+    "BEGIN:VEVENT\r\nUID:inv-1\r\nDTSTAMP:20260101T000000Z\r\n"
+    "RECURRENCE-ID:20260713T090000Z\r\nDTSTART:20260713T110000Z\r\n"
+    "DTEND:20260713T120000Z\r\nSUMMARY:Review moved\r\n"
+    "ORGANIZER:mailto:boss@example.com\r\nATTENDEE:mailto:iven@example.com\r\n"
+    "END:VEVENT\r\nEND:VCALENDAR\r\n"
+)
+
+
+def test_responding_to_a_series_answers_its_exceptions_too() -> None:
+    event = _Resource(INVITED_SERIES)
+    calendar = Mock()
+    calendar.event_by_uid.return_value = event
+
+    respond_to_invitation(calendar, "inv-1", "ACCEPTED", ["mailto:iven@example.com"])
+
+    assert [
+        str(component["ATTENDEE"].params["PARTSTAT"])
+        for component in event.icalendar_instance.walk("VEVENT")
+    ] == ["ACCEPTED", "ACCEPTED"]
+
+
 def test_setting_a_color_proppatches_the_collection() -> None:
     calendar = Mock()
 
@@ -741,6 +768,14 @@ def test_a_created_event_defines_the_timezone_it_references() -> None:
     ]
 
 
+def test_a_created_todo_says_when_it_was_created() -> None:
+    calendar = _missing_calendar()
+
+    create_todo(calendar, {"summary": "Milk"})
+
+    assert "CREATED" in _component(_written(calendar)[0], "VTODO")
+
+
 def test_a_created_todo_defines_the_timezone_it_references() -> None:
     calendar = dav_calendar()
     zone = ZoneInfo("Europe/Berlin")
@@ -861,7 +896,7 @@ def test_a_due_date_of_another_value_type_than_the_start_is_refused() -> None:
             {"summary": "x", "due": datetime(2026, 7, 7, 9, 0, tzinfo=UTC)},
         )
 
-    assert refusal.value.key == "mixed_time_types"
+    assert refusal.value.key == "mixed_start_and_due"
 
 
 def test_a_floating_start_is_compared_with_a_zoned_due_in_local_time() -> None:
@@ -1196,7 +1231,8 @@ def test_a_generated_timezone_survives_being_read_back() -> None:
 
     body = _document([vevent], {}, None).to_ical().decode("utf-8")
 
-    read = vobject.readOne(body).vevent.dtstart.value
+    zone = vobject.readOne(body).vtimezone.gettzinfo()
+    read = datetime(2026, 6, 15, 9, 0, tzinfo=zone)
     assert read.astimezone(UTC) == datetime(2026, 6, 15, 7, 0, tzinfo=UTC)
 
 
@@ -1393,6 +1429,41 @@ def test_a_move_keeps_the_original_when_the_copy_will_not_land() -> None:
     assert source.client.deletes == []
 
 
+def _stored_move() -> tuple[Mock, Mock, CaldavEvent]:
+    source, target = dav_calendar(), _missing_calendar()
+    stored = CaldavEvent(source.client, data=EVENT, url=f"{source.url}uid-1.ics")
+    source.client.stored[str(stored.url)] = (EVENT, '"e1"')
+    source.event_by_uid.return_value = stored
+    return source, target, stored
+
+
+def test_a_move_asks_the_server_to_tell_no_one() -> None:
+    source, target, _ = _stored_move()
+
+    move_event(source, target, "uid-1", keep_original=False)
+
+    assert target.client.put_headers[0]["Schedule-Reply"] == "F"
+    assert source.client.delete_headers[0]["Schedule-Reply"] == "F"
+
+
+def test_a_copy_is_announced_like_any_new_event() -> None:
+    source, target, _ = _stored_move()
+
+    move_event(source, target, "uid-1", keep_original=True)
+
+    assert "Schedule-Reply" not in target.client.put_headers[0]
+
+
+def test_a_move_the_server_finished_by_itself_succeeds() -> None:
+    source, target, stored = _stored_move()
+    source.client.delete_status = 404
+    source.event_by_uid.side_effect = [stored, NotFoundError("uid-1 gone")]
+
+    move_event(source, target, "uid-1", keep_original=False)
+
+    assert len(target.client.stored) == 1
+
+
 def test_an_edit_meant_for_a_todo_refuses_a_resource_holding_none() -> None:
     calendar = Mock()
     calendar.todo_by_uid.return_value = Mock(
@@ -1506,6 +1577,26 @@ def test_deleting_the_event_leaves_the_todo_sharing_its_resource() -> None:
     document = ICalCalendar.from_ical(resource.data)
     assert not document.walk("VEVENT")
     assert str(next(iter(document.walk("VTODO")))["SUMMARY"]) == "File the contract"
+
+
+def test_deleting_the_event_takes_the_timezone_only_it_named_along() -> None:
+    from custom_components.ha_caldav.api import zoned_document
+
+    zoned = ICalCalendar.from_ical(
+        MIXED_RESOURCE.replace(
+            "DTSTART:20260706T090000Z", "DTSTART;TZID=Europe/Berlin:20260706T110000"
+        )
+    )
+    resource = _Resource(zoned_document(zoned).to_ical().decode("utf-8"))
+    assert resource.icalendar_instance.walk("VTIMEZONE")
+    calendar = Mock()
+    calendar.event_by_uid.return_value = resource
+
+    delete_event(calendar, "mixed-1")
+
+    document = ICalCalendar.from_ical(resource.data)
+    assert document.walk("VTODO")
+    assert not document.walk("VTIMEZONE")
 
 
 def test_deleting_the_last_component_removes_the_resource_itself() -> None:

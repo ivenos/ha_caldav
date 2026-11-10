@@ -379,19 +379,24 @@ def _read_attachments(vevent: Any) -> list[dict[str, Any]]:
 
 
 def awaits_reply(vevent: Any, addresses: list[str]) -> bool:
-    """Return whether a vobject VEVENT is an invitation the account has not answered.
+    """Return whether a vobject VEVENT is an invitation the account has not answered."""
+    return own_reply(vevent, addresses) == "NEEDS-ACTION"
+
+
+def own_reply(vevent: Any, addresses: list[str]) -> str | None:
+    """Return the account's answer to a vobject VEVENT, None if it is not invited.
 
     RFC 5545 3.2.12: an attendee without a PARTSTAT is at NEEDS-ACTION.
     """
     own = {comparable_address(address) for address in addresses}
     organizer = getattr(vevent, "organizer", None)
     if organizer is not None and comparable_address(str(organizer.value)) in own:
-        return False
+        return None
     for holder in getattr(vevent, "attendee_list", []) or []:
         if comparable_address(str(holder.value)) in own:
             status = _param(getattr(holder, "params", {}) or {}, "PARTSTAT")
-            return (status or "NEEDS-ACTION").upper() == "NEEDS-ACTION"
-    return False
+            return (status or "NEEDS-ACTION").upper()
+    return None
 
 
 def strip_scheme(value: str) -> str:
@@ -433,7 +438,9 @@ def apply_extras(
         _set_alarms(component, data[ATTR_ALARMS] or [], own_address)
     if ATTR_ATTACHMENTS in data:
         _set_attachments(component, data[ATTR_ATTACHMENTS] or [])
-    _name_an_organizer(component, own_address)
+    # RFC 6638 servers invite every attendee once an object names an organizer.
+    if ATTR_ATTENDEES in data or ATTR_ORGANIZER in data:
+        _name_an_organizer(component, own_address)
 
 
 def _name_an_organizer(component: Any, own_address: str | None) -> None:

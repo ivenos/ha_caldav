@@ -1,6 +1,9 @@
 {
   "domain": "ha_caldav",
   "name": "CalDAV Complete",
+  "categories": [
+    "productivity_information.calendars_todos"
+  ],
   "codeowners": [
     "@ivenos"
   ],

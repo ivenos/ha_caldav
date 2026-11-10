@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from functools import partial
@@ -122,6 +123,7 @@ from .const import (
     TODO_STATUSES,
 )
 from .coordinator import (
+    FLOATING_MARGIN,
     HaCaldavConfigEntry,
     ManagedCalendar,
     calendar_unique_id,
@@ -133,6 +135,7 @@ from .coordinator import (
     to_event,
     to_todo,
     todo_unique_id,
+    within,
 )
 from .errors import as_reported
 from .extras import awaits_reply, read_extras
@@ -392,13 +395,13 @@ TODO_FIELDS = {
     vol.Optional("description"): _blank_as_none(cv.string),
     vol.Optional(ATTR_PARENT): _blank_as_none(cv.string),
     vol.Optional("rrule"): _blank_as_none(cv.string),
-    vol.Optional("status"): _TODO_STATUS,
-    vol.Optional(ATTR_PERCENT_COMPLETE): vol.All(
-        vol.Coerce(int), vol.Range(min=0, max=100)
+    vol.Optional("status"): _blank_as_none(_TODO_STATUS),
+    vol.Optional(ATTR_PERCENT_COMPLETE): _blank_as_none(
+        vol.All(vol.Coerce(int), vol.Range(min=0, max=100))
     ),
     vol.Optional("location"): _blank_as_none(cv.string),
     **{
-        key: validator
+        key: _blank_as_none(validator)
         for key, validator in EXTRA_FIELDS.items()
         if str(key) not in (ATTR_EVENT_STATUS, ATTR_TRANSPARENCY)
     },
@@ -578,12 +581,7 @@ def async_register_services(hass: HomeAssistant) -> None:
         hass.services.async_register(
             DOMAIN,
             name,
-            partial(
-                entity_service_call,
-                hass,
-                partial(_collection_entities, hass),
-                HassJob(func),
-            ),
+            partial(_async_collection_call, hass, func),
             schema=schema
             if isinstance(schema, vol.All)
             else cv.make_entity_service_schema(schema),
@@ -607,22 +605,45 @@ def async_register_services(hass: HomeAssistant) -> None:
     )
 
 
-def _collection_entities(hass: HomeAssistant) -> dict[str, Any]:
-    """Return the entity each collection is addressed by as a whole.
+async def _async_collection_call(
+    hass: HomeAssistant, func: Callable[..., Any], call: ServiceCall
+) -> Any:
+    """Run an action once per collection, however many of its entities it names.
 
-    Its calendar, or its to-do list where it holds no events. With both
-    taken, a call naming an area or a label would run twice on one collection.
+    A calendar and its to-do list are one collection, and an area or a label
+    can name both. The answer then comes from the calendar.
     """
+    runs: dict[str, asyncio.Future[Any]] = {}
+    keys: dict[str, str] = {}
+    calendars: set[str] = set()
+
+    async def once(entity: HaCaldavEntity, call: ServiceCall) -> Any:
+        key = keys[entity.entity_id] = calendar_key(entity.calendar.url)
+        if entity.platform.domain == CALENDAR_DOMAIN:
+            calendars.add(key)
+        if key not in runs:
+            runs[key] = asyncio.ensure_future(func(entity, call))
+        return await runs[key]
+
+    response = await entity_service_call(
+        hass, partial(_collection_entities, hass), HassJob(once), call
+    )
+    if response is None:
+        return None
+    return {
+        entity_id: value
+        for entity_id, value in response.items()
+        if entity_id.startswith(f"{CALENDAR_DOMAIN}.")
+        or keys[entity_id] not in calendars
+    }
+
+
+def _collection_entities(hass: HomeAssistant) -> dict[str, Any]:
+    """Return the calendar and to-do list entities of every collection."""
     found: dict[str, Any] = {}
     for platform in async_get_platforms(hass, DOMAIN):
-        if platform.domain not in (CALENDAR_DOMAIN, TODO_DOMAIN):
-            continue
-        for entity_id, entity in platform.entities.items():
-            if (
-                platform.domain == CALENDAR_DOMAIN
-                or not entity.managed.capability.shows_calendar
-            ):
-                found[entity_id] = entity
+        if platform.domain in (CALENDAR_DOMAIN, TODO_DOMAIN):
+            found.update(platform.entities)
     return found
 
 
@@ -673,10 +694,18 @@ def _found_events(calendar: Any, criteria: dict[str, Any]) -> list[dict[str, Any
     with its master.
     """
     window = "start" in criteria and "end" in criteria
+    query = dict(criteria)
+    if window:
+        query["start"] = criteria["start"] - FLOATING_MARGIN
+        query["end"] = criteria["end"] + FLOATING_MARGIN
     events = []
-    for item in calendar.search(event=True, **criteria):
+    for item in calendar.search(event=True, **query):
         vevents = (
-            occurrences(item, criteria["start"], criteria["end"])
+            [
+                vevent
+                for vevent in occurrences(item, query["start"], query["end"])
+                if within(vevent, criteria["start"], criteria["end"])
+            ]
             if window
             else [master_of(item)]
         )
@@ -748,7 +777,7 @@ async def _async_get_free_busy(
     addresses = entity.runtime_data.address_set
     if attendees and not (entity.runtime_data.scheduling and addresses):
         raise ServiceValidationError(
-            translation_domain=DOMAIN, translation_key="no_scheduling"
+            translation_domain=DOMAIN, translation_key="no_free_busy"
         )
     report = await _async_account_job(
         entity.hass,
@@ -781,6 +810,7 @@ async def _async_create_event(
 ) -> None:
     """Create an event with the full set of properties."""
     _require_writable(entity)
+    _require_events(entity.managed)
     data = _event_fields(entity.hass, call.data)
     start, end = _span(call.data, await _async_zone(call.data))
     _check_span(start, end)
@@ -925,6 +955,7 @@ async def _async_move_event(entity: HaCaldavCalendarEntity, call: ServiceCall) -
             translation_key="same_calendar",
             translation_placeholders={"name": target.name},
         )
+    _require_events(target)
     await entity.async_write(
         partial(
             move_event,
@@ -1060,9 +1091,6 @@ def _todo_fields(
             fields[ATTR_PARENT_UID] = parent and _item_uid(entity, parent)
         else:
             fields[_TODO_DATES.get(name, name)] = data[name]
-    for name in (ATTR_URL, ATTR_ORGANIZER):
-        if fields.get(name) == "":
-            fields[name] = None
     return fields
 
 
@@ -1156,6 +1184,16 @@ async def _async_move_todo(entity: HaCaldavTodoListEntity, call: ServiceCall) ->
     await target.coordinator.async_refresh()
 
 
+def _require_events(managed: ManagedCalendar) -> None:
+    """Refuse to write an event into a calendar that holds no events."""
+    if not managed.capability.supports_events:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="no_events",
+            translation_placeholders={"name": managed.name},
+        )
+
+
 def _require_journals(entity: HaCaldavEntity) -> None:
     """Refuse a journal action on a calendar that holds no journal entries."""
     if not entity.managed.capability.supports_journals:
@@ -1199,7 +1237,9 @@ async def _async_update_journal(entity: HaCaldavEntity, call: ServiceCall) -> No
     _require_journals(entity)
     data = _journal_fields(entity.hass, call.data)
     await entity.async_write(
-        partial(update_journal, entity.calendar, call.data["uid"], data),
+        partial(
+            update_journal, entity.calendar, call.data["uid"], data, entity.addresses
+        ),
         SERVICE_UPDATE_JOURNAL,
     )
 

@@ -115,6 +115,15 @@ def test_a_field_given_as_nothing_is_cleared() -> None:
     assert entry["SUMMARY"] == "Monday"
 
 
+def test_an_empty_description_is_cleared_too() -> None:
+    calendar = dav_calendar()
+    _held(calendar)
+
+    update_journal(calendar, "note-1", {"description": ""})
+
+    assert "DESCRIPTION" not in _journal(calendar.client.bodies[-1])
+
+
 def test_an_object_holding_no_journal_entry_is_refused() -> None:
     calendar = dav_calendar()
     _held(calendar, ENTRY.replace("VJOURNAL", "VEVENT"))
@@ -305,21 +314,31 @@ async def test_an_entry_is_changed_and_deleted_by_its_uid(hass: HomeAssistant) -
             blocking=True,
         )
 
-    assert update.call_args.args[1:] == ("note-1", {"description": None})
+    assert update.call_args.args[1:3] == ("note-1", {"description": None})
     assert delete.call_args.args[1] == "note-1"
 
 
+@pytest.mark.parametrize(
+    ("service", "data"),
+    [
+        ("create_journal", {"summary": "Monday"}),
+        ("update_journal", {"uid": "note-1", "summary": "Monday"}),
+        ("delete_journal", {"uid": "note-1"}),
+        ("search_journals", {}),
+    ],
+)
 async def test_a_calendar_without_journal_entries_refuses_the_journal_actions(
-    hass: HomeAssistant,
+    hass: HomeAssistant, service: str, data: dict
 ) -> None:
     await _setup(hass, {"Personal": {"VEVENT", "VTODO"}})
 
     with pytest.raises(ServiceValidationError) as refusal:
         await hass.services.async_call(
             DOMAIN,
-            "create_journal",
-            {"entity_id": "calendar.personal", "summary": "Monday"},
+            service,
+            {"entity_id": "calendar.personal", **data},
             blocking=True,
+            return_response=service == "search_journals",
         )
 
     assert refusal.value.translation_key == "no_journals"
@@ -383,3 +402,65 @@ async def test_a_canceled_journal_entry_is_left_out_of_the_calendar(
     )
 
     assert [event["summary"] for event in await response.json()] == ["Monday"]
+
+
+async def test_a_journal_entry_the_server_sent_from_outside_the_window_is_left_out(
+    hass: HomeAssistant, hass_client
+) -> None:
+    calendars = await _setup(hass, {"Diary": {"VJOURNAL"}})
+    calendars["Diary"].search.return_value = [
+        stored(ENTRY),
+        stored(
+            ENTRY.replace("note-1", "later")
+            .replace("DTSTART;VALUE=DATE:20260706", "DTSTART;VALUE=DATE:20260815")
+            .replace("SUMMARY:Monday", "SUMMARY:August")
+        ),
+    ]
+
+    client = await hass_client()
+    response = await client.get(
+        "/api/calendars/calendar.diary?start=2026-07-01T00:00:00Z&end=2026-08-01T00:00:00Z"
+    )
+
+    assert [event["summary"] for event in await response.json()] == ["Monday"]
+
+
+async def test_a_calendar_of_journal_entries_refuses_an_event(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass, {"Diary": {"VJOURNAL"}})
+
+    with pytest.raises(ServiceValidationError) as refusal:
+        await hass.services.async_call(
+            DOMAIN,
+            "create_event",
+            {
+                "entity_id": "calendar.diary",
+                "summary": "Dentist",
+                "start_date_time": "2026-07-06 09:00:00",
+                "end_date_time": "2026-07-06 10:00:00",
+            },
+            blocking=True,
+        )
+
+    assert refusal.value.translation_key == "no_events"
+
+
+async def test_an_event_is_not_moved_into_a_calendar_of_journal_entries(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass, {"Personal": {"VEVENT"}, "Diary": {"VJOURNAL"}})
+
+    with pytest.raises(ServiceValidationError) as refusal:
+        await hass.services.async_call(
+            DOMAIN,
+            "move_event",
+            {
+                "entity_id": "calendar.personal",
+                "uid": "uid-1",
+                "target_entity_id": "calendar.diary",
+            },
+            blocking=True,
+        )
+
+    assert refusal.value.translation_key == "no_events"

@@ -31,6 +31,7 @@ from icalendar import (
 )
 
 from .api import (
+    as_written,
     collapse_repeated,
     delete_components,
     delete_resource,
@@ -363,7 +364,7 @@ def respond_to_invitation(
     if not changed:
         raise Refused("not_an_attendee")
     # The document, not its text, which caldav would run through vcal.fix.
-    event.icalendar_instance = instance
+    event.icalendar_instance = as_written(instance)
     put_resource(event, tag)
 
 
@@ -1206,11 +1207,31 @@ def _filter_dates(component: Any, key: str, keep: Callable[[Any], bool]) -> None
         component[key] = kept_entries if len(kept_entries) > 1 else kept_entries[0]
 
 
+_COARSE = frozenset({"DAILY", "WEEKLY", "MONTHLY", "YEARLY"})
+
+
 def _until(master: Any, occurrence: datetime | date) -> datetime | date:
+    """Return the start of the last occurrence the rule keeps before the cutoff.
+
+    HA's editor shows the day of the UNTIL as the last one and rebuilds it
+    with the start time.
+    """
     aligned = _align(master, occurrence)
-    if isinstance(aligned, datetime):
+    if not isinstance(aligned, datetime):
+        return aligned - timedelta(days=1)
+    recur = master["RRULE"]
+    kept = None
+    # Walked from DTSTART, which only a rule of a day or more does quickly.
+    if str((recur.get("FREQ") or [""])[0]).upper() in _COARSE and not any(
+        key in recur for key in ("BYHOUR", "BYMINUTE", "BYSECOND")
+    ):
+        try:
+            kept = rule_from(recur, master["DTSTART"].dt).before(aligned)
+        except TypeError, ValueError:
+            kept = None
+    if kept is None:
         return aligned - timedelta(seconds=1)
-    return aligned - timedelta(days=1)
+    return to_utc(kept) if kept.tzinfo is not None else kept
 
 
 def _apply(

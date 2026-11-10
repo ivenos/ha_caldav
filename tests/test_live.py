@@ -15,7 +15,11 @@ from custom_components.ha_caldav.api import (
     object_by_uid,
     update_todo,
 )
-from custom_components.ha_caldav.connection import build_client, connection_kwargs
+from custom_components.ha_caldav.connection import (
+    build_client,
+    connection_kwargs,
+    display_name,
+)
 from custom_components.ha_caldav.errors import Refused
 from custom_components.ha_caldav.recurrence import delete_event, update_event
 
@@ -62,7 +66,7 @@ def calendar(module_sockets):
     client = build_client(URL, USERNAME, PASSWORD, connection_kwargs({}))
     principal = client.principal()
     for existing in principal.calendars():
-        if existing.name == CALENDAR_NAME:
+        if display_name(existing) == CALENDAR_NAME:
             existing.delete()
     created = principal.make_calendar(name=CALENDAR_NAME)
     yield created
@@ -502,7 +506,7 @@ def test_moving_a_todo_takes_its_subtasks_along(calendar) -> None:
     principal = calendar.client.principal()
     target_name = f"{CALENDAR_NAME}_target"
     for existing in principal.calendars():
-        if existing.name == target_name:
+        if display_name(existing) == target_name:
             existing.delete()
     target = principal.make_calendar(name=target_name)
     try:
@@ -619,6 +623,56 @@ def test_completing_recurring_todo_rolls_forward(calendar) -> None:
     item = todos(calendar)["Water"]
     assert item.status == TodoItemStatus.NEEDS_ACTION
     assert item.due.astimezone(UTC) == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+
+
+def test_completing_a_todo_onto_an_added_date_keeps_the_weekday_of_its_rule(
+    calendar,
+) -> None:
+    from homeassistant.components.todo import TodoItemStatus
+
+    calendar.save_todo(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//test//EN\r\n"
+        "BEGIN:VTODO\r\nUID:rt-added\r\nDTSTAMP:20260101T000000Z\r\n"
+        "DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\n"
+        "RDATE:20260708T090000Z\r\nSUMMARY:Bins\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+    dues = []
+    for _ in range(4):
+        update_todo(calendar, "rt-added", {"status": "COMPLETED"}, as_shown=False)
+        item = todos(calendar)["Bins"]
+        dues.append(
+            item.due.astimezone(UTC)
+            if item.status == TodoItemStatus.NEEDS_ACTION
+            else None
+        )
+    delete_todos(calendar, ["rt-added"], {})
+
+    assert dues == [
+        datetime(2026, 7, 8, 9, 0, tzinfo=UTC),
+        datetime(2026, 7, 13, 9, 0, tzinfo=UTC),
+        datetime(2026, 7, 20, 9, 0, tzinfo=UTC),
+        None,
+    ]
+
+
+def test_a_todo_without_a_title_or_a_status_reads_back(calendar) -> None:
+    from homeassistant.components.todo import TodoItemStatus
+
+    calendar.save_todo(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//test//EN\r\n"
+        "BEGIN:VTODO\r\nUID:untitled\r\nDTSTAMP:20260101T000000Z\r\n"
+        "STATUS:COMPLETED\r\nPRIORITY:1\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+    update_todo(
+        calendar, "untitled", {"status": None, "priority": None}, as_shown=False
+    )
+    component = object_by_uid(calendar, "untitled", todo=True).icalendar_component
+    item = todos(calendar).get("")
+    delete_todos(calendar, ["untitled"], {})
+
+    assert not {"STATUS", "PRIORITY", "SUMMARY"} & set(component)
+    assert item.uid == "untitled"
+    assert item.status == TodoItemStatus.NEEDS_ACTION
 
 
 def test_calendar_color_round_trips(calendar) -> None:
@@ -762,7 +816,7 @@ def test_moving_an_event_between_calendars(calendar) -> None:
     principal = calendar.client.principal()
     target_name = f"{CALENDAR_NAME}_target"
     for existing in principal.calendars():
-        if existing.name == target_name:
+        if display_name(existing) == target_name:
             existing.delete()
     target = principal.make_calendar(name=target_name)
     try:
@@ -815,7 +869,7 @@ def test_writing_a_calendar_name_back(calendar) -> None:
 
         assert fetch_collections(calendar.client)[key].name == "ha_caldav live renamed"
         listed = {
-            calendar_key(found.url): found.name
+            calendar_key(found.url): display_name(found)
             for found in calendar.client.principal().calendars()
         }
         assert listed[key] == "ha_caldav live renamed"
@@ -1262,7 +1316,7 @@ def journal_calendar(calendar):
     principal = calendar.client.principal()
     name = f"{CALENDAR_NAME}_journal"
     for existing in principal.calendars():
-        if existing.name == name:
+        if display_name(existing) == name:
             existing.delete()
     created = principal.make_calendar(
         name=name, supported_calendar_component_set=["VJOURNAL"]
@@ -1334,7 +1388,8 @@ def test_a_calendar_is_shared_with_another_account_and_taken_back(calendar) -> N
     [share] = read_shares(calendar)
     assert (share["user"], share["access"]) == (OTHER, "read_write")
     assert any(
-        CALENDAR_NAME in (shared.name or "") for shared in other.principal().calendars()
+        CALENDAR_NAME in display_name(shared)
+        for shared in other.principal().calendars()
     )
     with pytest.raises(Refused, match="sharee_not_found"):
         share_calendar(calendar, "nobody-by-that-name", write=False)
@@ -1343,7 +1398,8 @@ def test_a_calendar_is_shared_with_another_account_and_taken_back(calendar) -> N
 
     assert read_shares(calendar) == []
     assert not any(
-        CALENDAR_NAME in (shared.name or "") for shared in other.principal().calendars()
+        CALENDAR_NAME in display_name(shared)
+        for shared in other.principal().calendars()
     )
 
 
@@ -1377,7 +1433,7 @@ def test_a_delegate_sees_the_calendars_of_the_account_it_acts_for(calendar) -> N
     try:
         key = calendar_key(calendar.url)
         [delegated] = [item for item in calendars if calendar_key(item.url) == key]
-        assert delegated.name.startswith(f"{CALENDAR_NAME} ({USERNAME}")
+        assert display_name(delegated).startswith(f"{CALENDAR_NAME} ({USERNAME}")
         assert fetch_capabilities(other, delegations)[key].writable is True
         create_event(
             delegated,
@@ -1471,3 +1527,90 @@ def test_deleting_from_a_resource_with_an_encoded_slash_never_fakes_success(
         assert "Raw" in summaries(calendar).values()
     else:
         assert "Raw" not in summaries(calendar).values()
+
+
+ZONED_DAY = (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//live//EN\r\n"
+    "BEGIN:VEVENT\r\nUID:live-bins\r\nDTSTAMP:20260101T000000Z\r\n"
+    "DTSTART;VALUE=DATE:20260708\r\nDTEND;VALUE=DATE:20260709\r\nSUMMARY:Bins\r\n"
+    "END:VEVENT\r\n"
+    "BEGIN:VEVENT\r\nUID:live-recycling\r\nDTSTAMP:20260101T000000Z\r\n"
+    "DTSTART;VALUE=DATE:20260701\r\nDTEND;VALUE=DATE:20260702\r\n"
+    "RRULE:FREQ=WEEKLY;COUNT=4\r\nSUMMARY:Recycling\r\nEND:VEVENT\r\n"
+    "BEGIN:VEVENT\r\nUID:live-floating\r\nDTSTAMP:20260101T000000Z\r\n"
+    "DTSTART:20260708T090000\r\nDTEND:20260708T091000\r\nSUMMARY:Floating\r\n"
+    "END:VEVENT\r\n"
+    "BEGIN:VEVENT\r\nUID:live-zoned\r\nDTSTAMP:20260101T000000Z\r\n"
+    "DTSTART;TZID=Europe/Berlin:20260708T090000\r\n"
+    "DTEND;TZID=Europe/Berlin:20260708T091000\r\nSUMMARY:Zoned\r\n"
+    "END:VEVENT\r\nEND:VCALENDAR\r\n"
+)
+
+DAY = {"Bins", "Recycling"}
+
+
+@pytest.mark.parametrize(
+    ("zone", "windows"),
+    [
+        (
+            "Asia/Tokyo",
+            {
+                (0, 0): DAY,
+                (8, 45): DAY,
+                (9, 0): DAY | {"Floating"},
+                (16, 0): DAY | {"Zoned"},
+                (23, 45): DAY,
+            },
+        ),
+        (
+            "America/Los_Angeles",
+            {
+                (0, 0): DAY | {"Zoned"},
+                (8, 45): DAY,
+                (9, 0): DAY | {"Floating"},
+                (23, 45): DAY,
+            },
+        ),
+    ],
+)
+async def test_a_trigger_window_in_any_zone_finds_what_starts_in_it(
+    hass, calendar, zone: str, windows: dict
+) -> None:
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.ha_caldav.api import import_ics
+    from custom_components.ha_caldav.capability import Capability
+    from custom_components.ha_caldav.const import DOMAIN
+    from custom_components.ha_caldav.coordinator import HaCaldavCoordinator
+
+    await hass.config.async_set_time_zone(zone)
+    import_ics(calendar, ZONED_DAY)
+    entry = MockConfigEntry(domain=DOMAIN, data={}, title="live")
+    entry.add_to_hass(hass)
+    coordinator = HaCaldavCoordinator(
+        hass,
+        entry,
+        calendar,
+        Capability(frozenset({"VEVENT"}), True),
+        7,
+        True,
+        timedelta(minutes=15),
+    )
+    if "/SOGo/" in (URL or ""):
+        # SOGo stores a floating time in the zone of its own user.
+        windows = {at: expected - {"Floating"} for at, expected in windows.items()}
+
+    found = {}
+    # Xandikos misplaces zoned times once its index takes over, after five searches.
+    for attempt in range(2):
+        for at, expected in windows.items():
+            start = datetime(2026, 7, 8, *at, tzinfo=ZoneInfo(zone))
+            events = await coordinator.async_get_events(
+                start, start + timedelta(minutes=15)
+            )
+            found[attempt, at] = ({event.summary for event in events}, expected)
+
+    assert all(got == expected for got, expected in found.values()), found

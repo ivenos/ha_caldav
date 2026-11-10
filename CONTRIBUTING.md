@@ -89,7 +89,7 @@ Fixed
 - GitHub Actions stay on version tags, never commit SHAs. hassfest has no tagged release and runs from `master`.
 - Renovate opens the bumps and adds those that reach users to the changelog, not GitHub Actions or test tools. The release adds the numbers of their pull requests. Other PRs leave dependencies alone.
 - `caldav`, `icalendar` and `vobject` follow Home Assistant core. `manifest.json` lists them as minimum versions, the ones the oldest supported Home Assistant pins. `requirements_test.txt` pins the versions the newest Home Assistant pins, its beta included. Both move by hand, with `.github/scripts/changelog.sh dependency NAME FROM TO` for the changelog.
-- `python-dateutil` is not listed in `manifest.json` or `requirements_test.txt`.
+- `python-dateutil` and `recurring-ical-events` are not listed in `manifest.json` or `requirements_test.txt`.
 
 ## Pull requests
 

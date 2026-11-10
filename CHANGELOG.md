@@ -7,11 +7,45 @@ All notable changes to this project are documented in this file, in the format o
 ### Added
 
 - Each calendar gets a reminder entity that automations can use as a trigger in the editor.
+- An option to leave out events that show as free and invitations you declined.
 
 ### Fixed
 
 - A password or user name with umlauts or other non-English characters was rejected.
 - Canceled events turned the calendar on and set off automations and reminders.
+- Setup failed on Home Assistant 2026.10 and newer when the server listed a calendar without a name.
+- Moving an event or a to-do to another calendar canceled it for the other attendees, or declined the invitation.
+- Moving an invitation on SOGo reported an error although it had moved.
+- Changing an event from Apple Calendar broke its map location.
+- The address of a web page was accepted as an account without any calendars.
+- The address of Radicale's web interface did not lead to the calendars.
+- A delegated calendar that could not be read made every calendar look writable.
+- After one failed check for changes, every poll downloaded the whole calendar again.
+- A reminder fired a second time when another reminder was added to the event.
+- Reminders slowed down Home Assistant on very large calendars.
+- Some to-dos from other apps could not be ticked off or renamed.
+- Import, export and the journal actions did nothing on the to-do list of a calendar that also has events.
+- To-dos without a manual order changed places after every edit on Radicale.
+- Reopening a to-do that is listed as its own parent failed.
+- Ticking off a to-do that someone else organizes counted as a new version of it.
+- After splitting a series, moving the earlier part added a second event on the day of the split.
+- Sharing a calendar on Nextcloud by email address reported an error although it worked.
+- Events could be written into a calendar that only holds journal entries.
+- Asking when other people are busy on a server without scheduling gave a message about invitations.
+- Reminders further ahead than the days ahead, such as one week before, never fired.
+- Calendar triggers, searches and the calendar view missed all-day events and events without a time zone in some time zones.
+- Editing an event with attendees but no organizer sent them invitations.
+- SOGo listed a calendar delegated to you twice.
+- An account could be set up a second time by entering the address of one of its calendars.
+- A server without TLS entered without http:// got a certificate error.
+- After a password change on the server, every calendar kept trying the old password until Nextcloud blocked Home Assistant.
+- Setup and re-authentication said "Failed to connect" when the server blocked logins after too many attempts.
+- The setup form lost the address and user name after an error.
+- Completing a recurring to-do with an extra date moved the days it repeats on.
+- Clearing the due date of a repeating to-do without a start ended the series.
+- Errors about the start and due date of a to-do talked about events.
+- An empty priority, classification, status or progress in the to-do actions was rejected instead of clearing it.
+- To-dos without a title did not show up.
 
 ## [1.5.1] - 2026-10-11
 

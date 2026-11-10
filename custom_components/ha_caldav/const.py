@@ -5,14 +5,17 @@ DOMAIN = "ha_caldav"
 CONF_CALENDARS = "calendars"
 CONF_DAYS = "days"
 CONF_INCLUDE_ALL_DAY = "include_all_day"
+CONF_BUSY_ONLY = "busy_only"
 CONF_READ_ONLY = "read_only"
 CONF_CALENDAR_OPTIONS = "calendar_options"
 CONF_CLIENT_CERT = "client_cert"
 CONF_CLIENT_KEY = "client_key"
 CONF_CA_BUNDLE = "ca_bundle"
+CONF_PRINCIPAL = "principal"
 
 DEFAULT_DAYS = 7
 DEFAULT_INCLUDE_ALL_DAY = True
+DEFAULT_BUSY_ONLY = False
 DEFAULT_READ_ONLY = False
 DEFAULT_SCAN_INTERVAL = 15
 DEFAULT_TIMEOUT = 30

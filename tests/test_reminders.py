@@ -2,7 +2,13 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
 
 from conftest import stored
-from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
+from homeassistant.const import (
+    CONF_PASSWORD,
+    CONF_URL,
+    CONF_USERNAME,
+    CONF_VERIFY_SSL,
+    STATE_UNAVAILABLE,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_component import EntityComponent
 import pytest
@@ -11,8 +17,11 @@ from pytest_homeassistant_custom_component.common import (
     async_capture_events,
     async_fire_time_changed,
 )
+from requests import Timeout
+import vobject
 
-from custom_components.ha_caldav.const import DOMAIN, EVENT_REMINDER
+from custom_components.ha_caldav.const import CONF_BUSY_ONLY, DOMAIN, EVENT_REMINDER
+from custom_components.ha_caldav.coordinator import _MAX_KEPT_POLLS, occurrences
 
 ENTRY_DATA = {
     CONF_URL: "https://cloud.example.com/remote.php/dav",
@@ -57,8 +66,32 @@ def _calendar(events=(), todos=()) -> Mock:
     return calendar
 
 
-async def _setup(hass: HomeAssistant, calendar: Mock) -> list:
-    entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
+def _server(*bodies: str) -> Mock:
+    """A calendar whose time-range search returns only what overlaps the range."""
+    calendar = _calendar()
+
+    def overlaps(body: str, start: datetime, end: datetime) -> bool:
+        vevent = vobject.readOne(_event(body).data).vevent
+        return vevent.dtstart.value < end and vevent.dtend.value > start
+
+    calendar.search.side_effect = lambda **kwargs: [
+        _event(body)
+        for body in bodies
+        if not kwargs.get("todo") and overlaps(body, kwargs["start"], kwargs["end"])
+    ]
+    return calendar
+
+
+async def _setup(
+    hass: HomeAssistant, calendar: Mock, options: dict | None = None
+) -> list:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="iven",
+        data=ENTRY_DATA,
+        options=options or {},
+        unique_id="x",
+    )
     entry.add_to_hass(hass)
     with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
         client.return_value.principal.return_value.calendars.return_value = [calendar]
@@ -116,6 +149,73 @@ async def test_an_alarm_fires_an_event_when_it_comes_due(
     }
 
 
+async def test_an_alarm_of_a_series_names_its_occurrence_and_its_end(
+    hass: HomeAssistant, freezer
+) -> None:
+    calendar = _calendar(
+        events=[
+            _event(
+                "DTSTART:20260706T100000Z\nDTEND:20260706T110000Z\nRRULE:FREQ=DAILY\n"
+                + _alarm("TRIGGER:-PT15M")
+            )
+        ]
+    )
+    fired = await _setup(hass, calendar)
+
+    await _move_to(hass, freezer, NOW + timedelta(minutes=105))
+
+    [event] = fired
+    assert event.data["recurrence_id"] == "2026-07-06 10:00:00+00:00"
+    assert datetime.fromisoformat(event.data["end"]) == NOW + timedelta(hours=3)
+
+
+async def test_an_alarm_one_week_before_fires_with_the_default_days(
+    hass: HomeAssistant, freezer
+) -> None:
+    calendar = _server(
+        "DTSTART:20260713T100000Z\nDTEND:20260713T110000Z\n" + _alarm("TRIGGER:-P7D")
+    )
+    fired = await _setup(hass, calendar)
+
+    due = datetime(2026, 7, 6, 10, 0, tzinfo=UTC)
+    for moment in (due - timedelta(minutes=1), due, due + timedelta(minutes=15)):
+        await _move_to(hass, freezer, moment)
+
+    assert [event.data["uid"] for event in fired] == ["uid-1"]
+
+
+async def test_only_a_series_with_an_alarm_is_expanded_past_the_days_ahead(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar(
+        events=[
+            _event(
+                "DTSTART:20260706T100000Z\nDTEND:20260706T110000Z\nRRULE:FREQ=DAILY",
+                uid="plain",
+            ),
+            _event(
+                "DTSTART:20260706T120000Z\nDTEND:20260706T130000Z\nRRULE:FREQ=DAILY\n"
+                + _alarm("TRIGGER:-PT15M"),
+                uid="alarmed",
+            ),
+        ]
+    )
+
+    with patch(
+        "custom_components.ha_caldav.coordinator.occurrences", wraps=occurrences
+    ) as expand:
+        await _setup(hass, calendar)
+
+    spans = {
+        str(call.args[0].icalendar_component["UID"]): call.args[2] - call.args[1]
+        for call in expand.call_args_list
+    }
+    assert spans == {
+        "plain": timedelta(days=7, hours=28),
+        "alarmed": timedelta(days=35, hours=28),
+    }
+
+
 async def test_an_alarm_fires_once_however_often_the_calendar_is_polled(
     hass: HomeAssistant, freezer
 ) -> None:
@@ -152,6 +252,7 @@ async def test_an_alarm_that_came_due_before_the_start_is_not_replayed(
     await _move_to(hass, freezer, NOW + timedelta(minutes=16))
 
     assert fired == []
+    assert hass.states.get("event.personal_reminders").state == "unknown"
 
 
 async def test_an_alarm_found_a_poll_late_still_fires(
@@ -226,10 +327,12 @@ async def test_a_repeating_alarm_fires_each_time(hass: HomeAssistant, freezer) -
     )
     fired = await _setup(hass, calendar)
 
+    told = []
     for minutes in (30, 35, 40, 45):
         await _move_to(hass, freezer, NOW + timedelta(minutes=minutes))
+        told.append(len(fired))
 
-    assert len(fired) == 3
+    assert told == [1, 2, 3, 3]
 
 
 async def test_a_to_do_alarm_fires_from_its_list(hass: HomeAssistant, freezer) -> None:
@@ -245,6 +348,21 @@ async def test_a_to_do_alarm_fires_from_its_list(hass: HomeAssistant, freezer) -
     assert event.data["uid"] == "todo-1"
     assert event.data["summary"] == "Bins"
     assert datetime.fromisoformat(event.data["due"]) == NOW + timedelta(hours=1)
+
+
+async def test_an_untitled_to_do_reminds_too(hass: HomeAssistant, freezer) -> None:
+    untitled = stored(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\nBEGIN:VTODO\n"
+        "UID:todo-1\nDTSTAMP:20260101T000000Z\nDUE:20260706T090000Z\n"
+        f"{_alarm('TRIGGER;RELATED=END:-PT30M')}\nEND:VTODO\nEND:VCALENDAR\n"
+    )
+    fired = await _setup(hass, _calendar(todos=[untitled]))
+
+    await _move_to(hass, freezer, NOW + timedelta(minutes=30))
+
+    [event] = fired
+    assert event.data["uid"] == "todo-1"
+    assert event.data["summary"] == ""
 
 
 async def test_an_offset_on_a_to_do_without_a_start_counts_from_its_due_date(
@@ -381,6 +499,26 @@ async def test_a_calendar_without_to_dos_offers_only_event_reminders(
     assert state.attributes["event_types"] == ["event"]
 
 
+async def test_the_reminder_entity_stays_while_one_of_its_halves_is_still_read(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar()
+    await _setup(hass, calendar)
+
+    def search(**kwargs):
+        if kwargs.get("todo"):
+            raise Timeout("gone")
+        return []
+
+    calendar.search.side_effect = search
+    calendar.objects_by_sync_token.return_value.sync_token = "moved"
+    for _ in range(_MAX_KEPT_POLLS + 1):
+        await _poll(hass)
+
+    assert hass.states.get("todo.personal").state == STATE_UNAVAILABLE
+    assert hass.states.get("event.personal_reminders").state != STATE_UNAVAILABLE
+
+
 async def test_a_canceled_event_does_not_remind(hass: HomeAssistant, freezer) -> None:
     calendar = _calendar(
         events=[
@@ -396,3 +534,41 @@ async def test_a_canceled_event_does_not_remind(hass: HomeAssistant, freezer) ->
 
     assert fired == []
     assert hass.states.get("event.personal_reminders").state == "unknown"
+
+
+async def test_a_free_event_does_not_remind_with_only_busy_events(
+    hass: HomeAssistant, freezer
+) -> None:
+    calendar = _calendar(
+        events=[
+            _event(
+                "DTSTART:20260706T100000Z\nDTEND:20260706T110000Z\n"
+                "TRANSP:TRANSPARENT\n" + _alarm("TRIGGER:-PT15M")
+            )
+        ]
+    )
+    fired = await _setup(hass, calendar, options={CONF_BUSY_ONLY: True})
+
+    await _move_to(hass, freezer, NOW + timedelta(minutes=105))
+
+    assert fired == []
+    assert hass.states.get("event.personal_reminders").state == "unknown"
+
+
+async def test_an_alarm_that_fired_stays_quiet_when_another_is_added_before_it(
+    hass: HomeAssistant, freezer
+) -> None:
+    times = "DTSTART:20260706T100000Z\nDTEND:20260706T110000Z\n"
+    calendar = _calendar(events=[_event(times + _alarm("TRIGGER:-PT15M"))])
+    fired = await _setup(hass, calendar)
+    await _move_to(hass, freezer, datetime(2026, 7, 6, 9, 45, tzinfo=UTC))
+    assert len(fired) == 1
+
+    calendar.held["events"] = [
+        _event(times + _alarm("TRIGGER:-PT1H") + "\n" + _alarm("TRIGGER:-PT15M"))
+    ]
+    calendar.objects_by_sync_token.return_value.sync_token = "added"
+    await _move_to(hass, freezer, datetime(2026, 7, 6, 9, 47, tzinfo=UTC))
+    await _poll(hass)
+
+    assert len(fired) == 1

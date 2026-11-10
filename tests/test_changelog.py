@@ -161,6 +161,15 @@ def test_a_changelog_without_an_unreleased_section_is_refused(tmp_path) -> None:
     assert after == text
 
 
+def test_a_changelog_without_a_release_yet_gets_no_dependency_lines(tmp_path) -> None:
+    text = CHANGELOG.split("\n## [1.4.2]")[0]
+
+    done, after = run(tmp_path, "dependency", "ruff", "0.16.10", "0.16.11", text=text)
+
+    assert done.returncode == 0
+    assert after == text
+
+
 def test_a_release_turns_unreleased_into_its_version(tmp_path) -> None:
     done, text = run(tmp_path, "release", "1.5.0", "2026-10-09")
 

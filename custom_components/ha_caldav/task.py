@@ -128,12 +128,14 @@ def closed(vtodo: Any) -> bool:
 
 
 def status_asked(data: dict[str, Any]) -> str | None:
-    """Return the status a field set asks for, the one a percentage implies included."""
-    if status := data.get("status"):
-        return str(status)
-    if ATTR_PERCENT_COMPLETE not in data:
+    """Return the status a field set asks for, the one a percentage implies included.
+
+    A status or percentage given as None asks for none.
+    """
+    if "status" in data:
+        return str(data["status"]) if data["status"] else None
+    if (percent := data.get(ATTR_PERCENT_COMPLETE)) is None:
         return None
-    percent = data[ATTR_PERCENT_COMPLETE] or 0
     if percent >= 100:
         return "COMPLETED"
     return "IN-PROCESS" if percent else "NEEDS-ACTION"
@@ -159,6 +161,12 @@ def set_status(vtodo: Any, status: str, folded: bool = False) -> None:
         vtodo.pop("PERCENT-COMPLETE", None)
 
 
+def clear_status(vtodo: Any) -> None:
+    """Remove the status, which RFC 5545 3.8.1.11 leaves optional on a VTODO."""
+    set_status(vtodo, "NEEDS-ACTION")
+    vtodo.pop("STATUS", None)
+
+
 def _percent(vtodo: Any) -> int | None:
     try:
         return int(vtodo["PERCENT-COMPLETE"])
@@ -176,8 +184,9 @@ def apply_fields(
 
     Only keys present in ``data`` are touched; an explicit None clears one.
     """
+    span = _span(vtodo)
     if "summary" in data:
-        vtodo["SUMMARY"] = data["summary"] or ""
+        replace(vtodo, "summary", data["summary"] or None)
     if "description" in data:
         if data["description"]:
             vtodo["DESCRIPTION"] = data["description"]
@@ -194,13 +203,18 @@ def apply_fields(
         # Not through caldav's set_due, which writes onto the first component
         # that is not a timezone, event or not.
         _set_moment(vtodo, "DUE", data["due"])
-    if "start" in data or "due" in data:
+    if _span(vtodo) != span:
         _check_span(vtodo)
     if "rrule" in data:
         _set_rule(vtodo, data["rrule"])
+    undated = _span(vtodo) == (None, None)
+    if undated and span != (None, None) and "RRULE" in vtodo:
+        raise Refused("rrule_needs_date")
     if ATTR_PERCENT_COMPLETE in data:
         replace(vtodo, "percent-complete", data[ATTR_PERCENT_COMPLETE] or None)
-    if status := status_asked(data):
+    if "status" in data and not data["status"]:
+        clear_status(vtodo)
+    elif status := status_asked(data):
         set_status(vtodo, status, folded)
     if ATTR_PARENT_UID in data:
         set_parent(vtodo, data[ATTR_PARENT_UID])
@@ -230,18 +244,30 @@ def _set_moment(vtodo: Any, name: str, value: Any) -> None:
     replace(vtodo, name, value)
 
 
+def _span(vtodo: Any) -> tuple[Any, ...]:
+    return tuple(vtodo[key].dt if key in vtodo else None for key in ("DTSTART", "DUE"))
+
+
 def _check_span(vtodo: Any) -> None:
     """RFC 5545: DUE is later in time than DTSTART, and shares its value type.
 
-    Another client may have set a DTSTART that core never shows.
+    Another client may have set a DTSTART that core never shows, hence the
+    start in the refusal.
     """
     if "DTSTART" not in vtodo or "DUE" not in vtodo:
         return
     start, due = vtodo["DTSTART"].dt, vtodo["DUE"].dt
     if isinstance(start, datetime) != isinstance(due, datetime):
-        raise Refused("mixed_time_types")
+        raise Refused("mixed_start_and_due", start=_written_out(start))
     if to_utc(due) < to_utc(start):
-        raise Refused("end_before_start")
+        raise Refused("due_before_start", start=_written_out(start))
+
+
+def _written_out(value: date | datetime) -> str:
+    if not isinstance(value, datetime):
+        return value.isoformat()
+    shown = dt_util.as_local(value) if value.tzinfo is not None else value
+    return shown.strftime("%Y-%m-%d %H:%M")
 
 
 def _set_rule(vtodo: Any, rrule: str | None) -> None:

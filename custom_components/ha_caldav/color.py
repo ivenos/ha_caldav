@@ -9,7 +9,7 @@ import caldav
 from caldav.elements import cdav, dav, ical
 from homeassistant.util.color import color_name_to_rgb
 
-from .capability import home_sets, objects_and_props
+from .capability import home_properties, objects_and_props
 
 _HEX = re.compile(r"[0-9a-fA-F]+")
 _EXPANDABLE = (3, 4)
@@ -55,17 +55,19 @@ def fetch_collections(
     """Return calendar key -> color, name and kind for everything the home sets hold.
 
     Whatever a calendar lacks holds None. A calendar is what caldav lists as
-    one: a collection whose resource type names it.
+    one: a collection whose resource type names it. The copies of delegated
+    calendars stay out, as in the listing.
     """
     collections: dict[str, Collection] = {}
-    for home in home_sets(client, delegations):
-        # The parsed form collapses to the home set itself.
-        response = home.get_properties(
-            [ical.CalendarColor(), dav.DisplayName(), dav.ResourceType()],
-            depth=1,
-            parse_response_xml=False,
-        )
+    copies = {key for delegation in delegations for key in delegation.copies}
+    for home, response in home_properties(
+        client,
+        delegations,
+        [ical.CalendarColor(), dav.DisplayName(), dav.ResourceType()],
+    ):
         for key, props in objects_and_props(response, home.url).items():
+            if key in copies:
+                continue
             color = props.get(ical.CalendarColor.tag)
             name = props.get(dav.DisplayName.tag)
             kind = props.get(dav.ResourceType.tag)

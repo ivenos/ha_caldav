@@ -47,7 +47,7 @@ Or open **Settings → Devices & services → Add integration** and search for *
 
 ## Configuration
 
-Setup asks for the server URL, username and password. An account with two-factor authentication needs an app password. A host name is usually enough, and under **Certificates** a CA bundle and a client certificate and key can be set.
+Setup asks for the server URL, username and password, and whether to verify the SSL certificate. An account with two-factor authentication needs an app password. A host name is usually enough, a server without TLS needs `http://` in front, and under **Certificates** a CA bundle and a client certificate and key can be set. Once the server refuses the password, the account stops asking the server until the new password is entered.
 
 | Option | Default | Description |
 |---|---|---|
@@ -56,9 +56,12 @@ Setup asks for the server URL, username and password. An account with two-factor
 | Seconds a request may take | `30` | How long to wait for the server to answer, 5-120 |
 | Days ahead | `7` | How far ahead to look for the upcoming event, 1-365 |
 | Include all-day events | `on` | Whether an all-day event can be the upcoming event |
+| Only busy events | `off` | Leaves out events that show as free and invitations you declined, in the state, the calendar view, automations and reminders |
 | Read-only | `off` | Hides the create, edit and delete controls, and the actions refuse to write |
 
-The last three options can also be set per calendar.
+The last four options can also be set per calendar.
+
+The calendar entity shows the upcoming event with its `url`, `status`, `transparency`, `classification`, `priority`, `categories`, `attendees`, `organizer`, `alarms` and `attachments` as attributes.
 
 ## Actions
 
@@ -80,7 +83,7 @@ Called as `ha_caldav.<action>` on a calendar or to-do list, `create_calendar` an
 | `share_calendar`, `unshare_calendar`, `get_calendar_shares` | Share a calendar with another account on the server for reading or writing, or stop sharing it, administrators only. Returns its `shares` |
 | `create_calendar`, `delete_calendar` | Create a calendar for events, to-dos or journal entries, or delete one, administrators only |
 
-An alarm of an event within the days ahead or of an open to-do fires the event `ha_caldav_reminder` with `entity_id`, `uid`, `recurrence_id`, `summary`, `description`, `location`, `start`, `end` or `due`, and the `alarm`. Each calendar also gets a reminder entity named after it, which gets the same fields except `entity_id`, with the event type `event` or `todo`, and can be picked as a trigger in the automation editor. Completing, canceling or deleting a to-do does the same to its subtasks, and reopening one reopens the to-dos above it.
+An alarm of an event in the next 35 days, or in the days ahead if that is longer, or of an open to-do fires the event `ha_caldav_reminder` with `entity_id`, `uid`, `summary`, `description`, `start` and the `alarm`, plus `recurrence_id`, `location` and `end` for an event or `due` for a to-do. Each calendar with events or to-dos also gets a reminder entity named after it, which gets the same fields except `entity_id`, with the event type `event` or `todo`, and can be picked as a trigger in the automation editor. Completing, canceling or deleting a to-do does the same to its subtasks, and reopening one reopens the to-dos above it.
 
 ## Compatibility
 
@@ -103,6 +106,6 @@ The goal is to bring these features into the built-in CalDAV integration of Home
 
 Copyright © Iven Schlösser. CalDAV Complete is free software, licensed under the [GNU General Public License v3.0 only](LICENSE). You may use, modify and redistribute it. Anyone distributing a modified version must release it under the same license and make its source code available.
 
-CalDAV Complete builds on caldav, licensed under the GNU General Public License v3.0 or later or the Apache License 2.0, icalendar, licensed under the BSD 2-Clause License, vobject, licensed under the Apache License 2.0, and python-dateutil, licensed under the Apache License 2.0 and the BSD 3-Clause License.
+CalDAV Complete builds on caldav, licensed under the GNU General Public License v3.0 or later or the Apache License 2.0, icalendar, licensed under the BSD 2-Clause License, vobject, licensed under the Apache License 2.0, recurring-ical-events, licensed under the GNU Lesser General Public License v3.0 or later, and python-dateutil, licensed under the Apache License 2.0 and the BSD 3-Clause License.
 
 CalDAV Complete is not affiliated with or endorsed by the Open Home Foundation. "Home Assistant" and the "Home Assistant" logo are trademarks of the Open Home Foundation.

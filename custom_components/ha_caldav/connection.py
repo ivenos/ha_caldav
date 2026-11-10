@@ -5,11 +5,16 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Mapping
 from http import HTTPStatus
 import logging
+from math import inf
+import threading
+import time
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 import caldav
 from caldav.davclient import requests
+from caldav.elements import dav
+from caldav.lib.error import AuthorizationError
 from homeassistant.const import CONF_VERIFY_SSL
 
 from .const import CONF_CA_BUNDLE, CONF_CLIENT_CERT, CONF_CLIENT_KEY, DEFAULT_TIMEOUT
@@ -19,6 +24,8 @@ _LOGGER = logging.getLogger(__name__)
 WELL_KNOWN = "/.well-known/caldav"
 
 UNREACHABLE = requests.exceptions.ConnectTimeout
+
+_LOGIN_CLEARED_FOR = 10
 
 
 def calendar_key(url: object) -> str:
@@ -49,24 +56,40 @@ def origin(url: str) -> tuple[str, str, int | None] | None:
         return None
 
 
-def account_key(url: str, username: str) -> str:
-    """Return the identity of an account, shared by every spelling of its url.
+def _normalized(url: str) -> str:
+    """Return a url in one spelling: lower-case scheme and host, no default port.
 
-    Config entries are keyed on this, so changing its shape needs a migration.
+    The path loses a trailing slash, and the query and fragment go.
     """
     try:
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
         port = parsed.port
     except ValueError:
-        return f"{url}#{username}"
+        return url
     scheme = parsed.scheme.lower()
     if ":" in host:
         host = f"[{host}]"
     if port is not None and port != _DEFAULT_PORTS.get(scheme):
         host = f"{host}:{port}"
-    normalized = urlunparse((scheme, host, parsed.path.rstrip("/"), "", "", ""))
-    return f"{normalized}#{username}"
+    return urlunparse((scheme, host, parsed.path.rstrip("/"), "", "", ""))
+
+
+def account_key(url: str, username: str) -> str:
+    """Return the identity of an account, shared by every spelling of its url.
+
+    Config entries are keyed on this, so changing its shape needs a migration.
+    """
+    return f"{_normalized(url)}#{username}"
+
+
+def principal_key(url: str) -> str:
+    """Return the comparable form of a principal url.
+
+    The server names one principal per account, whichever of its urls the
+    account was entered as.
+    """
+    return _normalized(url)
 
 
 def connection_kwargs(
@@ -103,7 +126,12 @@ def distinctive(key: str, keys: Iterable[str]) -> str:
 
 def display_name(calendar: object) -> str:
     """Return the name a calendar is selected and shown by."""
-    return getattr(calendar, "name", None) or "CalDAV"
+    # caldav 2 keeps the listed name in an attribute, caldav 3 in props behind
+    # a deprecated name property that asks the server when the name is missing.
+    attributes = vars(calendar)
+    if "name" in attributes:
+        return attributes["name"] or "CalDAV"
+    return attributes.get("props", {}).get(dav.DisplayName.tag) or "CalDAV"
 
 
 def without_userinfo(url: str) -> str:
@@ -177,8 +205,14 @@ def _resolve_bootstrap(probe: str, kwargs: Mapping[str, Any]) -> str | None:
         # A proxy terminating TLS without X-Forwarded-Proto redirects to http.
         _LOGGER.debug("Ignoring a bootstrap that steps out of https")
         return None
+    resolved = str(response.url)
+    # Radicale sends a GET on the root it points to on to its web interface.
+    for hop in response.history:
+        location = hop.headers.get("Location")
+        if location and urlparse(str(hop.url)).path.rstrip("/") == WELL_KNOWN:
+            resolved = urljoin(str(hop.url), location)
     # caldav prefers userinfo in the url over the account handed to it.
-    return without_userinfo(str(response.url))
+    return without_userinfo(resolved)
 
 
 class HostLockedSession(requests.Session):
@@ -187,11 +221,22 @@ class HostLockedSession(requests.Session):
     requests drops the Authorization header itself, but the digest response
     hook outlives the redirect and re-signs for the new host. caldav follows a
     calendar home set onto another host, scheme and all.
+
+    It also holds back the account once the server refuses its login: servers
+    block an address after a few refused logins, the right password included.
     """
 
     # Where the first request that was moved for good ended up.
     moved_to: str | None = None
     https_only = False
+    refused = False
+    throttled = False
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize the session, its login not yet confirmed."""
+        super().__init__(*args, **kwargs)
+        self._login = threading.Lock()
+        self._cleared_at = -inf
 
     def request(self, method: str, url: Any, *args: Any, **kwargs: Any) -> Any:
         """Send a request, following a redirect on the same host with its method.
@@ -201,7 +246,11 @@ class HostLockedSession(requests.Session):
         password from a refusal by the reason phrase, which HTTP/2 leaves out.
         A proxy that compresses a GET gives its etag a suffix (RFC 9110 8.8.3.3).
         caldav hands requests a Basic login as str, which goes out as latin-1
-        where servers read UTF-8 (RFC 7617 2.1).
+        where servers read UTF-8 (RFC 7617 2.1). caldav 2 hands a digest login
+        its password as bytes, which requests hashes in their repr.
+
+        A login not cleared within the last few seconds goes out alone, so the
+        polls of an account that start together send it once.
         """
         if self.https_only and urlparse(str(url)).scheme.lower() != "https":
             _LOGGER.warning(
@@ -215,16 +264,47 @@ class HostLockedSession(requests.Session):
                 auth.username = auth.username.encode()
             if isinstance(auth.password, str):
                 auth.password = auth.password.encode()
-        if method.upper() in ("GET", "HEAD"):
-            kwargs["headers"] = {
-                **(kwargs.get("headers") or {}),
-                "Accept-Encoding": "identity",
-            }
-            response = super().request(method, url, *args, **kwargs)
-        else:
-            response = self._follow(method, str(url), *args, **kwargs)
+        elif isinstance(auth, requests.auth.HTTPDigestAuth) and isinstance(
+            auth.password, bytes
+        ):
+            auth.password = auth.password.decode()
+        if auth is not None and not self._cleared():
+            with self._login:
+                if not self._cleared():
+                    return self._send(method, url, *args, **kwargs)
+        return self._send(method, url, *args, **kwargs)
+
+    def _cleared(self) -> bool:
+        return time.monotonic() - self._cleared_at < _LOGIN_CLEARED_FOR
+
+    def _send(self, method: str, url: Any, *args: Any, **kwargs: Any) -> Any:
+        if self.refused:
+            raise AuthorizationError(
+                url=without_userinfo(str(url)), reason=HTTPStatus.UNAUTHORIZED.phrase
+            )
+        login = kwargs.get("auth") is not None
+        try:
+            if method.upper() in ("GET", "HEAD"):
+                kwargs["headers"] = {
+                    **(kwargs.get("headers") or {}),
+                    "Accept-Encoding": "identity",
+                }
+                response = super().request(method, url, *args, **kwargs)
+            else:
+                response = self._follow(method, str(url), *args, **kwargs)
+        except Exception:
+            if login:
+                self._cleared_at = time.monotonic()
+            raise
+        if response.status_code == HTTPStatus.TOO_MANY_REQUESTS:
+            self.throttled = True
         if response.status_code in (401, 403):
             response.reason = HTTPStatus(response.status_code).phrase
+        if login and response.status_code == HTTPStatus.UNAUTHORIZED:
+            _LOGGER.debug("The server refused the login; holding the account back")
+            self.refused = True
+        elif login:
+            self._cleared_at = time.monotonic()
         return response
 
     def _follow(self, method: str, url: str, *args: Any, **kwargs: Any) -> Any:

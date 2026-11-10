@@ -21,6 +21,7 @@ class RecordingClient:
         self.puts: list[tuple[str, str]] = []
         self.put_headers: list[dict[str, str]] = []
         self.deletes: list[str] = []
+        self.delete_headers: list[dict[str, str]] = []
         self.fail_from: int | None = None
         self.delete_status: int = 204
         self.stored: dict[str, tuple[str, str]] = {}
@@ -47,6 +48,7 @@ class RecordingClient:
                 return _answer(404, "Not Found")
             return _answer(200, raw=held[0], headers={"Etag": held[1]})
         self.deletes.append(url)
+        self.delete_headers.append(headers)
         if (
             "If-Match" in headers
             and held is not None

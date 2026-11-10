@@ -75,7 +75,9 @@
       "unknown": "Unexpected error",
       "invalid_url": "The URL is not an http or https address",
       "certificate_not_found": "A path under Certificates does not lead to a file",
-      "certificate_failed": "The TLS connection failed: the server certificate could not be verified, or the server refused the client certificate"
+      "certificate_failed": "The TLS connection failed: the server certificate could not be verified, or the server refused the client certificate",
+      "no_tls": "The server does not use TLS at this address. If it only offers plain HTTP, enter the address starting with http://, which sends the password unencrypted",
+      "too_many_attempts": "The server blocks logins from this address after too many failed attempts. Wait until the block runs out or have it lifted on the server, then try again"
     },
     "abort": {
       "already_configured": "This account is already configured",
@@ -101,6 +103,7 @@
           "timeout": "Seconds a request may take",
           "days": "Days ahead",
           "include_all_day": "Include all-day events",
+          "busy_only": "Only busy events",
           "read_only": "Read-only"
         },
         "data_description": {
@@ -109,6 +112,7 @@
           "timeout": "How long to wait for the server to answer a single request.",
           "days": "How far ahead to look when picking the upcoming event.",
           "include_all_day": "Whether an all-day event can become the upcoming event.",
+          "busy_only": "Leaves out events that show as free and invitations you declined, also in the calendar view, for automations and for reminders.",
           "read_only": "Hides the create, edit and delete controls and makes the actions refuse to write. A rename in Home Assistant then stays there."
         }
       },
@@ -124,12 +128,14 @@
         "data": {
           "days": "Days ahead",
           "include_all_day": "Include all-day events",
+          "busy_only": "Only busy events",
           "read_only": "Read-only",
           "reset": "Use the account settings"
         },
         "data_description": {
           "days": "How far ahead to look when picking the upcoming event.",
           "include_all_day": "Whether an all-day event can become the upcoming event.",
+          "busy_only": "Leaves out events that show as free and invitations you declined, also in the calendar view, for automations and for reminders.",
           "read_only": "Hides the create, edit and delete controls and makes the actions refuse to write. A rename in Home Assistant then stays there.",
           "reset": "Discards everything set here and follows the account again."
         }
@@ -183,6 +189,9 @@
     "document_no_uid": {
       "message": "The document has a component without a UID."
     },
+    "due_before_start": {
+      "message": "The due date of a to-do cannot be before its start ({start})."
+    },
     "duplicate_uid": {
       "message": "The document holds more than one item with the UID {uid}."
     },
@@ -198,6 +207,9 @@
     "last_selected_calendar": {
       "message": "{name} is the only calendar included for this account. Include another one in the options first."
     },
+    "mixed_start_and_due": {
+      "message": "The start ({start}) and the due date of a to-do have to be the same kind: both a day, or both a day and time."
+    },
     "mixed_time_types": {
       "message": "Give a start and an end of the same kind: two dates for an all-day event, or two date-and-times."
     },
@@ -210,6 +222,9 @@
     "no_scheduling": {
       "message": "This server does not do CalDAV scheduling, so invitations cannot be answered from here."
     },
+    "no_free_busy": {
+      "message": "This server does not do CalDAV scheduling, so it cannot tell when other people are busy."
+    },
     "no_start_in_object": {
       "message": "This event has no start date, so it cannot be changed here."
     },
@@ -220,7 +235,7 @@
       "message": "This event does not list your account as an attendee."
     },
     "not_found": {
-      "message": "That item is no longer on the server."
+      "message": "That item is not on the server."
     },
     "not_recurring": {
       "message": "This event is not a recurring series."
@@ -293,6 +308,9 @@
     },
     "no_journals": {
       "message": "{name} does not hold journal entries."
+    },
+    "no_events": {
+      "message": "{name} does not hold events."
     },
     "no_journal_in_object": {
       "message": "This item is not stored as a journal entry, so it cannot be changed here."

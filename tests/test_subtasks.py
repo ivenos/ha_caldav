@@ -226,6 +226,16 @@ def test_an_edit_leaves_the_parent_of_a_subtask_alone() -> None:
     assert parent_uid(todos.held()["milk"]) == "shop"
 
 
+def test_an_edit_naming_the_parent_it_already_has_leaves_its_state_alone() -> None:
+    todos = TodoList(_task("shop", "STATUS:COMPLETED"), _under("milk", "shop"))
+
+    update_todo(
+        todos, "milk", {"summary": "Oat milk", "parent_uid": "shop"}, as_shown=False
+    )
+
+    assert todos.statuses() == {"shop": "COMPLETED", "milk": "NEEDS-ACTION"}
+
+
 def test_a_todo_put_under_a_completed_parent_is_completed_with_it() -> None:
     todos = TodoList(
         _task("shop", "STATUS:COMPLETED"), _task("milk"), _under("oat", "milk")
@@ -239,6 +249,15 @@ def test_a_todo_put_under_a_completed_parent_is_completed_with_it() -> None:
         "milk": "COMPLETED",
         "oat": "COMPLETED",
     }
+
+
+def test_a_todo_put_under_a_canceled_parent_keeps_its_state() -> None:
+    todos = TodoList(_task("shop", "STATUS:CANCELLED"), _task("milk"))
+
+    update_todo(todos, "milk", {"parent_uid": "shop"}, as_shown=False)
+
+    assert parent_uid(todos.held()["milk"]) == "shop"
+    assert todos.statuses() == {"shop": "CANCELLED", "milk": "NEEDS-ACTION"}
 
 
 def test_a_todo_put_under_an_open_parent_keeps_its_state() -> None:
@@ -420,3 +439,21 @@ def test_moving_an_item_that_is_gone_is_reported() -> None:
 
     with pytest.raises(NotFoundError):
         move_todo(source, target, "milk", keep_original=False)
+
+
+def test_reopening_an_item_in_a_stored_cycle_reopens_the_other_one() -> None:
+    todos = TodoList(
+        _under("x", "y", "STATUS:COMPLETED"), _under("y", "x", "STATUS:COMPLETED")
+    )
+
+    update_todo(todos, "y", {"summary": "y", "status": "NEEDS-ACTION"})
+
+    assert todos.statuses() == {"x": "NEEDS-ACTION", "y": "NEEDS-ACTION"}
+
+
+def test_reopening_an_item_listed_as_its_own_parent_works() -> None:
+    todos = TodoList(_under("s", "s", "STATUS:COMPLETED"))
+
+    update_todo(todos, "s", {"summary": "s", "status": "NEEDS-ACTION"})
+
+    assert todos.statuses() == {"s": "NEEDS-ACTION"}

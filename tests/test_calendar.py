@@ -26,7 +26,11 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from requests import Timeout
 import vobject
 
+from custom_components.ha_caldav.capability import Delegation
+from custom_components.ha_caldav.connection import calendar_key
 from custom_components.ha_caldav.const import (
+    CONF_BUSY_ONLY,
+    CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
     CONF_DAYS,
     CONF_INCLUDE_ALL_DAY,
@@ -56,7 +60,10 @@ def _calendar(name: str) -> Mock:
 
 
 async def _setup(
-    hass: HomeAssistant, calendars: list[Mock], options: dict | None = None
+    hass: HomeAssistant,
+    calendars: list[Mock],
+    options: dict | None = None,
+    addresses: list[str] | None = None,
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -67,7 +74,9 @@ async def _setup(
     )
     entry.add_to_hass(hass)
     with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
-        client.return_value.principal.return_value.calendars.return_value = calendars
+        principal = client.return_value.principal.return_value
+        principal.calendars.return_value = calendars
+        principal.calendar_user_address_set.return_value = addresses or []
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
     return entry
@@ -166,15 +175,19 @@ async def test_a_window_holding_only_past_events_has_no_upcoming_one(
     assert _entity(hass, "calendar.personal").event is None
 
 
-def _canceled(summary: str, start_offset: timedelta):
+def _marked(summary: str, start_offset: timedelta, lines: str):
     start = dt_util.utcnow() + start_offset
     end = start + timedelta(hours=1)
     return stored(
         "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
         f"BEGIN:VEVENT\nUID:{summary}\nDTSTAMP:20260101T000000Z\n"
         f"DTSTART:{start:%Y%m%dT%H%M%S}Z\nDTEND:{end:%Y%m%dT%H%M%S}Z\n"
-        f"STATUS:CANCELLED\nSUMMARY:{summary}\nEND:VEVENT\nEND:VCALENDAR\n"
+        f"{lines}\nSUMMARY:{summary}\nEND:VEVENT\nEND:VCALENDAR\n"
     )
+
+
+def _canceled(summary: str, start_offset: timedelta):
+    return _marked(summary, start_offset, "STATUS:CANCELLED")
 
 
 async def test_a_canceled_event_does_not_turn_the_calendar_on(
@@ -225,6 +238,165 @@ async def test_a_canceled_occurrence_is_left_out_of_the_panel(
     )
 
     assert [event.start for event in events] == [start, start + timedelta(days=2)]
+
+
+FREE = "TRANSP:TRANSPARENT"
+OWN = ["mailto:iven@example.com"]
+
+
+def _invited(reply: str, address: str = "mailto:iven@example.com") -> str:
+    return f"ORGANIZER:mailto:ann@example.com\nATTENDEE;PARTSTAT={reply}:{address}"
+
+
+async def test_a_free_event_turns_the_calendar_on_by_default(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.search.return_value = [_marked("Free", timedelta(minutes=-30), FREE)]
+    await _setup(hass, [calendar])
+
+    assert hass.states.get("calendar.personal").state == "on"
+
+
+async def test_a_free_event_does_not_turn_the_calendar_on_with_only_busy_events(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.search.return_value = [
+        _marked("Free", timedelta(minutes=-30), FREE),
+        _search_item("Later", timedelta(hours=4)),
+    ]
+    await _setup(hass, [calendar], options={CONF_BUSY_ONLY: True})
+
+    assert hass.states.get("calendar.personal").state == "off"
+    assert _entity(hass, "calendar.personal").event.summary == "Later"
+
+
+async def test_a_declined_invitation_is_left_out_with_only_busy_events(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.search.return_value = [
+        _marked("Declined", timedelta(minutes=-30), _invited("DECLINED")),
+        _marked("Accepted", timedelta(hours=4), _invited("ACCEPTED")),
+    ]
+    await _setup(hass, [calendar], options={CONF_BUSY_ONLY: True}, addresses=OWN)
+    entity = _entity(hass, "calendar.personal")
+
+    events = await entity.async_get_events(
+        hass, dt_util.utcnow() - timedelta(days=1), dt_util.utcnow() + timedelta(days=1)
+    )
+
+    assert hass.states.get("calendar.personal").state == "off"
+    assert [event.summary for event in events] == ["Accepted"]
+
+
+async def test_a_declined_occurrence_is_left_out_of_the_panel_with_only_busy_events(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    start = (dt_util.utcnow() + timedelta(days=1)).replace(microsecond=0)
+    second = start + timedelta(days=1)
+    calendar.search.side_effect = lambda **kw: (
+        []
+        if kw.get("todo")
+        else [
+            stored(
+                "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n"
+                "BEGIN:VEVENT\nUID:series-1\nDTSTAMP:20260101T000000Z\n"
+                f"DTSTART:{start:%Y%m%dT%H%M%S}Z\n"
+                f"DTEND:{start + timedelta(hours=1):%Y%m%dT%H%M%S}Z\n"
+                f"RRULE:FREQ=DAILY;COUNT=3\n{_invited('ACCEPTED')}\n"
+                "SUMMARY:Standup\nEND:VEVENT\n"
+                "BEGIN:VEVENT\nUID:series-1\nDTSTAMP:20260101T000000Z\n"
+                f"RECURRENCE-ID:{second:%Y%m%dT%H%M%S}Z\n"
+                f"DTSTART:{second:%Y%m%dT%H%M%S}Z\n"
+                f"DTEND:{second + timedelta(hours=1):%Y%m%dT%H%M%S}Z\n"
+                f"{_invited('DECLINED')}\nSUMMARY:Standup\nEND:VEVENT\n"
+                "END:VCALENDAR\n",
+                '"e"',
+            )
+        ]
+    )
+    await _setup(hass, [calendar], options={CONF_BUSY_ONLY: True}, addresses=OWN)
+    entity = _entity(hass, "calendar.personal")
+
+    events = await entity.async_get_events(
+        hass, dt_util.utcnow(), dt_util.utcnow() + timedelta(days=7)
+    )
+
+    assert [event.start for event in events] == [start, start + timedelta(days=2)]
+
+
+async def test_a_free_event_is_recognized_in_any_case(hass: HomeAssistant) -> None:
+    calendar = _calendar("Personal")
+    calendar.search.return_value = [
+        _marked("Free", timedelta(minutes=-30), "TRANSP:transparent")
+    ]
+    await _setup(hass, [calendar], options={CONF_BUSY_ONLY: True})
+
+    assert hass.states.get("calendar.personal").state == "off"
+
+
+async def test_a_declined_invitation_is_recognized_in_any_case(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.search.return_value = [
+        _marked(
+            "Declined",
+            timedelta(minutes=-30),
+            _invited("declined", "MAILTO:IVEN@Example.COM"),
+        )
+    ]
+    await _setup(hass, [calendar], options={CONF_BUSY_ONLY: True}, addresses=OWN)
+
+    assert hass.states.get("calendar.personal").state == "off"
+
+
+async def test_only_busy_events_can_be_set_for_a_single_calendar(
+    hass: HomeAssistant,
+) -> None:
+    personal, work = _calendar("Personal"), _calendar("Work")
+    personal.search.return_value = [_marked("Free", timedelta(minutes=-30), FREE)]
+    work.search.return_value = [_marked("Free", timedelta(minutes=-30), FREE)]
+    await _setup(
+        hass,
+        [personal, work],
+        options={
+            CONF_CALENDAR_OPTIONS: {calendar_key(work.url): {CONF_BUSY_ONLY: True}}
+        },
+    )
+
+    assert hass.states.get("calendar.personal").state == "on"
+    assert hass.states.get("calendar.work").state == "off"
+
+
+async def test_a_delegated_calendar_leaves_out_what_its_owner_declined(
+    hass: HomeAssistant,
+) -> None:
+    theirs = _calendar("Boss")
+    theirs.url = "https://cloud.example.com/remote.php/dav/calendars/boss/personal/"
+    theirs.search.return_value = [
+        _marked(
+            "Review",
+            timedelta(minutes=-30),
+            _invited("DECLINED", "mailto:boss@example.com")
+            + "\nATTENDEE;PARTSTAT=ACCEPTED:mailto:iven@example.com",
+        )
+    ]
+    home = Mock(url="https://cloud.example.com/remote.php/dav/calendars/boss/")
+    delegation = Delegation(home, ["mailto:boss@example.com"], "boss")
+    with (
+        patch("custom_components.ha_caldav.fetch_capabilities", return_value={}),
+        patch(
+            "custom_components.ha_caldav.account_calendars",
+            return_value=([theirs], [delegation]),
+        ),
+    ):
+        await _setup(hass, [], options={CONF_BUSY_ONLY: True}, addresses=OWN)
+
+    assert hass.states.get("calendar.boss").state == "off"
 
 
 async def test_next_event_ignores_server_result_order(hass: HomeAssistant) -> None:
@@ -542,7 +714,7 @@ async def test_the_panel_window_caches_its_own_etags(hass: HomeAssistant) -> Non
     def search(**kwargs):
         if kwargs.get("todo") or kwargs.get("start") is None:
             return []
-        if kwargs["start"] < window:
+        if kwargs["end"] < window:
             return []
         return [_search_item("Retro", timedelta(days=90), '"etag-far"')]
 
@@ -636,13 +808,105 @@ async def test_the_extra_attributes_stay_out_of_the_recorder(
 
 async def test_the_days_option_sets_the_search_window(hass: HomeAssistant) -> None:
     calendar = _calendar("Personal")
-    await _setup(hass, [calendar], options={CONF_DAYS: 30})
+    await _setup(hass, [calendar], options={CONF_DAYS: 60})
 
     read = next(
         call for call in calendar.search.call_args_list if call.kwargs.get("event")
     )
     window = read.kwargs["end"] - read.kwargs["start"]
-    assert window == timedelta(days=30)
+    assert window == timedelta(days=60, hours=28)
+
+
+def _utc_server(body: str) -> Mock:
+    """A calendar whose time-range search places dates and floating times in UTC."""
+    calendar = _calendar("Personal")
+
+    def placed(value):
+        if not isinstance(value, datetime):
+            value = datetime.combine(value, datetime.min.time())
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+    def search(**kwargs):
+        if not kwargs.get("event"):
+            return []
+        vevent = vobject.readOne(_result(body).data).vevent
+        start, end = placed(vevent.dtstart.value), placed(vevent.dtend.value)
+        return (
+            [_result(body)] if start < kwargs["end"] and end > kwargs["start"] else []
+        )
+
+    calendar.search.side_effect = search
+    return calendar
+
+
+@pytest.mark.parametrize(
+    ("zone", "body", "at"),
+    [
+        ("Asia/Tokyo", "DTSTART:20260708T090000\nDTEND:20260708T091000", (9, 0)),
+        (
+            "America/Los_Angeles",
+            "DTSTART:20260708T090000\nDTEND:20260708T091000",
+            (9, 0),
+        ),
+        (
+            "Asia/Tokyo",
+            "DTSTART;VALUE=DATE:20260708\nDTEND;VALUE=DATE:20260709",
+            (0, 0),
+        ),
+        (
+            "America/Los_Angeles",
+            "DTSTART;VALUE=DATE:20260708\nDTEND;VALUE=DATE:20260709",
+            (23, 45),
+        ),
+    ],
+)
+async def test_a_trigger_window_finds_what_a_server_placing_times_in_utc_misses(
+    hass: HomeAssistant, zone: str, body: str, at: tuple[int, int]
+) -> None:
+    await hass.config.async_set_time_zone(zone)
+    await _setup(hass, [_utc_server(f"{body}\nSUMMARY:Bins")])
+    start = datetime(2026, 7, 8, *at, tzinfo=ZoneInfo(zone))
+
+    found = await _entity(hass, "calendar.personal").async_get_events(
+        hass, start, start + timedelta(minutes=15)
+    )
+
+    assert [event.summary for event in found] == ["Bins"]
+
+
+async def test_an_event_the_server_sent_from_outside_the_window_is_left_out(
+    hass: HomeAssistant,
+) -> None:
+    await hass.config.async_set_time_zone("Asia/Tokyo")
+    calendar = _calendar("Personal")
+    calendar.search.side_effect = lambda **kwargs: (
+        [
+            _result("DTSTART:20260707T200000\nDTEND:20260707T201000\nSUMMARY:Late"),
+            _result("DTSTART:20260708T090000\nDTEND:20260708T091000\nSUMMARY:Bins"),
+        ]
+        if kwargs.get("event")
+        else []
+    )
+    await _setup(hass, [calendar])
+    start = datetime(2026, 7, 8, 9, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
+
+    found = await _entity(hass, "calendar.personal").async_get_events(
+        hass, start, start + timedelta(minutes=15)
+    )
+
+    assert [event.summary for event in found] == ["Bins"]
+
+
+async def test_an_event_past_the_days_ahead_is_not_the_upcoming_one(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.search.return_value = [_search_item("Later", timedelta(days=9))]
+
+    await _setup(hass, [calendar])
+
+    assert hass.states.get("calendar.personal").state == "off"
+    assert hass.states.get("calendar.personal").attributes.get("message") is None
 
 
 async def test_an_all_day_event_is_skipped_when_the_option_is_off(
@@ -1656,6 +1920,50 @@ async def test_the_state_moves_on_once_the_current_event_ends(
     with patch("homeassistant.util.dt.now", return_value=later):
         assert entity.event.summary == "Second"
         assert entity.state == "on"
+
+
+async def test_the_state_moves_on_again_once_the_next_event_ends_too(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.search.return_value = [
+        _search_item("First", timedelta(hours=1)),
+        _search_item("Second", timedelta(hours=2)),
+        _search_item("Third", timedelta(hours=3)),
+    ]
+    await _setup(hass, [calendar])
+    entity = _entity(hass, "calendar.personal")
+    now = dt_util.now()
+
+    with patch("homeassistant.util.dt.now", return_value=now + timedelta(hours=2.5)):
+        assert entity.event.summary == "Second"
+    with patch("homeassistant.util.dt.now", return_value=now + timedelta(hours=3.5)):
+        assert entity.event.summary == "Third"
+
+
+async def test_a_poll_drops_the_event_the_state_had_moved_on_to(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.search.return_value = [
+        _search_item("First", timedelta(hours=1)),
+        _search_item("Second", timedelta(hours=2)),
+    ]
+    await _setup(hass, [calendar])
+    entity = _entity(hass, "calendar.personal")
+    later = dt_util.now() + timedelta(hours=2, minutes=30)
+    with patch("homeassistant.util.dt.now", return_value=later):
+        assert entity.event.summary == "Second"
+
+    calendar.search.return_value = [
+        _search_item("First", timedelta(hours=1)),
+        _search_item("Third", timedelta(hours=3)),
+    ]
+    entity.coordinator._fetched_at = dt_util.utcnow() - timedelta(days=1)
+    await entity.coordinator.async_refresh()
+
+    with patch("homeassistant.util.dt.now", return_value=later):
+        assert entity.event.summary == "Third"
 
 
 async def test_a_todo_read_already_on_the_wire_cannot_restore_a_dropped_etag(

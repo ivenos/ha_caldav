@@ -402,6 +402,8 @@ class FakeCalendar:
     def _put(self, url, body, headers=None):
         for created in self.created:
             if created.url == str(url):
+                if "If-None-Match" in (headers or {}):
+                    return SimpleNamespace(status=412)
                 created.data = body
                 return SimpleNamespace(status=204)
         created = FakeEvent(body)
@@ -591,7 +593,7 @@ def test_delete_this_and_future_caps_series() -> None:
 
     assert not calendar.event.deleted
     rrule = _master(calendar.event.stored())["RRULE"]
-    assert rrule["UNTIL"] == [datetime(2026, 7, 13, 8, 59, 59, tzinfo=UTC)]
+    assert rrule["UNTIL"] == [datetime(2026, 7, 6, 9, 0, tzinfo=UTC)]
 
 
 def test_delete_this_and_future_removes_count() -> None:
@@ -894,7 +896,7 @@ def test_update_this_and_future_splits_series() -> None:
     )
 
     rrule = _master(calendar.event.stored())["RRULE"]
-    assert rrule["UNTIL"] == [datetime(2026, 7, 13, 8, 59, 59, tzinfo=UTC)]
+    assert rrule["UNTIL"] == [datetime(2026, 7, 6, 9, 0, tzinfo=UTC)]
     assert len(calendar.created) == 1
     tail = _only_vevent(calendar.created[0].data)
     assert tail["SUMMARY"] == "New rhythm"
@@ -1211,9 +1213,29 @@ def test_a_split_at_an_added_date_leaves_that_date_as_an_event_of_its_own() -> N
     assert _exdates(tail) == [datetime(2026, 7, 27, 9, 0, tzinfo=UTC)]
     head = _master(calendar.event.stored())
     assert head["SUMMARY"] == "Standup"
-    assert head["RRULE"]["UNTIL"] == [datetime(2026, 7, 20, 8, 59, 59, tzinfo=UTC)]
+    assert head["RRULE"]["UNTIL"] == [datetime(2026, 7, 13, 9, 0, tzinfo=UTC)]
     assert _rdates(head) == []
     assert _exdates(head) == [datetime(2026, 7, 13, 9, 0, tzinfo=UTC)]
+
+
+def test_an_added_date_split_off_on_its_own_asks_its_attendees_again() -> None:
+    calendar = FakeCalendar(
+        DATED_SERIES.replace(
+            "SUMMARY:Standup",
+            "ATTENDEE;PARTSTAT=ACCEPTED:mailto:iven@example.com\nSUMMARY:Standup",
+        )
+    )
+
+    update_event(
+        calendar,
+        "dated-1",
+        {"summary": "Onwards"},
+        recurrence_id=ADDED_DATE,
+        this_and_future=True,
+    )
+
+    single = _only_vevent(calendar.created[0].data)
+    assert str(single["ATTENDEE"].params["PARTSTAT"]) == "NEEDS-ACTION"
 
 
 def test_a_split_at_an_added_date_moves_the_series_as_far_as_that_date() -> None:
@@ -1376,6 +1398,38 @@ def test_split_keeps_the_tail_when_the_head_cannot_be_re_read() -> None:
         )
 
     assert not calendar.created[0].deleted
+
+
+def test_a_split_made_again_overwrites_the_tail_the_failed_one_left() -> None:
+    from caldav.davclient import requests
+
+    calendar = FakeCalendar(
+        TIMED_SERIES,
+        save_error=requests.Timeout("boom"),
+        refetch_error=requests.ConnectionError("still down"),
+    )
+    with pytest.raises(requests.Timeout):
+        update_event(
+            calendar,
+            "timed-1",
+            {"summary": "New rhythm"},
+            recurrence_id=SECOND_OCCURRENCE,
+            this_and_future=True,
+        )
+    calendar.event = FakeEvent(TIMED_SERIES)
+    calendar._refetch_error = None
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"summary": "New rhythm"},
+        recurrence_id=SECOND_OCCURRENCE,
+        this_and_future=True,
+    )
+
+    [tail] = calendar.created
+    assert _only_vevent(tail.data)["SUMMARY"] == "New rhythm"
+    assert "UNTIL" in _master(calendar.event.stored())["RRULE"]
 
 
 def test_renaming_a_zoned_series_leaves_its_anchor_alone() -> None:
@@ -1658,7 +1712,7 @@ def test_a_series_can_be_made_all_day_from_one_occurrence_onwards() -> None:
 
     head = _master(calendar.event.stored())
     assert head["DTSTART"].dt == datetime(2026, 7, 6, 9, 0, tzinfo=UTC)
-    assert head["RRULE"]["UNTIL"] == [datetime(2026, 7, 20, 8, 59, 59, tzinfo=UTC)]
+    assert head["RRULE"]["UNTIL"] == [datetime(2026, 7, 13, 9, 0, tzinfo=UTC)]
     tail = _only_vevent(calendar.created[0].data)
     assert tail["DTSTART"].dt == date(2026, 7, 20)
     assert tail["DTEND"].dt == date(2026, 7, 21)
@@ -2740,6 +2794,18 @@ def test_one_occurrence_under_a_ranged_exception_is_edited_as_it_shows() -> None
     ranged = found[datetime(2026, 7, 13, 9, 0, tzinfo=UTC)]
     assert ranged["SUMMARY"] == "Standup moved"
     assert _is_ranged(ranged)
+
+
+def test_an_occurrence_under_a_ranged_exception_takes_its_fields_from_it() -> None:
+    calendar = FakeCalendar(RANGED_SERIES)
+
+    update_event(
+        calendar, "timed-1", {"description": "Notes"}, recurrence_id=THIRD_OCCURRENCE
+    )
+
+    single = _by_slot(calendar.event.stored())[datetime(2026, 7, 20, 9, 0, tzinfo=UTC)]
+    assert single["SUMMARY"] == "Standup moved"
+    assert single["DESCRIPTION"] == "Notes"
 
 
 def test_editing_the_occurrence_a_ranged_exception_sits_on_hands_its_range_on() -> None:
@@ -3921,6 +3987,21 @@ def test_an_edit_to_ones_own_event_moves_its_sequence() -> None:
     assert int(_master(calendar.event.stored())["SEQUENCE"]) == 5
 
 
+def test_a_split_off_series_starts_a_sequence_of_its_own() -> None:
+    calendar = FakeCalendar(INVITED_SERIES.replace("boss@", "me@"))
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"summary": "Renamed"},
+        recurrence_id=SECOND_OCCURRENCE,
+        this_and_future=True,
+        addresses=["mailto:me@example.com"],
+    )
+
+    assert "SEQUENCE" not in _master(calendar.created[0].stored())
+
+
 def test_a_moved_series_keeps_the_occurrence_its_end_named() -> None:
     calendar = FakeCalendar(
         TIMED_SERIES.replace("FREQ=WEEKLY", "FREQ=WEEKLY;UNTIL=20260720T090000Z")
@@ -3956,7 +4037,7 @@ def test_deleting_from_an_occurrence_onwards_keeps_an_earlier_ranged_exception()
 
     stored = calendar.event.stored()
     assert _master(stored)["RRULE"]["UNTIL"] == [
-        datetime(2026, 7, 20, 8, 59, 59, tzinfo=UTC)
+        datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
     ]
     [ranged] = _overrides(stored)
     assert _is_ranged(ranged)
@@ -4153,7 +4234,7 @@ def test_a_zoned_series_ending_on_a_date_splits_at_its_last_occurrence(
 
     assert len(calendar.created) == 1
     assert _master(calendar.event.stored())["RRULE"]["UNTIL"] == [
-        datetime(2026, 7, 19, 22, 29, 59, tzinfo=UTC)
+        datetime(2026, 7, 12, 22, 30, tzinfo=UTC)
     ]
 
 
@@ -4369,7 +4450,7 @@ def test_an_organizer_named_for_one_occurrence_is_the_whole_series_one() -> None
     update_event(
         calendar,
         "timed-1",
-        {"summary": "Moved"},
+        {"summary": "Moved", "attendees": ["bob@example.com", "ann@example.com"]},
         recurrence_id=SECOND_OCCURRENCE,
         own_address="mailto:me@example.com",
     )
@@ -4379,6 +4460,31 @@ def test_an_organizer_named_for_one_occurrence_is_the_whole_series_one() -> None
         for component in calendar.event.stored().walk("VEVENT")
     }
     assert organizers == {"mailto:me@example.com"}
+
+
+@pytest.mark.parametrize(
+    ("recurrence_id", "this_and_future"),
+    [(None, False), (SECOND_OCCURRENCE, False), (SECOND_OCCURRENCE, True)],
+    ids=["series", "occurrence", "onwards"],
+)
+def test_renaming_an_event_with_attendees_but_no_organizer_invites_nobody(
+    recurrence_id: str | None, this_and_future: bool
+) -> None:
+    calendar = FakeCalendar(UNORGANIZED_SERIES)
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"summary": "Renamed"},
+        recurrence_id=recurrence_id,
+        this_and_future=this_and_future,
+        own_address="mailto:me@example.com",
+    )
+
+    written = [calendar.event.stored(), *(item.stored() for item in calendar.created)]
+    components = [item for document in written for item in document.walk("VEVENT")]
+    assert "Renamed" in {str(component["SUMMARY"]) for component in components}
+    assert not any("ORGANIZER" in component for component in components)
 
 
 def test_a_date_until_on_a_timed_series_ends_with_that_day() -> None:
@@ -4497,3 +4603,33 @@ def test_answering_one_occurrence_of_a_series_we_are_not_on_adds_no_exception() 
         respond_to_invitation(calendar, "timed-1", "ACCEPTED", ME, SECOND_OCCURRENCE)
 
     assert not calendar.event.saved
+
+
+APPLE = (
+    "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Apple Inc.//macOS 15.0//EN\n"
+    "BEGIN:VEVENT\nUID:apple-1\nDTSTAMP:20260101T000000Z\n"
+    "DTSTART:20260706T090000Z\nDTEND:20260706T100000Z\n"
+    "RRULE:FREQ=WEEKLY;COUNT=4\nSUMMARY:Dentist\nLOCATION:Main St 1\n"
+    "X-APPLE-STRUCTURED-LOCATION;VALUE=URI;X-APPLE-RADIUS=70;X-TITLE=Main St 1:"
+    "geo:52.520008,13.404954\nEND:VEVENT\nEND:VCALENDAR\n"
+)
+
+
+def _unfolded(text: str) -> str:
+    return text.replace("\r\n ", "").replace("\n ", "")
+
+
+def test_a_rename_keeps_the_map_location_of_apple_calendar() -> None:
+    calendar = FakeCalendar(APPLE)
+
+    update_event(calendar, "apple-1", {"summary": "Dentist, moved"})
+
+    assert "geo:52.520008,13.404954" in _unfolded(calendar.event.data)
+
+
+def test_deleting_one_occurrence_keeps_the_map_location_of_apple_calendar() -> None:
+    calendar = FakeCalendar(APPLE)
+
+    delete_event(calendar, "apple-1", "2026-07-13 09:00:00+00:00")
+
+    assert "geo:52.520008,13.404954" in _unfolded(calendar.event.data)

@@ -602,8 +602,8 @@ TODOS = (
     Case(
         "a_todo_without_a_summary",
         document(vtodo("STATUS:NEEDS-ACTION")),
-        "Nothing to render, so it would be a blank row that cannot be told"
-        " apart from the next.",
+        "RFC 5545 leaves SUMMARY optional, and Nextcloud Tasks lists such an"
+        " item without a title.",
     ),
     Case(
         "a_due_date_at_the_edge_of_what_a_datetime_holds",
@@ -827,7 +827,7 @@ def test_reading_one_todo_never_raises(case: Case) -> None:
         item = to_todo(component)
         assert item is None or isinstance(item, TodoItem)
         rank = sort_order(component)
-        assert isinstance(rank, tuple) and len(rank) == 2
+        assert isinstance(rank, tuple) and len(rank) == 4
 
 
 async def test_a_window_whose_objects_carry_no_etag_keeps_the_ones_it_has(

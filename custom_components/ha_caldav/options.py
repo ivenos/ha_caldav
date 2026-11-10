@@ -11,10 +11,12 @@ from homeassistant.const import CONF_SCAN_INTERVAL, CONF_TIMEOUT
 
 from .connection import calendar_key
 from .const import (
+    CONF_BUSY_ONLY,
     CONF_CALENDAR_OPTIONS,
     CONF_DAYS,
     CONF_INCLUDE_ALL_DAY,
     CONF_READ_ONLY,
+    DEFAULT_BUSY_ONLY,
     DEFAULT_DAYS,
     DEFAULT_INCLUDE_ALL_DAY,
     DEFAULT_READ_ONLY,
@@ -43,6 +45,7 @@ def account_settings(entry: ConfigEntry) -> dict[str, Any]:
         CONF_INCLUDE_ALL_DAY: options.get(
             CONF_INCLUDE_ALL_DAY, DEFAULT_INCLUDE_ALL_DAY
         ),
+        CONF_BUSY_ONLY: options.get(CONF_BUSY_ONLY, DEFAULT_BUSY_ONLY),
         CONF_READ_ONLY: options.get(CONF_READ_ONLY, DEFAULT_READ_ONLY),
     }
 

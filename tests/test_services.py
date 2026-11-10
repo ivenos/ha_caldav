@@ -669,7 +669,9 @@ async def test_a_server_error_becomes_a_home_assistant_error(
     assert "cloud.example.com" not in str(raised.value)
 
 
-async def test_search_window_is_passed_through(hass: HomeAssistant) -> None:
+async def test_the_search_window_reaches_past_both_ends_for_times_without_a_zone(
+    hass: HomeAssistant,
+) -> None:
     calendar = _calendar("Personal")
     await _setup(hass, [calendar])
     start = datetime.now(UTC).replace(microsecond=0)
@@ -687,7 +689,46 @@ async def test_search_window_is_passed_through(hass: HomeAssistant) -> None:
         return_response=True,
     )
 
-    assert calendar.search.call_args.kwargs["start"] == start
+    assert calendar.search.call_args.kwargs["start"] == start - timedelta(hours=14)
+    assert calendar.search.call_args.kwargs["end"] == start + timedelta(hours=38)
+
+
+async def test_a_search_leaves_out_what_the_server_sent_from_outside_the_window(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    start = datetime(2026, 7, 6, tzinfo=UTC)
+
+    def at(summary: str, moment: datetime):
+        end = moment + timedelta(hours=1)
+        return stored(
+            "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\nBEGIN:VEVENT\n"
+            f"UID:{summary}\nDTSTAMP:20260101T000000Z\n"
+            f"DTSTART:{moment:%Y%m%dT%H%M%S}Z\nDTEND:{end:%Y%m%dT%H%M%S}Z\n"
+            f"SUMMARY:{summary}\nEND:VEVENT\nEND:VCALENDAR\n"
+        )
+
+    calendar.search.return_value = [
+        at("Before", start - timedelta(hours=3)),
+        at("Inside", start + timedelta(hours=9)),
+        at("After", start + timedelta(days=1, hours=2)),
+    ]
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "search_events",
+        {
+            "entity_id": "calendar.personal",
+            "start": start.isoformat(),
+            "end": (start + timedelta(days=1)).isoformat(),
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    events = result["calendar.personal"]["events"]
+    assert [event["summary"] for event in events] == ["Inside"]
 
 
 async def test_an_all_day_event_keeps_its_date_value_type(hass: HomeAssistant) -> None:
@@ -825,6 +866,9 @@ async def test_a_read_only_calendar_refuses_every_write_service(
         ("set_calendar_color", {"color": "#00679e"}),
         ("move_event", {"uid": "uid-1", "target_entity_id": "calendar.personal"}),
         ("respond_to_invitation", {"uid": "uid-1", "response": "accept"}),
+        ("create_journal", {"summary": "x"}),
+        ("update_journal", {"uid": "note-1", "summary": "x"}),
+        ("delete_journal", {"uid": "note-1"}),
     ):
         with pytest.raises(ServiceValidationError) as refusal:
             await hass.services.async_call(
@@ -2406,7 +2450,8 @@ async def test_an_address_without_an_outbox_is_no_scheduling_server(
             return_response=answers,
         )
 
-    assert refusal.value.translation_key == "no_scheduling"
+    expected = "no_free_busy" if action == "get_free_busy" else "no_scheduling"
+    assert refusal.value.translation_key == expected
 
 
 async def test_a_reply_forwards_the_occurrence_it_names(hass: HomeAssistant) -> None:
@@ -2496,4 +2541,4 @@ async def test_free_busy_of_others_needs_a_scheduling_server(
             return_response=True,
         )
 
-    assert refusal.value.translation_key == "no_scheduling"
+    assert refusal.value.translation_key == "no_free_busy"

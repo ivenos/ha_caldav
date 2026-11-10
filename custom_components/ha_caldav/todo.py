@@ -83,13 +83,26 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
     async def async_create_todo_item(self, item: TodoItem) -> None:
         """Add an item to the list."""
         await self.async_write(
-            partial(create_todo, self.calendar, _item_data(item)), "create"
+            partial(
+                create_todo,
+                self.calendar,
+                _item_data(item),
+                addresses=self.addresses,
+            ),
+            "create",
         )
 
     async def async_create_full_item(self, data: dict[str, Any]) -> None:
         """Add an item including the properties only an action can set."""
         await self.async_write(
-            partial(create_todo, self.calendar, data, self._own_address, False),
+            partial(
+                create_todo,
+                self.calendar,
+                data,
+                self._own_address,
+                False,
+                self.addresses,
+            ),
             "create",
             forget=self.every_etag(),
         )
@@ -102,6 +115,7 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
                 item.uid,
                 _item_data(item),
                 self.coordinator.todo_etags.get(item.uid or ""),
+                addresses=self.addresses,
             ),
             "update",
             forget=self.every_etag(),
@@ -114,7 +128,13 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
         """
         await self.async_write(
             lambda: update_todo(
-                self.calendar, uid, data, None, self._own_address, as_shown=False
+                self.calendar,
+                uid,
+                data,
+                None,
+                self._own_address,
+                as_shown=False,
+                addresses=self.addresses,
             ),
             "update",
             forget=self.every_etag(),

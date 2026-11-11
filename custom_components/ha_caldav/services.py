@@ -42,6 +42,7 @@ from .api import (
     create_calendar,
     delete_calendar,
     export_ics,
+    free_busy,
     import_ics,
     move_event,
     move_todo,
@@ -128,9 +129,11 @@ from .coordinator import (
     ManagedCalendar,
     calendar_unique_id,
     components_of,
+    list_order,
     master_of,
     occurrences,
     reminder_unique_id,
+    shown_occurrence,
     sort_order,
     to_event,
     to_todo,
@@ -143,7 +146,7 @@ from .journal import create_journal, delete_journal, read_journals, update_journ
 from .options import account_settings
 from .recurrence import respond_to_invitation
 from .sharing import read_shares, share_calendar, unshare_calendar
-from .task import read_todo_extras, status_of
+from .task import parent_of, read_todo_extras, status_of
 
 if TYPE_CHECKING:
     from .calendar import HaCaldavCalendarEntity
@@ -299,6 +302,11 @@ def _blank_as_none(validator: Any) -> Any:
     return validate
 
 
+_BLANK_EXTRAS = {
+    key: _blank_as_none(validator) for key, validator in EXTRA_FIELDS.items()
+}
+
+
 def _range_needs_occurrence(value: dict[str, Any]) -> dict[str, Any]:
     """Refuse a recurrence range with no occurrence for it to start at."""
     if value.get("recurrence_range") and value.get("recurrence_id") is None:
@@ -314,7 +322,7 @@ CREATE_EVENT_SCHEMA = vol.All(
             vol.Optional("description"): cv.string,
             vol.Optional("location"): cv.string,
             vol.Optional("rrule"): cv.string,
-            **EXTRA_FIELDS,
+            **_BLANK_EXTRAS,
         }
     ),
     _ONE_START,
@@ -336,7 +344,7 @@ UPDATE_EVENT_SCHEMA = vol.All(
             vol.Optional("description"): cv.string,
             vol.Optional("location"): cv.string,
             vol.Optional("rrule"): cv.string,
-            **EXTRA_FIELDS,
+            **_BLANK_EXTRAS,
         }
     ),
     _ONE_START,
@@ -401,8 +409,8 @@ TODO_FIELDS = {
     ),
     vol.Optional("location"): _blank_as_none(cv.string),
     **{
-        key: _blank_as_none(validator)
-        for key, validator in EXTRA_FIELDS.items()
+        key: validator
+        for key, validator in _BLANK_EXTRAS.items()
         if str(key) not in (ATTR_EVENT_STATUS, ATTR_TRANSPARENCY)
     },
 }
@@ -450,7 +458,7 @@ JOURNAL_FIELDS = {
     vol.Optional(ATTR_EVENT_STATUS): _named(JOURNAL_STATUSES),
     **{
         key: validator
-        for key, validator in EXTRA_FIELDS.items()
+        for key, validator in _BLANK_EXTRAS.items()
         if str(key)
         in (ATTR_URL, ATTR_CLASSIFICATION, ATTR_CATEGORIES, ATTR_ATTACHMENTS)
     },
@@ -515,7 +523,7 @@ INVITATION_SCHEMA = {
 CREATE_CALENDAR_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_CONFIG_ENTRY_ID): cv.string,
-        vol.Required(ATTR_NAME): cv.string,
+        vol.Required(ATTR_NAME): _NAMED,
         vol.Optional(ATTR_COMPONENTS): vol.All(
             cv.ensure_list,
             [_named((COMPONENT_EVENT, COMPONENT_TODO, COMPONENT_JOURNAL))],
@@ -781,7 +789,7 @@ async def _async_get_free_busy(
         )
     report = await _async_account_job(
         entity.hass,
-        partial(entity.calendar.freebusy_request, start, end),
+        partial(free_busy, entity.calendar, start, end),
         SERVICE_GET_FREE_BUSY,
     )
     try:
@@ -904,7 +912,7 @@ def _check_span(start: Any, end: Any) -> None:
         )
 
 
-_CLEARABLE = ("description", "location", ATTR_URL, ATTR_ORGANIZER)
+_CLEARABLE = ("description", "location")
 
 
 def _check_paths(hass: HomeAssistant, fields: Mapping[str, Any]) -> None:
@@ -1121,12 +1129,12 @@ def _found_todos(
     """
     found = []
     for item in calendar.search(todo=True, include_completed=True):
-        vtodo = master_of(item, "vtodo")
-        if vtodo is None or (shown := to_todo(vtodo)) is None:
+        if (master := master_of(item, "vtodo")) is None:
+            continue
+        vtodo = shown_occurrence(item, master)
+        if (shown := to_todo(vtodo)) is None:
             continue
         status = status_of(vtodo)
-        if statuses and status not in statuses:
-            continue
         todo: dict[str, Any] = {
             "uid": shown.uid,
             "summary": shown.summary,
@@ -1138,11 +1146,12 @@ def _found_todos(
                 todo[key] = value.isoformat()
         if shown.description:
             todo["description"] = shown.description
-        todo.update(read_todo_extras(vtodo))
-        if text and not _matches(todo, field, text):
-            continue
-        found.append((sort_order(vtodo), todo))
-    return [todo for _, todo in sorted(found, key=lambda pair: pair[0])]
+        todo.update(read_todo_extras(vtodo, master))
+        wanted = (not statuses or status in statuses) and (
+            not text or _matches(todo, field, text)
+        )
+        found.append((sort_order(master), shown.uid, parent_of(master), (wanted, todo)))
+    return [todo for wanted, todo in list_order(found) if wanted]
 
 
 def _matches(todo: dict[str, Any], field: str, text: str) -> bool:
@@ -1213,8 +1222,6 @@ def _journal_fields(hass: HomeAssistant, data: Mapping[str, Any]) -> dict[str, A
             fields["start" if name.startswith("start_") else name] = data[name]
     if "summary" in data:
         fields["summary"] = data["summary"]
-    if fields.get(ATTR_URL) == "":
-        fields[ATTR_URL] = None
     return fields
 
 
@@ -1309,6 +1316,7 @@ async def _async_unshare_calendar(entity: HaCaldavEntity, call: ServiceCall) -> 
 async def _async_get_shares(
     entity: HaCaldavEntity, call: ServiceCall
 ) -> ServiceResponse:
+    await _async_require_admin(entity.hass, call)
     shares = await _async_account_job(
         entity.hass, partial(read_shares, entity.calendar), SERVICE_GET_CALENDAR_SHARES
     )
@@ -1341,7 +1349,6 @@ async def _async_set_color(entity: HaCaldavEntity, call: ServiceCall) -> None:
         SERVICE_SET_CALENDAR_COLOR,
     )
     if isinstance(entity, CalendarEntity):
-        # Pushing a color releases the hold a local pick puts on the sync.
         entity.async_follow_server_color()
     await entity.runtime_data.colors.async_request_refresh()
 
@@ -1417,6 +1424,12 @@ async def _async_delete_calendar(hass: HomeAssistant, call: ServiceCall) -> None
             translation_key="read_only",
             translation_placeholders={"name": managed.name},
         )
+    if managed.addresses is not None:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="delegated_calendar",
+            translation_placeholders={"name": managed.name},
+        )
     key = calendar_key(managed.calendar.url)
     selected = entry.options.get(CONF_CALENDARS)
     remaining = [item for item in selected or [] if item != key]
@@ -1476,5 +1489,4 @@ async def _async_account_job(hass: HomeAssistant, job: partial, action: str) -> 
     try:
         return await hass.async_add_executor_job(job)
     except Exception as err:
-        # As broad as the entity write path, and for the same reason.
         raise as_reported(err, action) from err

@@ -226,7 +226,6 @@ class HostLockedSession(requests.Session):
     block an address after a few refused logins, the right password included.
     """
 
-    # Where the first request that was moved for good ended up.
     moved_to: str | None = None
     https_only = False
     refused = False

@@ -25,8 +25,10 @@ import recurring_ical_events
 from .capability import Capability
 from .color import Collection, fetch_collections
 from .connection import calendar_key, display_name
+from .const import DOMAIN
 from .errors import rejected
 from .extras import alarm_moments, check_expandable, own_reply, read_extras, to_utc
+from .task import SETTLED, names_slot, parent_of
 
 try:
     from homeassistant.components.calendar import CalendarEventStatus
@@ -90,9 +92,7 @@ class ManagedCalendar:
     capability: Capability
     coordinator: HaCaldavCoordinator
     read_only: bool
-    # Shared by the calendar entity and the to-do list of the same collection.
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # Of the account a delegated calendar belongs to; None for the account's own.
     addresses: list[str] | None = None
 
     @property
@@ -228,6 +228,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         # Moved by every write that invalidates an etag, so a read that started
         # before the write can be told from one that started after it.
         self._etag_epoch = 0
+        self._epoch_read = 0
         self._etag_window: set[str] = set()
         self.rrules: dict[str, str] = {}
         self.todo_etags: dict[str, str] = {}
@@ -368,7 +369,9 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         except Exception as err:
             if rejected(err):
                 _LOGGER.debug("Authorization failed for %s: %s", self.name, err)
-                raise ConfigEntryAuthFailed("Authorization failed") from err
+                raise ConfigEntryAuthFailed(
+                    translation_domain=DOMAIN, translation_key="invalid_auth"
+                ) from err
             # caldav asserts its way out of a response it does not expect.
             raise self._failure(err) from err
 
@@ -385,8 +388,15 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         """
         start = dt_util.start_of_local_day()
         end = start + timedelta(days=self.days)
+        epoch = self._etag_epoch
         changed, token = await self.hass.async_add_executor_job(self._sync_changed)
-        stale = changed or any(half.cached is None for half in self.halves.values())
+        # SOGo's token counts seconds, so a write in the second of the last read
+        # leaves it as it was.
+        stale = (
+            changed
+            or epoch != self._epoch_read
+            or any(half.cached is None for half in self.halves.values())
+        )
         moved = self._window != (start, end)
         # A server may hand back the same token forever.
         aged = (
@@ -395,6 +405,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         self._etags_missed = False
         if (stale or moved or aged) and await self._async_fetch(start, end):
             self._fetched_at = dt_util.utcnow()
+            self._epoch_read = epoch
             if not self._etags_missed:
                 self._window = (start, end)
                 self._sync_token = token
@@ -540,10 +551,9 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         if not self.busy_only:
             return True
         transparency = str(get_attr_value(vevent, "transp") or "").upper()
-        return (
-            transparency != "TRANSPARENT"
-            and own_reply(vevent, self.addresses) != "DECLINED"
-        )
+        return transparency != "TRANSPARENT" and own_reply(
+            vevent, self.addresses
+        ) not in ("DECLINED", "DELEGATED")
 
     def _keep_rules(self, rules: dict[str, str | None]) -> None:
         """Record the rules of a window, forgetting the series that lost theirs."""
@@ -595,16 +605,25 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         etags: dict[str, str] = {}
         reminders: list[Reminder] = []
         for resource in results:
-            vtodo = master_of(resource, "vtodo")
-            if vtodo is None or (item := to_todo(vtodo)) is None:
+            master = master_of(resource, "vtodo")
+            if master is None:
                 continue
-            found.append((sort_order(vtodo), item))
-            reminders.extend(todo_reminders(vtodo, item))
+            vtodo = shown_occurrence(resource, master)
+            if (item := to_todo(vtodo)) is None:
+                continue
+            try:
+                order = sort_order(master)
+                alarms = todo_reminders(vtodo, item)
+            except _UNMAPPABLE as err:
+                _LOGGER.debug("Skipping a to-do that cannot be placed: %s", err)
+                continue
+            found.append((order, item.uid, parent_of(master), item))
+            reminders.extend(alarms)
             etag = resource.props.get(dav.GetEtag.tag)
             if isinstance(etag, str) and item.uid:
                 etags[item.uid] = etag
         return _TodoRead(
-            items=[item for _, item in sorted(found, key=lambda pair: pair[0])],
+            items=list_order(found),
             # Items without a single etag is a server not saying, not an empty cache.
             etags=etags if etags or not found else None,
             epoch=epoch,
@@ -624,6 +643,8 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             _LOGGER.debug("sync-collection failed, refreshing in full: %s", err)
             # Dropped: a restored server 403s forever on a token it lost.
             return True, None
+        if isinstance(listed := getattr(collection, "objects", None), list) and listed:
+            return True, collection.sync_token
         return collection.sync_token != self._sync_token, collection.sync_token
 
 
@@ -672,7 +693,9 @@ class HaCaldavColorCoordinator(DataUpdateCoordinator[dict[str, Collection]]):
             )
         except Exception as err:
             if rejected(err):
-                raise ConfigEntryAuthFailed("Authorization failed") from err
+                raise ConfigEntryAuthFailed(
+                    translation_domain=DOMAIN, translation_key="invalid_auth"
+                ) from err
             # A caldav error carries the url it was reading.
             _LOGGER.debug("Could not read calendar colors: %s", err)
             raise UpdateFailed(
@@ -698,6 +721,75 @@ def sort_order(vtodo: Any) -> tuple[int, float, float, str]:
     if not isfinite(position):
         return (1, 0.0, since, uid)
     return (0, position, since, uid)
+
+
+def list_order[T](entries: list[tuple[Any, str | None, str | None, T]]) -> list[T]:
+    """Return the values of (sort_order key, uid, parent uid, value) in list order.
+
+    A subtask without a position of its own follows its parent, after the
+    subtasks listed before it and theirs. One whose parent is not on the list,
+    or that is its own ancestor, stays where its sort key puts it.
+    """
+    ordered = sorted(entries, key=lambda entry: entry[0])
+    listed = {uid for _, uid, _, _ in ordered}
+    parents = {
+        uid: parent
+        for key, uid, parent, _ in ordered
+        if key[0] == 1 and parent in listed
+    }
+    tops = []
+    below: dict[str | None, list[Any]] = {}
+    for entry in ordered:
+        uid = entry[1]
+        if uid in parents and not _in_cycle(uid, parents):
+            below.setdefault(parents[uid], []).append(entry)
+        else:
+            tops.append(entry)
+    shown: list[T] = []
+    for top in tops:
+        pending = [top]
+        while pending:
+            _, uid, _, value = pending.pop()
+            shown.append(value)
+            pending.extend(reversed(below.pop(uid, [])))
+    return shown
+
+
+def _in_cycle(uid: str | None, parents: dict[str | None, str | None]) -> bool:
+    seen = set()
+    current = parents[uid]
+    while current in parents and current not in seen:
+        if current == uid:
+            return True
+        seen.add(current)
+        current = parents[current]
+    return False
+
+
+def shown_occurrence(item: Any, master: Any) -> Any:
+    """Return the override of a recurring to-do's current occurrence, or the master.
+
+    Thunderbird and Evolution store a change to this occurrence only under a
+    RECURRENCE-ID naming it; the current one starts at the master's DTSTART,
+    or at its DUE without one. One they closed while the series goes on is an
+    occurrence done there, which the series does not wait on.
+    """
+    anchor = get_attr_value(master, "dtstart")
+    if not isinstance(anchor, date):
+        anchor = get_attr_value(master, "due")
+    going_on = not _settled(master)
+    for component in components_of(item, "vtodo"):
+        if (
+            component is not master
+            and names_slot(get_attr_value(component, "recurrence_id"), anchor)
+            and not (going_on and _settled(component))
+        ):
+            return component
+    return master
+
+
+def _settled(vtodo: Any) -> bool:
+    return str(get_attr_value(vtodo, "status") or "").upper() in SETTLED
 
 
 def to_todo(vtodo: Any) -> TodoItem | None:
@@ -762,6 +854,8 @@ def event_reminders(vevents: list[Any]) -> list[Reminder]:
         for key, (at, alarm) in zip(
             _alarm_keys(event.uid, moments), moments, strict=True
         ):
+            if "at" not in alarm:
+                key = (*key, event.recurrence_id)
             found.setdefault(key, Reminder(at, key, {**data, "alarm": alarm}))
     return list(found.values())
 

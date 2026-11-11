@@ -7,7 +7,18 @@ All notable changes to this project are documented in this file, in the format o
 ### Added
 
 - Each calendar gets a reminder entity that automations can use as a trigger in the editor.
-- An option to leave out events that show as free and invitations you declined.
+- An option to leave out events that show as free and invitations you declined or passed on.
+
+### Changed
+
+- Only administrators can list who a calendar is shared with.
+- A delegated calendar can only be deleted by its owner.
+- The settings of a single to-do list or journal only offer Read-only.
+- Importing a calendar file no longer sends invitations to the people in it.
+- Changing only the reminders of an event or to-do, or the order of a to-do list, no longer notifies the attendees.
+- Moving an event you organize asks the attendees to answer again.
+- Subtasks without a manual order are listed right under their parent.
+- When another app changed only the current occurrence of a recurring to-do, the list shows that occurrence, and an edit in Home Assistant changes it.
 
 ### Fixed
 
@@ -46,6 +57,30 @@ All notable changes to this project are documented in this file, in the format o
 - Errors about the start and due date of a to-do talked about events.
 - An empty priority, classification, status or progress in the to-do actions was rejected instead of clearing it.
 - To-dos without a title did not show up.
+- Changing a series from an added date on moved the later events and undid the next changed one.
+- On SOGo, a change made in the same second as the last check stayed hidden until the next one.
+- One to-do with a date far outside the calendar made the whole to-do list unavailable.
+- A series repeating every few minutes through its rule slowed down Home Assistant instead of being left out.
+- A move or an import whose answer never came could leave a copy behind that blocked the next try.
+- Asking when you are busy found nothing on Radicale.
+- An empty attendee list, category or attachment in the event and journal actions wrote broken entries.
+- A calendar could be created without a name.
+- Time zones written with an event ended in 2038, so other apps could show later summer times an hour off.
+- Dragging a to-do failed halfway when another app had written a line of an item twice.
+- Dragging a to-do someone else organizes counted as a new version of it.
+- Reminders a day or a week ahead fired an hour off across a change to or from summer time.
+- Two reminders of one series that came due at the same moment fired only once.
+- A reminder fired again after changing the series from that occurrence on.
+- A delegated calendar lost its entities after the server once failed to list the delegations.
+- The repair for a clash with the built-in CalDAV integration only appeared or went away after a restart.
+- After a calendar was deleted on the server, new calendars were no longer picked up with every calendar ticked.
+- A second user on a server that does not say whose account it is was refused as already set up.
+- The calendar choice in the options did not show its explanation.
+- An invalid recurrence rule, an unreadable import or a refused password showed an untranslated message.
+- The repair for a clash with the built-in CalDAV integration missed the same account entered under another address.
+- A change whose answer never came stayed hidden until the next check although the server had stored it.
+- On SOGo, asking when a calendar is busy reported a server error instead of saying that SOGo cannot tell.
+- Importing into a calendar that cannot hold that kind of item reported a server error.
 
 ## [1.5.1] - 2026-10-11
 

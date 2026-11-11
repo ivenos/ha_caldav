@@ -65,6 +65,7 @@ _BY_RANGES = {
 
 
 _TOO_DENSE = frozenset({"SECONDLY", "MINUTELY"})
+_MAX_PER_DAY = 24
 
 
 def check_expandable(recur: Any, dtstart: datetime | date) -> None:
@@ -72,9 +73,32 @@ def check_expandable(recur: Any, dtstart: datetime | date) -> None:
 
     Each poll window is expanded in memory, a week of a minutely rule to 10,080.
     """
-    if str((recur.get("FREQ") or [""])[0]).upper() in _TOO_DENSE:
+    freq = str((recur.get("FREQ") or [""])[0]).upper()
+    if freq in _TOO_DENSE:
         raise Refused("rrule_too_dense")
     rule_from(recur, dtstart)
+    if _per_day(recur, freq) > _MAX_PER_DAY:
+        raise Refused("rrule_too_dense")
+
+
+def _per_day(recur: Any, freq: str) -> int:
+    """Return how many occurrences a rule can put on one day at most."""
+
+    def count(name: str) -> int:
+        return len(recur.get(name) or ()) or 1
+
+    hours = count("BYHOUR")
+    if freq == "HOURLY" and not recur.get("BYHOUR"):
+        hours = -(-24 // int((recur.get("INTERVAL") or [1])[0]))
+    return hours * count("BYMINUTE") * count("BYSECOND")
+
+
+def parse_rule(text: str) -> vRecur:
+    """Return an RRULE value, refusing text icalendar cannot read as one."""
+    try:
+        return vRecur.from_ical(text)
+    except ValueError as err:
+        raise Refused("invalid_rrule", reason=text) from err
 
 
 def check_rule(recur: Any, dtstart: datetime | date) -> None:
@@ -342,7 +366,7 @@ def alarm_moments(
             base = (end if ends else start) or start or end
             if base is None:
                 continue
-            first = to_utc(base) + trigger
+            first = _offset(base, trigger)
         else:
             first = to_utc(trigger)
         gap = getattr(getattr(valarm, "duration", None), "value", None)
@@ -353,6 +377,24 @@ def alarm_moments(
         for count in range(min(max(repeats, 0), _MAX_REPEATS) + 1):
             moments.append((first + count * gap if count else first, alarm))
     return moments
+
+
+def _offset(base: datetime | date, trigger: timedelta) -> datetime:
+    """Return the moment an alarm offset from a start or end falls on.
+
+    RFC 5545 3.3.6 counts days on the calendar, not as 24 hours.
+    """
+    days = timedelta(days=int(trigger / timedelta(days=1)))
+    if not days:
+        return to_utc(base) + trigger
+    base = as_datetime(base)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=dt_util.get_default_time_zone())
+    zone = base.tzinfo
+    # A pytz zone gets the offset wrong when set with replace().
+    if isinstance(name := getattr(zone, "zone", None), str):
+        zone = dt_util.get_time_zone(name) or zone
+    return to_utc(shifted(base, days, zone)) + (trigger - days)
 
 
 # RFC 8607 names the file FILENAME; Thunderbird and Evolution have their own.
@@ -479,11 +521,12 @@ def _set_organizer(component: Any, organizer: Any) -> None:
     component.add("ORGANIZER", address, encode=False)
 
 
-def reset_replies(component: Any) -> None:
-    """Put the attendees of a split-off series back to NEEDS-ACTION.
+def reset_replies(component: Any, addresses: list[str] | None = None) -> None:
+    """Ask every attendee but the organizer to answer again.
 
-    RFC 5546 has a REQUEST for a new event carry NEEDS-ACTION, and a tail is
-    a new object under a uid nobody has answered for but its organizer.
+    RFC 6638 3.2.8 resets the answers of a rescheduled event, and a split-off
+    series is a new one nobody but its organizer has answered for. The
+    account's own addresses count as the organizer's.
     """
     current = component.get("ATTENDEE")
     if current is None:
@@ -491,12 +534,14 @@ def reset_replies(component: Any) -> None:
     organizer = component.get("ORGANIZER")
     if isinstance(organizer, list):
         organizer = organizer[0] if organizer else None
-    own = None if organizer is None else comparable_address(str(organizer))
+    own = {comparable_address(address) for address in addresses or ()}
+    if organizer is not None:
+        own.add(comparable_address(str(organizer)))
     for address in current if isinstance(current, list) else [current]:
-        if comparable_address(str(address)) == own:
+        if comparable_address(str(address)) in own:
             continue
-        if "PARTSTAT" in address.params:
-            address.params["PARTSTAT"] = vText("NEEDS-ACTION")
+        address.params["PARTSTAT"] = vText("NEEDS-ACTION")
+        address.params["RSVP"] = vText("TRUE")
 
 
 def _set_attendees(component: Any, attendees: list[Any]) -> None:
@@ -688,8 +733,10 @@ def _embedded(path: str) -> Any:
 
 
 def mailto(address: str) -> str:
-    # A CAL-ADDRESS is a URI, and RFC 6638 lets the address set name a
-    # principal by its path.
+    """Return an email address as a CAL-ADDRESS, leaving a URI or path as it is.
+
+    RFC 6638 lets the address set name a principal by its path.
+    """
     if ":" in address or address.startswith("/"):
         return address
     return f"{_MAILTO}{address}" if "@" in address else address

@@ -112,7 +112,7 @@
           "timeout": "Wie lange eine einzelne Anfrage an den Server dauern darf.",
           "days": "Wie weit vorausgeschaut wird, um den nächsten Termin zu bestimmen.",
           "include_all_day": "Ob ein ganztägiger Termin der nächste Termin sein kann.",
-          "busy_only": "Lässt Termine, die als frei angezeigt werden, und abgelehnte Einladungen weg, auch in der Kalenderansicht, für Automationen und für Erinnerungen.",
+          "busy_only": "Lässt Termine, die als frei angezeigt werden, und abgelehnte oder weitergegebene Einladungen weg, auch in der Kalenderansicht, für Automationen und für Erinnerungen.",
           "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus, und die Aktionen schreiben nichts. Eine Umbenennung in Home Assistant bleibt dann dort."
         }
       },
@@ -135,7 +135,7 @@
         "data_description": {
           "days": "Wie weit vorausgeschaut wird, um den nächsten Termin zu bestimmen.",
           "include_all_day": "Ob ein ganztägiger Termin der nächste Termin sein kann.",
-          "busy_only": "Lässt Termine, die als frei angezeigt werden, und abgelehnte Einladungen weg, auch in der Kalenderansicht, für Automationen und für Erinnerungen.",
+          "busy_only": "Lässt Termine, die als frei angezeigt werden, und abgelehnte oder weitergegebene Einladungen weg, auch in der Kalenderansicht, für Automationen und für Erinnerungen.",
           "read_only": "Blendet die Schaltflächen zum Anlegen, Ändern und Löschen aus, und die Aktionen schreiben nichts. Eine Umbenennung in Home Assistant bleibt dann dort.",
           "reset": "Verwirft alles hier Eingestellte und folgt wieder dem Konto."
         }
@@ -201,11 +201,17 @@
     "etag_conflict": {
       "message": "Dieser Eintrag hat sich auf dem Server geändert, seit Home Assistant ihn zuletzt gelesen hat. Lade den Kalender neu und nimm die Änderung erneut vor."
     },
+    "invalid_auth": {
+      "message": "Ungültige Authentifizierung"
+    },
     "invalid_rrule": {
       "message": "Die Wiederholungsregel ist ungültig: {reason}"
     },
     "last_selected_calendar": {
       "message": "{name} ist der einzige eingebundene Kalender dieses Kontos. Binde in den Optionen zuerst einen weiteren ein."
+    },
+    "delegated_calendar": {
+      "message": "{name} gehört einem anderen Konto; nur dessen Besitzer kann ihn löschen."
     },
     "mixed_start_and_due": {
       "message": "Start ({start}) und Fälligkeit einer Aufgabe müssen von derselben Art sein: beide ein Tag oder beide ein Tag mit Uhrzeit."
@@ -224,6 +230,9 @@
     },
     "no_free_busy": {
       "message": "Dieser Server beherrscht kein CalDAV-Scheduling und kann daher nicht sagen, wann andere Personen belegt sind."
+    },
+    "no_busy_query": {
+      "message": "Dieser Server kann nicht sagen, wann dieser Kalender belegt ist."
     },
     "no_start_in_object": {
       "message": "Dieser Termin hat kein Startdatum und lässt sich hier nicht ändern."
@@ -311,6 +320,9 @@
     },
     "no_events": {
       "message": "{name} nimmt keine Termine auf."
+    },
+    "no_todos": {
+      "message": "{name} nimmt keine Aufgaben auf."
     },
     "no_journal_in_object": {
       "message": "Dieser Eintrag ist nicht als Journaleintrag gespeichert und lässt sich hier nicht ändern."
@@ -1088,7 +1100,7 @@
     },
     "get_calendar_shares": {
       "name": "Kalenderfreigaben abfragen",
-      "description": "Gibt die Konten zurück, für die der Kalender freigegeben ist, und was jedes darf."
+      "description": "Gibt die Konten zurück, für die der Kalender freigegeben ist, und was jedes darf, nur für Administratoren."
     },
     "respond_to_invitation": {
       "name": "Auf eine Einladung antworten",

@@ -4,6 +4,8 @@ from zoneinfo import ZoneInfo
 from conftest import written_through
 from homeassistant.util import dt as dt_util
 from icalendar import Calendar as ICalendar
+import pytest
+from test_subtasks import TodoList, _task
 
 from custom_components.ha_caldav.api import update_todo
 
@@ -80,6 +82,16 @@ COMPLETE = {
 def test_completing_recurring_todo_rolls_due_forward() -> None:
     calendar = FakeTodoCalendar(_vtodo("DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY"))
     update_todo(calendar, "t1", COMPLETE)
+
+    vtodo = calendar.todo.stored()
+    assert str(vtodo["STATUS"]) == "NEEDS-ACTION"
+    assert vtodo["DUE"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+
+
+def test_a_recurring_todo_completed_by_percentage_rolls_on() -> None:
+    calendar = FakeTodoCalendar(_vtodo("DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY"))
+
+    update_todo(calendar, "t1", {"percent_complete": 100}, as_shown=False)
 
     vtodo = calendar.todo.stored()
     assert str(vtodo["STATUS"]) == "NEEDS-ACTION"
@@ -220,6 +232,21 @@ def test_update_todo_clears_absent_due_and_description() -> None:
     assert "DESCRIPTION" not in vtodo
 
 
+def test_a_due_replaces_a_duration() -> None:
+    calendar = FakeTodoCalendar(_vtodo("DTSTART:20260706T090000Z\r\nDURATION:PT1H"))
+
+    update_todo(
+        calendar,
+        "t1",
+        {"due": datetime(2026, 7, 6, 11, 0, tzinfo=UTC)},
+        as_shown=False,
+    )
+
+    vtodo = calendar.todo.stored()
+    assert "DURATION" not in vtodo
+    assert vtodo["DUE"].dt == datetime(2026, 7, 6, 11, 0, tzinfo=UTC)
+
+
 def test_completing_an_item_that_is_already_done_keeps_one_stamp() -> None:
     calendar = FakeTodoCalendar(
         _vtodo(
@@ -256,7 +283,6 @@ def test_a_recurring_todo_with_both_anchors_rolls_by_the_start() -> None:
 def test_a_due_date_cannot_be_moved_in_front_of_the_start() -> None:
     """RFC 5545 puts DUE after DTSTART, and Home Assistant shows no start for a
     to-do."""
-    import pytest
 
     from custom_components.ha_caldav.errors import Refused
 
@@ -436,6 +462,24 @@ def test_an_added_time_of_day_does_not_move_the_time_of_the_rule() -> None:
     ]
 
 
+def test_an_added_date_in_utc_keeps_the_wall_clock_of_a_zoned_start_across_dst() -> (
+    None
+):
+    berlin = ZoneInfo("Europe/Berlin")
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DTSTART;TZID=Europe/Berlin:20261020T090000\r\n"
+            "RRULE:FREQ=WEEKLY;COUNT=3\r\nRDATE:20261026T080000Z"
+        )
+    )
+
+    update_todo(calendar, "t1", {"status": "COMPLETED"}, as_shown=False)
+
+    assert calendar.todo.stored()["DTSTART"].dt == datetime(
+        2026, 10, 26, 9, 0, tzinfo=berlin
+    )
+
+
 def test_an_added_date_in_a_week_of_an_interval_keeps_the_rule_on_its_weeks() -> None:
     calendar = FakeTodoCalendar(
         _vtodo(
@@ -467,7 +511,6 @@ def test_an_added_date_in_a_week_an_interval_skips_leaves_the_rule_where_it_was(
 
 
 def test_clearing_the_due_of_a_recurring_todo_without_a_start_is_refused() -> None:
-    import pytest
 
     from custom_components.ha_caldav.errors import Refused
 
@@ -652,3 +695,180 @@ def test_ticking_off_a_todo_someone_else_organizes_keeps_its_sequence() -> None:
     )
 
     assert int(calendar.todo.stored()["SEQUENCE"]) == 2
+
+
+def _bins(*overrides: str, rule: str = "FREQ=WEEKLY", master: str = "") -> str:
+    """Return a series due Monday 9:00 UTC with occurrences changed elsewhere."""
+    parts = [
+        f"SUMMARY:Bins\r\nDUE:20260706T090000Z\r\nRRULE:{rule}\r\n{master}",
+        *overrides,
+    ]
+    return (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
+        + "".join(
+            f"BEGIN:VTODO\r\nUID:bins\r\nDTSTAMP:20260101T000000Z\r\n{part}"
+            "END:VTODO\r\n"
+            for part in parts
+        )
+        + "END:VCALENDAR\r\n"
+    )
+
+
+MOVED = (
+    "RECURRENCE-ID:20260706T090000Z\r\nSUMMARY:Bins (Wednesday)\r\n"
+    "DUE:20260708T090000Z\r\n"
+)
+LATER = "RECURRENCE-ID:20260720T090000Z\r\nSUMMARY:Bins (holiday)\r\n"
+
+
+def _parts(todos: TodoList, uid: str = "bins") -> dict[str, object]:
+    """Return the stored VTODOs of one object by the occurrence they stand for."""
+    body = todos.client.stored[f"{todos.url}{uid}.ics"][0]
+    return {
+        str(part["RECURRENCE-ID"].dt) if "RECURRENCE-ID" in part else "master": part
+        for part in ICalendar.from_ical(body).walk("VTODO")
+    }
+
+
+def test_renaming_an_occurrence_changed_elsewhere_renames_that_occurrence() -> None:
+    todos = TodoList(_bins(MOVED))
+
+    update_todo(
+        todos,
+        "bins",
+        {
+            "summary": "Bins and paper",
+            "status": "NEEDS-ACTION",
+            "due": datetime(2026, 7, 8, 9, 0, tzinfo=UTC),
+        },
+    )
+
+    parts = _parts(todos)
+    assert str(parts["2026-07-06 09:00:00+00:00"]["SUMMARY"]) == "Bins and paper"
+    assert parts["2026-07-06 09:00:00+00:00"]["DUE"].dt == datetime(
+        2026, 7, 8, 9, 0, tzinfo=UTC
+    )
+    assert str(parts["master"]["SUMMARY"]) == "Bins"
+    assert parts["master"]["DUE"].dt == datetime(2026, 7, 6, 9, 0, tzinfo=UTC)
+
+
+def test_the_rule_and_parent_of_an_occurrence_changed_elsewhere_go_to_the_series() -> (
+    None
+):
+    todos = TodoList(_task("chores"), _bins(MOVED))
+
+    update_todo(
+        todos,
+        "bins",
+        {"summary": "Bins and paper", "rrule": "FREQ=DAILY", "parent_uid": "chores"},
+        as_shown=False,
+    )
+
+    parts = _parts(todos)
+    assert str(parts["master"]["SUMMARY"]) == "Bins"
+    assert parts["master"]["RRULE"]["FREQ"] == ["DAILY"]
+    assert str(parts["master"]["RELATED-TO"]) == "chores"
+    assert "RRULE" not in parts["2026-07-06 09:00:00+00:00"]
+    assert str(parts["2026-07-06 09:00:00+00:00"]["SUMMARY"]) == "Bins and paper"
+
+
+def test_completing_an_occurrence_changed_elsewhere_drops_it_and_rolls_on() -> None:
+    todos = TodoList(_bins(MOVED, LATER))
+
+    update_todo(
+        todos,
+        "bins",
+        {
+            "summary": "Bins (Wednesday)",
+            "status": "COMPLETED",
+            "due": datetime(2026, 7, 8, 9, 0, tzinfo=UTC),
+        },
+    )
+
+    parts = _parts(todos)
+    assert set(parts) == {"master", "2026-07-20 09:00:00+00:00"}
+    assert str(parts["master"]["SUMMARY"]) == "Bins"
+    assert str(parts["master"]["STATUS"]) == "NEEDS-ACTION"
+    assert parts["master"]["DUE"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+
+
+def test_completing_the_last_occurrence_changed_elsewhere_closes_the_series() -> None:
+    todos = TodoList(_bins(MOVED, rule="FREQ=WEEKLY;COUNT=1"))
+
+    update_todo(todos, "bins", {"status": "COMPLETED"}, as_shown=False)
+
+    parts = _parts(todos)
+    assert str(parts["master"]["STATUS"]) == "COMPLETED"
+    assert str(parts["2026-07-06 09:00:00+00:00"]["STATUS"]) == "COMPLETED"
+
+
+def test_reopening_a_finished_series_whose_occurrence_was_moved_reopens_both() -> None:
+    todos = TodoList(
+        _bins(
+            f"{MOVED}STATUS:COMPLETED\r\nPERCENT-COMPLETE:100\r\n",
+            master="STATUS:COMPLETED\r\n",
+        )
+    )
+
+    update_todo(
+        todos,
+        "bins",
+        {
+            "summary": "Bins (Wednesday)",
+            "status": "NEEDS-ACTION",
+            "due": datetime(2026, 7, 8, 9, 0, tzinfo=UTC),
+        },
+    )
+
+    parts = _parts(todos)
+    assert str(parts["2026-07-06 09:00:00+00:00"]["STATUS"]) == "NEEDS-ACTION"
+    assert str(parts["master"].get("STATUS", "NEEDS-ACTION")) == "NEEDS-ACTION"
+    assert parts["master"]["DUE"].dt == datetime(2026, 7, 6, 9, 0, tzinfo=UTC)
+
+
+def test_a_subtask_whose_occurrence_was_changed_elsewhere_rolls_with_its_parent() -> (
+    None
+):
+    todos = TodoList(_task("chores"), _bins(MOVED, master="RELATED-TO:chores\r\n"))
+
+    update_todo(todos, "chores", {"summary": "chores", "status": "COMPLETED"})
+
+    parts = _parts(todos)
+    assert set(parts) == {"master"}
+    assert parts["master"]["DUE"].dt == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+
+
+def test_a_subtask_on_its_last_occurrence_changed_elsewhere_closes_with_parent() -> (
+    None
+):
+    todos = TodoList(
+        _task("chores"),
+        _bins(MOVED, rule="FREQ=WEEKLY;COUNT=1", master="RELATED-TO:chores\r\n"),
+    )
+
+    update_todo(todos, "chores", {"summary": "chores", "status": "COMPLETED"})
+
+    parts = _parts(todos)
+    assert str(parts["master"]["STATUS"]) == "COMPLETED"
+    assert str(parts["2026-07-06 09:00:00+00:00"]["STATUS"]) == "COMPLETED"
+
+
+def test_ticking_off_an_occurrence_of_a_series_closed_elsewhere_keeps_it_closed() -> (
+    None
+):
+    todos = TodoList(_bins(MOVED, master="STATUS:COMPLETED\r\n"))
+
+    update_todo(todos, "bins", {"status": "COMPLETED"}, as_shown=False)
+
+    parts = _parts(todos)
+    assert str(parts["master"]["STATUS"]) == "COMPLETED"
+    assert parts["master"]["DUE"].dt == datetime(2026, 7, 6, 9, 0, tzinfo=UTC)
+    assert str(parts["2026-07-06 09:00:00+00:00"]["STATUS"]) == "COMPLETED"
+
+
+def test_an_occurrence_completed_elsewhere_does_not_hold_up_the_series() -> None:
+    todos = TodoList(_bins(f"{MOVED}STATUS:COMPLETED\r\n"), _task("paper"))
+
+    update_todo(todos, "paper", {"parent_uid": "bins"}, as_shown=False)
+
+    assert todos.statuses()["paper"] == "NEEDS-ACTION"

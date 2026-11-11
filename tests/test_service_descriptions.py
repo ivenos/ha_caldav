@@ -174,6 +174,8 @@ def test_declared_defaults_match_the_schema(service: str) -> None:
         (const.SERVICE_SEARCH_TODOS, "field", const.TODO_SEARCH_FIELDS),
         (const.SERVICE_CREATE_JOURNAL, "status", const.JOURNAL_STATUSES),
         (const.SERVICE_UPDATE_JOURNAL, "status", const.JOURNAL_STATUSES),
+        (const.SERVICE_CREATE_JOURNAL, "classification", const.EVENT_CLASSIFICATIONS),
+        (const.SERVICE_UPDATE_JOURNAL, "classification", const.EVENT_CLASSIFICATIONS),
         (const.SERVICE_SEARCH_JOURNALS, "field", const.JOURNAL_SEARCH_FIELDS),
         (const.SERVICE_SHARE_CALENDAR, "access", const.SHARE_ACCESS),
     ],
@@ -184,6 +186,17 @@ def test_selector_options_match_the_constants(service, field, options) -> None:
     selector = _fields(service)[field]["selector"]["select"]
 
     assert selector["options"] == [value.lower() for value in options]
+
+
+@pytest.mark.parametrize("service", sorted(SCHEMAS))
+def test_every_option_a_selector_offers_passes_the_schema(service: str) -> None:
+    validators = {
+        str(marker): validator for marker, validator in SCHEMAS[service].items()
+    }
+    for name, spec in _fields(service).items():
+        select = ((spec or {}).get("selector") or {}).get("select") or {}
+        for option in select.get("options") or ():
+            vol.Schema(validators[name])([option] if select.get("multiple") else option)
 
 
 @pytest.mark.parametrize(

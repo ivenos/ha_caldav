@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from contextlib import suppress
+from datetime import UTC, date, datetime, timedelta
 import logging
 from math import isfinite
 import re
@@ -16,7 +17,14 @@ import caldav
 from caldav.davclient import requests
 from caldav.elements import cdav, dav, ical
 from caldav.lib import vcal
-from caldav.lib.error import DeleteError, NotFoundError, PutError, errmsg
+from caldav.lib.error import (
+    AuthorizationError,
+    DeleteError,
+    NotFoundError,
+    PutError,
+    ReportError,
+    errmsg,
+)
 from caldav.lib.namespace import ns
 from dateutil.rrule import rruleset
 from homeassistant.util import dt as dt_util
@@ -31,7 +39,9 @@ from icalendar import (
     vUri,
 )
 
+from .connection import display_name
 from .const import (
+    ATTR_ALARMS,
     ATTR_PARENT_UID,
     ATTR_PERCENT_COMPLETE,
     EVENT_ATTRIBUTES,
@@ -47,6 +57,7 @@ from .extras import (
     framed_rule,
     holders,
     mailto,
+    parse_rule,
     replace,
     rule_from,
     shifted,
@@ -57,6 +68,7 @@ from .task import (
     Tree,
     apply_fields,
     closed,
+    names_slot,
     parent_uid,
     set_parent,
     set_status,
@@ -73,7 +85,6 @@ _SCAN_THRESHOLD = 8
 # a whole number to take.
 _SORT_GAP = 1024
 
-# The keys apply_extras owns; everything else is a core field for create_ical.
 EXTRA_KEYS = frozenset(EVENT_ATTRIBUTES)
 
 
@@ -221,6 +232,8 @@ def create_event(
         if key not in EXTRA_KEYS and value is not None and value != ""
     }
     extras = {key: value for key, value in data.items() if key in EXTRA_KEYS}
+    if rrule := core.get("rrule"):
+        parse_rule(rrule)
     instance = ICalCalendar.from_ical(
         vcal.create_ical(objtype="VEVENT", uid=str(uuid4()), **core)
     )
@@ -275,8 +288,9 @@ def _zoned(instance: ICalCalendar, component: Any) -> ICalCalendar:
     return _document([component], {}, instance.get("PRODID"))
 
 
-# What rolling a recurring to-do forward decides by itself.
 _ROLLED = frozenset({"due", "start", "status", ATTR_PERCENT_COMPLETE})
+
+_SERIES = frozenset({"rrule", ATTR_PARENT_UID})
 
 
 def update_todo(
@@ -297,18 +311,27 @@ def update_todo(
     """
     if as_shown:
         data = {"summary": "", "due": None, "description": None, **data}
+    quiet = only_personal(data)
     todo = object_by_uid(calendar, uid, todo=True)
     tag = held_etag(todo, expected_etag)
-    vtodo = collapse_repeated(vtodo_of(todo))
-    was_closed = closed(vtodo)
+    vtodo, shown = _shown_of(todo)
+    was_closed = closed(shown)
     # Only on the move to done: core sends the status along with every edit.
     closing = status_asked(data) == "COMPLETED" and not was_closed
-    if closing and "RRULE" in vtodo and _roll_todo(vtodo):
+    if closing and _rolled(todo, vtodo, shown):
         data = {key: value for key, value in data.items() if key not in _ROLLED}
+        if shown is not vtodo:
+            data = {key: value for key, value in data.items() if key in _SERIES}
+            shown = vtodo
     reparented = ATTR_PARENT_UID in data and data[ATTR_PARENT_UID] != parent_uid(vtodo)
-    apply_fields(vtodo, data, own_address, as_shown)
-    closing = closing or (closed(vtodo) and not was_closed)
-    reopening = was_closed and not closed(vtodo)
+    if shown is not vtodo:
+        apply_fields(vtodo, {key: data[key] for key in _SERIES if key in data})
+        data = {key: value for key, value in data.items() if key != "rrule"}
+    apply_fields(shown, data, own_address, as_shown)
+    closing = closing or (closed(shown) and not was_closed)
+    reopening = was_closed and not closed(shown)
+    if (closing or reopening) and closed(vtodo) != closed(shown):
+        set_status(vtodo, str(shown.get("STATUS", "NEEDS-ACTION")).upper())
     if reparented or closing or reopening:
         by_uid, tree = _todo_tree(calendar)
         parent = parent_uid(vtodo)
@@ -318,14 +341,13 @@ def update_todo(
             if parent == uid or parent in tree.descendants(uid):
                 raise Refused("parent_cycle")
             if (
-                not (closing or closed(vtodo))
+                not (closing or closed(shown))
                 and _status(by_uid[parent]) == "COMPLETED"
             ):
                 closing = True
-                if not ("RRULE" in vtodo and _roll_todo(vtodo)):
-                    set_status(vtodo, "COMPLETED")
+                shown = _close(todo, vtodo, shown, "COMPLETED")
         if closing:
-            canceled = str(vtodo.get("STATUS", "")).upper() == "CANCELLED"
+            canceled = str(shown.get("STATUS", "")).upper() == "CANCELLED"
             _close_below(
                 by_uid,
                 tree,
@@ -336,8 +358,64 @@ def update_todo(
         elif reopening and parent in tree.parents:
             above = [parent, *tree.ancestors(parent)]
             _reopen(by_uid, [each for each in above if each != uid], addresses)
-    stamp(vtodo, addresses)
-    _save_todo(todo, tag)
+    _stamp(vtodo, shown, addresses, quiet)
+    _save_todo(todo, tag, quiet)
+
+
+def _shown_of(resource: Any) -> tuple[Any, Any]:
+    """Return the master of a to-do and the component the list shows for it.
+
+    That is the override of the master's current occurrence where there is
+    one, as coordinator.shown_occurrence finds it.
+    """
+    master = collapse_repeated(vtodo_of(resource))
+    anchor = next((master[key].dt for key in ("DTSTART", "DUE") if key in master), None)
+    for component in resource.icalendar_instance.walk("VTODO"):
+        held = component.get("RECURRENCE-ID")
+        if (
+            component is not master
+            and names_slot(getattr(_first(held), "dt", None), anchor)
+            and not (closed(component) and not closed(master))
+        ):
+            return master, collapse_repeated(component)
+    return master, master
+
+
+def _rolled(resource: Any, vtodo: Any, shown: Any) -> bool:
+    """Move a recurring to-do on to its next occurrence; False if it stays.
+
+    The override of the occurrence completed goes, as it now names one
+    before the series starts.
+    """
+    if closed(vtodo) or "RRULE" not in vtodo or not _roll_todo(vtodo):
+        return False
+    if shown is not vtodo:
+        instance = resource.icalendar_instance
+        instance.subcomponents = [
+            part for part in instance.subcomponents if part is not shown
+        ]
+    return True
+
+
+def _close(resource: Any, vtodo: Any, shown: Any, status: str) -> Any:
+    """Close a to-do, a recurring one by moving it on; return what it shows now."""
+    if status == "COMPLETED" and _rolled(resource, vtodo, shown):
+        return vtodo
+    for part in _parts(vtodo, shown):
+        if not closed(part):
+            set_status(part, status)
+    return shown
+
+
+def _parts(vtodo: Any, shown: Any) -> tuple[Any, ...]:
+    return (vtodo,) if shown is vtodo else (vtodo, shown)
+
+
+def _stamp(
+    vtodo: Any, shown: Any, addresses: list[str] | None, personal: bool = False
+) -> None:
+    for part in _parts(vtodo, shown):
+        stamp(part, addresses, personal)
 
 
 def _todo_tree(calendar: caldav.Calendar) -> tuple[dict[str, Any], Tree]:
@@ -354,7 +432,7 @@ def _todo_tree(calendar: caldav.Calendar) -> tuple[dict[str, Any], Tree]:
 
 
 def _status(resource: Any) -> str:
-    return str(vtodo_of(resource).get("STATUS", "")).upper()
+    return str(_shown_of(resource)[1].get("STATUS", "")).upper()
 
 
 def _close_below(
@@ -371,16 +449,14 @@ def _close_below(
     kept: set[str] = set()
     open_ones = []
     for each in tree.descendants(uid):
-        vtodo = collapse_repeated(vtodo_of(by_uid[each]))
-        if tree.parents[each] in kept or closed(vtodo):
+        vtodo, shown = _shown_of(by_uid[each])
+        if tree.parents[each] in kept or closed(shown):
             kept.add(each)
         else:
-            open_ones.append((by_uid[each], vtodo))
-    for resource, vtodo in reversed(open_ones):
+            open_ones.append((by_uid[each], vtodo, shown))
+    for resource, vtodo, shown in reversed(open_ones):
         tag = held_etag(resource, None)
-        if not (status == "COMPLETED" and "RRULE" in vtodo and _roll_todo(vtodo)):
-            set_status(vtodo, status)
-        stamp(vtodo, addresses)
+        _stamp(vtodo, _close(resource, vtodo, shown, status), addresses)
         _save_todo(resource, tag)
 
 
@@ -390,12 +466,14 @@ def _reopen(
     """Reopen the closed parents above an item, up to the first open one."""
     for uid in uids:
         resource = by_uid[uid]
-        vtodo = collapse_repeated(vtodo_of(resource))
-        if not closed(vtodo):
+        vtodo, shown = _shown_of(resource)
+        if not closed(shown):
             return
         tag = held_etag(resource, None)
-        set_status(vtodo, "NEEDS-ACTION")
-        stamp(vtodo, addresses)
+        for part in _parts(vtodo, shown):
+            if closed(part):
+                set_status(part, "NEEDS-ACTION")
+        _stamp(vtodo, shown, addresses)
         _save_todo(resource, tag)
 
 
@@ -437,14 +515,16 @@ def collapse_repeated(component: Any) -> Any:
     return component
 
 
-def _save_todo(todo: Any, tag: str | None) -> None:
+def _save_todo(todo: Any, tag: str | None, quiet: bool = False) -> None:
     """Write a to-do back to the resource it was read from."""
     # A due date may reference a zone the stored item never defined.
     todo.icalendar_instance = zoned_document(todo.icalendar_instance)
-    put_resource(todo, tag)
+    put_resource(todo, tag, quiet=quiet)
 
 
-def reorder_todos(calendar: caldav.Calendar, uids: list[str]) -> None:
+def reorder_todos(
+    calendar: caldav.Calendar, uids: list[str], addresses: list[str] | None = None
+) -> None:
     """Write the given order onto the items.
 
     Core sends the whole ordering for a single drag, so the moved item is
@@ -463,13 +543,13 @@ def reorder_todos(calendar: caldav.Calendar, uids: list[str]) -> None:
         and (moved := _single_move(stored, known)) is not None
         and (place := _between(known, positions, moved)) is not None
     ):
-        _write_position(by_uid[moved], place)
+        _write_position(by_uid[moved], place, addresses)
         return
     # Numbered with room between them, so the next drag has somewhere to land.
     for index, uid in enumerate(known):
         # Compared numerically: a server-written "03" is 3.
         if positions[uid] != float(index * _SORT_GAP):
-            _write_position(by_uid[uid], index * _SORT_GAP)
+            _write_position(by_uid[uid], index * _SORT_GAP, addresses)
 
 
 def _stored_order(
@@ -519,12 +599,14 @@ def _between(
     return place if low < place < high else None
 
 
-def _write_position(todo: Any, position: int) -> None:
+def _write_position(
+    todo: Any, position: int, addresses: list[str] | None = None
+) -> None:
     tag = held_etag(todo, None)
-    vtodo = vtodo_of(todo)
+    vtodo = collapse_repeated(vtodo_of(todo))
     vtodo[SORT_ORDER_PROPERTY] = str(position)
-    stamp(vtodo)
-    _save_todo(todo, tag)
+    stamp(vtodo, addresses, personal=True)
+    _save_todo(todo, tag, quiet=True)
 
 
 def _sort_position(vtodo: Any) -> float | None:
@@ -606,7 +688,7 @@ def move_todo(
             zones = {
                 str(zone.get("TZID", "")): zone for zone in instance.walk("VTIMEZONE")
             }
-            copies[each] = save_document(
+            copies[each] = _save_new(
                 target,
                 _document(vtodos, zones, instance.get("PRODID")),
                 as_todo=True,
@@ -683,13 +765,40 @@ def put_resource(
         headers["If-Match"] = tag
     if new is not None:
         headers["If-None-Match"] = "*"
-    response = resource.client.put(str(resource.url), resource.data, headers)
+    try:
+        response = resource.client.put(str(resource.url), resource.data, headers)
+    except AuthorizationError as err:
+        # caldav before 3.5 drops the body of a 403.
+        if _UNSUPPORTED_KIND in getattr(err, "preconditions", ()):
+            raise _not_held(resource) from err
+        raise
     if response.status == 412 and new is not None:
         raise Refused("uid_clash", uids=new)
     if response.status == 412:
         raise Refused("etag_conflict")
     if response.status not in (200, 201, 204):
         raise PutError(errmsg(response))
+
+
+# RFC 4791 5.3.2.1, for a component the collection does not hold.
+_UNSUPPORTED_KIND = ns("C", "supported-calendar-component")
+
+_NOT_HELD = {"VEVENT": "no_events", "VTODO": "no_todos", "VJOURNAL": "no_journals"}
+
+
+def _not_held(resource: Any) -> Refused:
+    """Return the refusal for a kind of item the calendar does not hold."""
+    kind = next(
+        (
+            item.name
+            for item in resource.icalendar_instance.subcomponents
+            if item.name in _NOT_HELD
+        ),
+        "VEVENT",
+    )
+    parent = getattr(resource, "parent", None)
+    name = display_name(parent) if parent is not None else "CalDAV"
+    return Refused(_NOT_HELD[kind], name=name)
 
 
 def delete_resource(resource: Any, tag: str | None = None, quiet: bool = False) -> None:
@@ -712,15 +821,18 @@ def _quiet(quiet: bool) -> dict[str, str]:
     return {"Schedule-Reply": "F"} if quiet else {}
 
 
-def stamp(component: Any, addresses: list[str] | None = None) -> None:
+def stamp(
+    component: Any, addresses: list[str] | None = None, personal: bool = False
+) -> None:
     """Mark a component as revised now.
 
     RFC 5545 3.8.7.2: without a METHOD, DTSTAMP is the time of the last
-    revision. 3.8.7.4 lets only the organizer move SEQUENCE.
+    revision. 3.8.7.4 lets only the organizer move SEQUENCE, and a personal
+    change is no new version for the attendees.
     """
     now = datetime.now(tz=UTC)
     changes: list[tuple[str, Any]] = [("DTSTAMP", now), ("LAST-MODIFIED", now)]
-    if not _organized_elsewhere(component, addresses):
+    if not personal and not organized_elsewhere(component, addresses):
         changes.append(("SEQUENCE", int(component.get("SEQUENCE", 0)) + 1))
     for key, value in changes:
         if key in component:
@@ -728,12 +840,20 @@ def stamp(component: Any, addresses: list[str] | None = None) -> None:
         component.add(key, value)
 
 
-def _organized_elsewhere(component: Any, addresses: list[str] | None) -> bool:
+def organized_elsewhere(component: Any, addresses: list[str] | None) -> bool:
     """Return whether the component names an organizer who is not this account."""
     if not addresses or (organizer := component.get("ORGANIZER")) is None:
         return False
     own = {comparable_address(address) for address in addresses}
     return comparable_address(str(_first(organizer))) not in own
+
+
+_PERSONAL = frozenset({ATTR_ALARMS})
+
+
+def only_personal(data: dict[str, Any]) -> bool:
+    """Return whether an edit changes only what is the account's own, its alarms."""
+    return bool(data) and data.keys() <= _PERSONAL
 
 
 def move_event(
@@ -754,7 +874,7 @@ def move_event(
     # RFC 4791 gives one uid one resource, and caldav names it after the uid.
     if _already_there(target, {uid}):
         raise Refused("uid_clash", uids=uid)
-    copy = save_document(
+    copy = _save_new(
         target, as_written(instance), as_todo=False, quiet=not keep_original
     )
     if keep_original:
@@ -786,6 +906,22 @@ def _undo(resource: Any, quiet: bool = False) -> None:
         delete_resource(resource, quiet=quiet)
     except Exception as err:  # noqa: BLE001
         _LOGGER.warning("Could not undo a half-finished write: %s", err)
+
+
+def _save_new(
+    calendar: caldav.Calendar,
+    document: ICalCalendar,
+    as_todo: bool,
+    quiet: bool = False,
+) -> Any:
+    """Write a new resource, removing it again if it landed but the answer did not."""
+    try:
+        return save_document(calendar, document, as_todo, quiet=quiet)
+    except NETWORK_ERRORS:
+        head = next(item for item in document.subcomponents if item.name != "VTIMEZONE")
+        with suppress(*NETWORK_ERRORS):
+            _undo(object_by_uid(calendar, str(_first(head["UID"])), None), quiet)
+        raise
 
 
 def save_document(
@@ -844,7 +980,9 @@ def _timezone(tzid: str, known: dict[str, Any]) -> Any | None:
     if (zone := known.get(tzid)) is not None:
         return zone
     try:
-        return _one_date_per_line(ICalTimezone.from_tzid(tzid))
+        # icalendar stops the transitions in 2038 unless told otherwise.
+        zone = ICalTimezone.from_tzid(tzid, last_date=date(2100, 1, 1))
+        return _one_date_per_line(zone)
     except Exception as err:  # noqa: BLE001
         # An unknown or Windows-style TZID has no definition to generate.
         _LOGGER.debug("No timezone definition for %s: %s", tzid, err)
@@ -941,9 +1079,16 @@ def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
     """Write every event, to-do and journal entry in a document to the calendar.
 
     Components sharing a uid are one resource (RFC 4791). A uid already on
-    the calendar aborts the whole import.
+    the calendar aborts the whole import. Nobody the document names is invited.
     """
-    document = ICalCalendar.from_ical(ics)
+    try:
+        document = ICalCalendar.from_ical(ics)
+    except ValueError as err:
+        # icalendar gives up on a line that has no name and value at all.
+        lines = [line for line in ics.splitlines() if line.strip() and ":" not in line]
+        if not lines:
+            raise
+        raise Refused("unreadable_lines", lines=", ".join(lines[:5])) from err
     if unreadable := _unreadable(document):
         raise Refused("unreadable_lines", lines=", ".join(unreadable))
     zones = {str(zone.get("TZID", "")): zone for zone in document.walk("VTIMEZONE")}
@@ -972,16 +1117,17 @@ def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
     try:
         for uid, components in groups.items():
             written.append(
-                save_document(
+                _save_new(
                     calendar,
                     _document(components, zones, document.get("PRODID")),
                     as_todo[uid],
+                    quiet=True,
                 )
             )
     except Exception:
         # Objects left behind would be refused as clashes on the retry.
         for stored in written:
-            _undo(stored)
+            _undo(stored, quiet=True)
         raise
     return list(groups)
 
@@ -1060,6 +1206,17 @@ def export_ics(calendar: caldav.Calendar, uid: str | None) -> str:
     return _document(components, zones, None).to_ical().decode("utf-8")
 
 
+def free_busy(calendar: caldav.Calendar, start: datetime, end: datetime) -> Any:
+    """Ask a calendar when it is busy, by RFC 4791 7.10."""
+    try:
+        return calendar.freebusy_request(start, end)
+    except ReportError as err:
+        # caldav puts the status line where the url belongs; SOGo answers 501.
+        if str(err.url or "").startswith(("405", "501")):
+            raise Refused("no_busy_query") from err
+        raise
+
+
 def busy_periods(instance: Any) -> list[dict[str, str]]:
     """Flatten the FREEBUSY lines of a VFREEBUSY into start/end pairs.
 
@@ -1070,6 +1227,12 @@ def busy_periods(instance: Any) -> list[dict[str, str]]:
     for component in instance.walk("VFREEBUSY"):
         entries = component.get("FREEBUSY")
         if entries is None:
+            # Radicale answers with a VFREEBUSY per busy span, FBTYPE on it.
+            # Without FBTYPE, DTSTART and DTEND are the range asked about.
+            if str(component.get("FBTYPE", "")).upper().startswith("BUSY") and (
+                span := _span_of(component)
+            ):
+                periods.append(span)
             continue
         for entry in entries if isinstance(entries, list) else [entries]:
             value = getattr(entry, "dt", None)
@@ -1079,6 +1242,14 @@ def busy_periods(instance: Any) -> list[dict[str, str]]:
             end = second if isinstance(second, datetime) else start + second
             periods.append({"start": start.isoformat(), "end": end.isoformat()})
     return periods
+
+
+def _span_of(component: Any) -> dict[str, str] | None:
+    start = getattr(component.get("DTSTART"), "dt", None)
+    end = getattr(component.get("DTEND"), "dt", None)
+    if not isinstance(start, datetime) or not isinstance(end, datetime):
+        return None
+    return {"start": start.isoformat(), "end": end.isoformat()}
 
 
 def attendee_free_busy(

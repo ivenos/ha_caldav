@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import ANY, Mock, patch
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -12,7 +12,9 @@ from caldav.lib.url import URL
 from conftest import RecordingClient, dav_calendar, written_through
 from icalendar import Calendar as ICalCalendar
 import pytest
+from test_subtasks import TodoList
 from test_todo_recurrence import FakeTodoCalendar
+import vobject
 
 from custom_components.ha_caldav.api import (
     _SORT_GAP,
@@ -23,8 +25,10 @@ from custom_components.ha_caldav.api import (
     delete_calendar,
     delete_todos,
     export_ics,
+    free_busy,
     import_ics,
     move_event,
+    move_todo,
     reorder_todos,
     set_calendar_color,
     update_todo,
@@ -32,7 +36,11 @@ from custom_components.ha_caldav.api import (
 from custom_components.ha_caldav.const import EVENT_ATTRIBUTES, SORT_ORDER_PROPERTY
 from custom_components.ha_caldav.errors import Refused
 from custom_components.ha_caldav.extras import apply_extras
-from custom_components.ha_caldav.recurrence import delete_event, respond_to_invitation
+from custom_components.ha_caldav.recurrence import (
+    delete_event,
+    respond_to_invitation,
+    update_event,
+)
 
 EVENT = (
     "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n"
@@ -1236,6 +1244,23 @@ def test_a_generated_timezone_survives_being_read_back() -> None:
     assert read.astimezone(UTC) == datetime(2026, 6, 15, 7, 0, tzinfo=UTC)
 
 
+def test_a_generated_timezone_carries_summer_time_past_2038() -> None:
+    calendar = dav_calendar()
+    berlin = ZoneInfo("Europe/Berlin")
+
+    create_event(
+        calendar,
+        {
+            "summary": "Far ahead",
+            "dtstart": datetime(2040, 7, 5, 9, 0, tzinfo=berlin),
+            "dtend": datetime(2040, 7, 5, 10, 0, tzinfo=berlin),
+        },
+    )
+
+    zone = vobject.readOne(_written(calendar)[-1]).vtimezone.gettzinfo()
+    assert datetime(2040, 7, 5, 9, 0, tzinfo=zone).utcoffset() == timedelta(hours=2)
+
+
 def test_moving_a_resource_that_holds_no_event_is_refused() -> None:
     body = (
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
@@ -1409,6 +1434,57 @@ def test_creating_an_event_with_a_rule_nothing_can_expand_is_refused() -> None:
                 "dtstart": datetime(2026, 7, 6, 9, tzinfo=UTC),
                 "dtend": datetime(2026, 7, 6, 10, tzinfo=UTC),
                 "rrule": "FREQ=DAILY;INTERVAL=0",
+            },
+        )
+
+    assert refusal.value.key == "invalid_rrule"
+    assert _written(calendar) == []
+
+
+UNREADABLE_FREQUENCY = "FREQ=SOMETIMES"
+
+
+def test_creating_an_event_with_a_rule_that_cannot_be_read_is_refused() -> None:
+    calendar = _missing_calendar()
+
+    with pytest.raises(Refused) as refusal:
+        create_event(
+            calendar,
+            {
+                "summary": "Boom",
+                "dtstart": datetime(2026, 7, 6, 9, tzinfo=UTC),
+                "dtend": datetime(2026, 7, 6, 10, tzinfo=UTC),
+                "rrule": UNREADABLE_FREQUENCY,
+            },
+        )
+
+    assert refusal.value.key == "invalid_rrule"
+    assert _written(calendar) == []
+
+
+def test_editing_an_event_with_a_rule_that_cannot_be_read_is_refused() -> None:
+    calendar = dav_calendar()
+    event = CaldavEvent(calendar.client, data=EVENT, url=f"{calendar.url}uid-1.ics")
+    calendar.client.stored[str(event.url)] = (EVENT, '"e1"')
+    calendar.event_by_uid.return_value = event
+
+    with pytest.raises(Refused) as refusal:
+        update_event(calendar, "uid-1", {"rrule": UNREADABLE_FREQUENCY})
+
+    assert refusal.value.key == "invalid_rrule"
+    assert _written(calendar) == []
+
+
+def test_a_todo_with_a_rule_that_cannot_be_read_is_refused() -> None:
+    calendar = dav_calendar()
+
+    with pytest.raises(Refused) as refusal:
+        create_todo(
+            calendar,
+            {
+                "summary": "Water plants",
+                "due": date(2026, 7, 6),
+                "rrule": UNREADABLE_FREQUENCY,
             },
         )
 
@@ -1761,6 +1837,61 @@ def test_a_move_whose_delete_landed_before_the_timeout_keeps_its_copy() -> None:
     assert target.client.deletes == []
 
 
+def _answers_lost(client: RecordingClient) -> None:
+    put = client.put
+
+    def landed(url, body, headers=None):
+        put(url, body, headers)
+        raise requests.Timeout("stored, but the answer never came")
+
+    client.put = landed
+
+
+def _looked_up_in_store(calendar: Mock) -> None:
+    def lookup(uid: str) -> CaldavEvent:
+        url = f"{calendar.url}{uid}.ics"
+        if url not in calendar.client.stored:
+            raise NotFoundError(uid)
+        body = calendar.client.stored[url][0]
+        return CaldavEvent(calendar.client, data=body, url=url)
+
+    calendar.event_by_uid.side_effect = lookup
+
+
+def test_a_move_whose_copy_landed_unanswered_takes_the_copy_back() -> None:
+    source, target, _ = _stored_move()
+    _answers_lost(target.client)
+    _looked_up_in_store(target)
+
+    with pytest.raises(requests.Timeout):
+        move_event(source, target, "uid-1", keep_original=False)
+
+    assert target.client.stored == {}
+    assert list(source.client.stored) == [f"{source.url}uid-1.ics"]
+
+
+def test_a_todo_move_whose_copy_landed_unanswered_takes_the_copy_back() -> None:
+    source, target = TodoList(TODO_BODY), TodoList(name="other")
+    _answers_lost(target.client)
+
+    with pytest.raises(requests.Timeout):
+        move_todo(source, target, "uid-1", keep_original=False)
+
+    assert target.held() == {}
+    assert set(source.held()) == {"uid-1"}
+
+
+def test_an_import_whose_write_landed_unanswered_takes_it_back() -> None:
+    calendar = _missing_calendar()
+    _answers_lost(calendar.client)
+    _looked_up_in_store(calendar)
+
+    with pytest.raises(requests.Timeout):
+        import_ics(calendar, EVENT)
+
+    assert calendar.client.stored == {}
+
+
 UNREADABLE_RULE = (
     "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VEVENT\r\n"
     "UID:uid-1\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:20260706T090000Z\r\n"
@@ -1777,6 +1908,13 @@ def test_an_import_refuses_a_line_it_cannot_read() -> None:
 
     assert raised.value.placeholders == {"lines": "RRULE"}
     assert _written(calendar) == []
+
+
+def test_an_import_of_text_that_is_not_icalendar_names_the_line() -> None:
+    with pytest.raises(Refused, match="unreadable_lines") as raised:
+        import_ics(_missing_calendar(), "hello")
+
+    assert raised.value.placeholders == {"lines": "hello"}
 
 
 def test_an_import_refuses_an_event_and_a_todo_under_one_uid() -> None:
@@ -2104,6 +2242,27 @@ def test_a_refused_free_busy_request_is_an_error() -> None:
         )
 
 
+@pytest.mark.parametrize("status", ["405 Method Not Allowed", "501 Request Failed"])
+def test_a_server_without_a_free_busy_query_says_so(status: str) -> None:
+    calendar = Mock()
+    calendar.freebusy_request.side_effect = ReportError(status)
+
+    with pytest.raises(Refused, match="no_busy_query"):
+        free_busy(
+            calendar, datetime(2026, 7, 6, tzinfo=UTC), datetime(2026, 7, 7, tzinfo=UTC)
+        )
+
+
+def test_a_failed_free_busy_query_stays_an_error() -> None:
+    calendar = Mock()
+    calendar.freebusy_request.side_effect = ReportError("500 Internal Server Error")
+
+    with pytest.raises(ReportError):
+        free_busy(
+            calendar, datetime(2026, 7, 6, tzinfo=UTC), datetime(2026, 7, 7, tzinfo=UTC)
+        )
+
+
 def test_a_server_without_an_outbox_does_no_scheduling() -> None:
     client = _scheduling_client(outbox=b"<c:schedule-outbox-URL/>")
 
@@ -2153,3 +2312,125 @@ def test_the_organizer_is_a_path_where_the_account_has_no_email_address() -> Non
 
     request = client.post.call_args.args[1].decode().replace("\r\n ", "")
     assert "ORGANIZER:/principals/me/" in request
+
+
+def test_an_import_invites_nobody_the_document_names() -> None:
+    calendar = _missing_calendar()
+
+    import_ics(calendar, EVENT)
+
+    assert calendar.client.put_headers[0]["Schedule-Reply"] == "F"
+
+
+def test_taking_back_a_failed_import_tells_nobody_either() -> None:
+    calendar = _missing_calendar()
+    calendar.client.fail_from = 1
+    document = "".join(
+        f"BEGIN:VEVENT\r\nUID:u{n}\r\nDTSTAMP:20260101T000000Z\r\n"
+        f"DTSTART:20260706T090000Z\r\nSUMMARY:{n}\r\nEND:VEVENT\r\n"
+        for n in range(2)
+    )
+
+    with pytest.raises(PutError):
+        import_ics(
+            calendar,
+            f"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n{document}"
+            "END:VCALENDAR\r\n",
+        )
+
+    assert [
+        headers["Schedule-Reply"] for headers in calendar.client.delete_headers
+    ] == ["F"]
+
+
+def test_an_alarm_alone_on_a_todo_is_no_new_version_and_announced_to_no_one() -> None:
+    calendar = Mock()
+    calendar.search.return_value = []
+    todo = _todo("SUMMARY:Buy milk\r\nDUE:20260706T100000Z\r\nSEQUENCE:3")
+    calendar.todo_by_uid.return_value = todo
+
+    update_todo(
+        calendar,
+        "uid-1",
+        {"alarms": [15]},
+        as_shown=False,
+        addresses=["mailto:me@example.com"],
+    )
+
+    vtodo = todo.icalendar_component
+    assert int(vtodo["SEQUENCE"]) == 3
+    assert vtodo["DTSTAMP"].dt > datetime(2026, 1, 1, tzinfo=UTC)
+    assert "LAST-MODIFIED" in vtodo
+    assert todo.save.call_args.kwargs["headers"]["Schedule-Reply"] == "F"
+
+
+def test_a_dragged_todo_is_no_new_version_and_announced_to_no_one() -> None:
+    calendar = Mock()
+    todos = {
+        letter: _ordered_todo(
+            letter, f"SUMMARY:{letter}\r\nX-APPLE-SORT-ORDER:{n}\r\nSEQUENCE:2"
+        )
+        for n, letter in enumerate("abc")
+    }
+    calendar.search.return_value = list(todos.values())
+
+    reorder_todos(calendar, ["c", "a", "b"], ["mailto:me@example.com"])
+
+    moved = todos["c"]
+    assert int(moved.icalendar_component["SEQUENCE"]) == 2
+    assert moved.icalendar_component["DTSTAMP"].dt > datetime(2026, 1, 1, tzinfo=UTC)
+    assert moved.save.call_args.kwargs["headers"]["Schedule-Reply"] == "F"
+
+
+class _HoldingOnly(RecordingClient):
+    """Answers a PUT of any other kind as sabre/dav does, with RFC 4791's 403."""
+
+    def __init__(self, kind: str, precondition: bool = True) -> None:
+        super().__init__()
+        self.kind = kind
+        self.precondition = precondition
+
+    def put(self, url, body, headers=None):
+        if f"BEGIN:{self.kind}" in body:
+            return super().put(url, body, headers)
+        refusal = AuthorizationError(url=str(url), reason="Forbidden")
+        refusal.preconditions = ["{http://sabredav.org/ns}exception"]
+        if self.precondition:
+            refusal.preconditions.append(
+                "{urn:ietf:params:xml:ns:caldav}supported-calendar-component"
+            )
+        raise refusal
+
+
+@pytest.mark.parametrize(
+    ("held", "imported", "key"),
+    [
+        ("VEVENT", "VTODO", "no_todos"),
+        ("VTODO", "VEVENT", "no_events"),
+        ("VEVENT", "VJOURNAL", "no_journals"),
+    ],
+)
+def test_only_the_servers_kind_precondition_names_the_kind_not_held(
+    held: str, imported: str, key: str
+) -> None:
+    calendar = _missing_calendar()
+    calendar.name = "Home"
+    parts = "".join(
+        f"BEGIN:{kind}\r\nUID:u{n}\r\nDTSTAMP:20260101T000000Z\r\n"
+        f"DTSTART:20260706T090000Z\r\nSUMMARY:{n}\r\nEND:{kind}\r\n"
+        for n, kind in enumerate((held, imported))
+    )
+    document = (
+        f"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n{parts}END:VCALENDAR\r\n"
+    )
+    calendar.client = _HoldingOnly(held, precondition=False)
+    with pytest.raises(AuthorizationError):
+        import_ics(calendar, document)
+
+    calendar.client = _HoldingOnly(held)
+    with pytest.raises(Refused) as refusal:
+        import_ics(calendar, document)
+
+    assert refusal.value.key == key
+    assert refusal.value.placeholders == {"name": "Home"}
+    assert calendar.client.deletes == [f"{calendar.url}u0.ics"]

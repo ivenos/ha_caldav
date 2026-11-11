@@ -12,7 +12,6 @@ from typing import Any
 
 from homeassistant.util import dt as dt_util
 from icalendar import vText
-from icalendar.prop import vRecur
 
 from .const import (
     ATTR_ALARMS,
@@ -28,7 +27,15 @@ from .const import (
     TODO_STATUSES,
 )
 from .errors import Refused
-from .extras import apply_extras, check_rule, framed_rule, read_extras, replace, to_utc
+from .extras import (
+    apply_extras,
+    check_rule,
+    framed_rule,
+    parse_rule,
+    read_extras,
+    replace,
+    to_utc,
+)
 
 # RFC 5545 knows four states where Home Assistant has two.
 SETTLED = frozenset({"COMPLETED", "CANCELLED"})
@@ -63,10 +70,15 @@ def parent_of(vtodo: Any) -> str | None:
     return None
 
 
-def read_todo_extras(vtodo: Any) -> dict[str, Any]:
-    """Return what a vobject VTODO holds beyond core's item, omitting the absent."""
+def read_todo_extras(vtodo: Any, master: Any = None) -> dict[str, Any]:
+    """Return what a vobject VTODO holds beyond core's item, omitting the absent.
+
+    The parent and the rule belong to the series, so they come from its master
+    when the VTODO is an override.
+    """
+    series = vtodo if master is None else master
     extras: dict[str, Any] = {}
-    if (parent := parent_of(vtodo)) is not None:
+    if (parent := parent_of(series)) is not None:
         extras[ATTR_PARENT_UID] = parent
     start = getattr(getattr(vtodo, "dtstart", None), "value", None)
     if isinstance(start, datetime):
@@ -76,8 +88,8 @@ def read_todo_extras(vtodo: Any) -> dict[str, Any]:
     if (percent := getattr(vtodo, "percent_complete", None)) is not None:
         with suppress(TypeError, ValueError):
             extras[ATTR_PERCENT_COMPLETE] = int(percent.value)
-    for name in ("location", "rrule"):
-        if (holder := getattr(vtodo, name, None)) is not None and holder.value:
+    for name, source in (("location", vtodo), ("rrule", series)):
+        if (holder := getattr(source, name, None)) is not None and holder.value:
             extras[name] = str(holder.value)
     shared = read_extras(vtodo)
     extras.update({key: shared[key] for key in _SHARED if key in shared})
@@ -120,6 +132,16 @@ def set_parent(vtodo: Any, uid: str | None) -> None:
     for relation in relations:
         if not _names_parent(relation):
             vtodo.add("RELATED-TO", relation, encode=False)
+
+
+def names_slot(recurrence_id: Any, anchor: Any) -> bool:
+    """Return whether a RECURRENCE-ID names the occurrence starting at the anchor."""
+    if not isinstance(recurrence_id, date) or not isinstance(anchor, date):
+        return False
+    try:
+        return to_utc(recurrence_id) == to_utc(anchor)
+    except ArithmeticError, ValueError:
+        return False
 
 
 def closed(vtodo: Any) -> bool:
@@ -282,7 +304,7 @@ def _set_rule(vtodo: Any, rrule: str | None) -> None:
     anchor = next((vtodo[key].dt for key in ("DTSTART", "DUE") if key in vtodo), None)
     if anchor is None:
         raise Refused("rrule_needs_date")
-    recur = framed_rule(vRecur.from_ical(rrule), anchor)
+    recur = framed_rule(parse_rule(rrule), anchor)
     check_rule(recur, anchor)
     replace(vtodo, "rrule", recur)
 

@@ -91,6 +91,21 @@ jobs:
           assert __version__.startswith(f"{allowed}."), (__version__, allowed)
           EOF
 
+      - name: Check that the minimum requirements are installed
+        if: matrix.homeassistant == 'oldest'
+        run: |
+          python - <<'EOF'
+          import json
+          from importlib.metadata import version
+          from packaging.requirements import Requirement
+          manifest = json.load(open("custom_components/ha_caldav/manifest.json"))
+          for entry in manifest["requirements"]:
+              minimum = Requirement(entry)
+              floors = [spec.version for spec in minimum.specifier if spec.operator == ">="]
+              assert floors, entry
+              assert version(minimum.name) == floors[0], (entry, version(minimum.name))
+          EOF
+
       - name: Check that the requirements follow Home Assistant core
         run: |
           python - <<'EOF'

@@ -866,6 +866,44 @@ async def test_a_delegated_calendar_writes_as_the_account_it_belongs_to(
     assert create.call_args.args[2] == "mailto:boss@example.com"
 
 
+async def test_two_delegators_whose_homes_share_a_prefix_keep_their_own_addresses(
+    hass: HomeAssistant,
+) -> None:
+    owners = ("anna", "annabel")
+    calendars = [
+        _setup_calendar(
+            f"Personal ({owner})",
+            f"https://cloud.example.com/remote.php/dav/calendars/{owner}/personal/",
+        )
+        for owner in owners
+    ]
+    delegations = [
+        Delegation(
+            Mock(url=f"https://cloud.example.com/remote.php/dav/calendars/{owner}/"),
+            [f"mailto:{owner}@example.com"],
+            owner,
+        )
+        for owner in owners
+    ]
+    entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    with (
+        patch("custom_components.ha_caldav.caldav.DAVClient"),
+        patch("custom_components.ha_caldav.fetch_capabilities", return_value={}),
+        patch(
+            "custom_components.ha_caldav.account_calendars",
+            return_value=(calendars, delegations),
+        ),
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert {item.name: item.addresses for item in entry.runtime_data.calendars} == {
+        "Personal (anna)": ["mailto:anna@example.com"],
+        "Personal (annabel)": ["mailto:annabel@example.com"],
+    }
+
+
 def test_a_delegated_calendar_already_named_after_its_owner_keeps_its_name() -> None:
     """SOGo lists it as "Personal (boss <boss@example.com>)" by itself."""
     theirs = _setup_calendar(

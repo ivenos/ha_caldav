@@ -112,7 +112,7 @@
           "timeout": "How long to wait for the server to answer a single request.",
           "days": "How far ahead to look when picking the upcoming event.",
           "include_all_day": "Whether an all-day event can become the upcoming event.",
-          "busy_only": "Leaves out events that show as free and invitations you declined, also in the calendar view, for automations and for reminders.",
+          "busy_only": "Leaves out events that show as free and invitations you declined or passed on, also in the calendar view, for automations and for reminders.",
           "read_only": "Hides the create, edit and delete controls and makes the actions refuse to write. A rename in Home Assistant then stays there."
         }
       },
@@ -135,7 +135,7 @@
         "data_description": {
           "days": "How far ahead to look when picking the upcoming event.",
           "include_all_day": "Whether an all-day event can become the upcoming event.",
-          "busy_only": "Leaves out events that show as free and invitations you declined, also in the calendar view, for automations and for reminders.",
+          "busy_only": "Leaves out events that show as free and invitations you declined or passed on, also in the calendar view, for automations and for reminders.",
           "read_only": "Hides the create, edit and delete controls and makes the actions refuse to write. A rename in Home Assistant then stays there.",
           "reset": "Discards everything set here and follows the account again."
         }
@@ -201,11 +201,17 @@
     "etag_conflict": {
       "message": "This item changed on the server since Home Assistant last read it. Reload the calendar and make the edit again."
     },
+    "invalid_auth": {
+      "message": "Invalid authentication"
+    },
     "invalid_rrule": {
       "message": "The recurrence rule is not valid: {reason}"
     },
     "last_selected_calendar": {
       "message": "{name} is the only calendar included for this account. Include another one in the options first."
+    },
+    "delegated_calendar": {
+      "message": "{name} belongs to another account, so only its owner can delete it."
     },
     "mixed_start_and_due": {
       "message": "The start ({start}) and the due date of a to-do have to be the same kind: both a day, or both a day and time."
@@ -224,6 +230,9 @@
     },
     "no_free_busy": {
       "message": "This server does not do CalDAV scheduling, so it cannot tell when other people are busy."
+    },
+    "no_busy_query": {
+      "message": "This server cannot tell when this calendar is busy."
     },
     "no_start_in_object": {
       "message": "This event has no start date, so it cannot be changed here."
@@ -311,6 +320,9 @@
     },
     "no_events": {
       "message": "{name} does not hold events."
+    },
+    "no_todos": {
+      "message": "{name} does not hold to-do items."
     },
     "no_journal_in_object": {
       "message": "This item is not stored as a journal entry, so it cannot be changed here."
@@ -1088,7 +1100,7 @@
     },
     "get_calendar_shares": {
       "name": "Get calendar shares",
-      "description": "Returns the accounts the calendar is shared with and what each may do."
+      "description": "Returns the accounts the calendar is shared with and what each may do, administrators only."
     },
     "respond_to_invitation": {
       "name": "Respond to invitation",

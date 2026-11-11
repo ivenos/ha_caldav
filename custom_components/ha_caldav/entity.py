@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 import logging
 from typing import Any
 
-from caldav.lib.error import NotFoundError
 from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later, async_track_point_in_utc_time
@@ -37,7 +36,7 @@ class RemindingEntity(CoordinatorEntity[HaCaldavCoordinator]):
         super().__init__(managed.coordinator)
         self.managed = managed
         self.calendar = managed.calendar
-        self._reminded: set[tuple[object, ...]] = set()
+        self._reminded: dict[tuple[object, ...], tuple[object, ...]] = {}
 
     async def async_added_to_hass(self) -> None:
         """Start telling of the alarms that come due from now on."""
@@ -70,17 +69,26 @@ class RemindingEntity(CoordinatorEntity[HaCaldavCoordinator]):
         if self._reminding_since is not None:
             earliest = max(earliest, self._reminding_since)
         upcoming: datetime | None = None
-        known = set()
-        for half in self._halves:
-            for reminder in self.coordinator.reminders[half]:
-                key = (half, *reminder.key)
-                known.add(key)
-                if reminder.at > now:
-                    upcoming = min(upcoming or reminder.at, reminder.at)
-                elif reminder.at > earliest and key not in self._reminded:
-                    self._reminded.add(key)
+        reminders = [
+            (half, reminder)
+            for half in self._halves
+            for reminder in self.coordinator.reminders[half]
+        ]
+        known = {(half, *reminder.key) for half, reminder in reminders}
+        # A series split, here or in another app, goes on under a new uid.
+        gone = {mark for key, mark in self._reminded.items() if key not in known}
+        for half, reminder in reminders:
+            key = (half, *reminder.key)
+            if reminder.at > now:
+                upcoming = min(upcoming or reminder.at, reminder.at)
+            elif reminder.at > earliest and key not in self._reminded:
+                mark = (half, reminder.at, reminder.data.get("start"))
+                self._reminded[key] = mark
+                if mark not in gone:
                     self._async_fire(half, reminder.data)
-        self._reminded &= known
+        self._reminded = {
+            key: mark for key, mark in self._reminded.items() if key in known
+        }
         if upcoming is not None:
             self._next_reminder = async_track_point_in_utc_time(
                 self.hass, self._async_remind, upcoming
@@ -94,7 +102,6 @@ class RemindingEntity(CoordinatorEntity[HaCaldavCoordinator]):
 class HaCaldavEntity(RemindingEntity):
     """One entity for one half of a calendar."""
 
-    # Which half of the collection this entity reads.
     _half: str
     runtime_data: HaCaldavRuntimeData
     _name_in_registry: str | None = None
@@ -194,21 +201,12 @@ class HaCaldavEntity(RemindingEntity):
             try:
                 await self.hass.async_add_executor_job(job)
             except Exception as err:
-                if _outdated(err):
+                # An answer that never came may still have left the write behind.
+                if not isinstance(err, Refused) or err.key == "etag_conflict":
+                    self.coordinator.forget_etags("etags", ())
                     await self.coordinator.async_refresh()
                 # caldav asserts on an unexpected response and raises TypeError
                 # on html; as_reported names only the type.
                 raise as_reported(err, action) from err
-            if forget is not None:
-                self.coordinator.forget_etags(*forget)
+            self.coordinator.forget_etags(*(forget or ("etags", ())))
             await self.coordinator.async_refresh()
-
-
-def _outdated(err: Exception) -> bool:
-    """Return whether a write failed on a state the server has moved past.
-
-    Every retry would fail the same way until the next poll read it again.
-    """
-    if isinstance(err, Refused):
-        return err.key == "etag_conflict"
-    return isinstance(err, NotFoundError)

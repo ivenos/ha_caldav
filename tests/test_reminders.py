@@ -236,6 +236,51 @@ async def test_an_alarm_fires_once_however_often_the_calendar_is_polled(
     assert len(fired) == 1
 
 
+async def test_an_alarm_a_day_before_keeps_the_wall_clock_across_a_clock_change(
+    hass: HomeAssistant, freezer
+) -> None:
+    freezer.move_to(datetime(2026, 10, 24, 6, 0, tzinfo=UTC))
+    calendar = _calendar(
+        events=[
+            _event(
+                "DTSTART;TZID=Europe/Berlin:20261025T090000\n"
+                "DTEND;TZID=Europe/Berlin:20261025T100000\n" + _alarm("TRIGGER:-P1D")
+            )
+        ]
+    )
+    fired = await _setup(hass, calendar)
+
+    await _move_to(hass, freezer, datetime(2026, 10, 24, 6, 59, tzinfo=UTC))
+    assert fired == []
+
+    await _move_to(hass, freezer, datetime(2026, 10, 24, 7, 0, tzinfo=UTC))
+    assert len(fired) == 1
+
+
+async def test_two_occurrences_alarming_at_the_same_moment_both_remind(
+    hass: HomeAssistant, freezer
+) -> None:
+    calendar = _calendar(
+        events=[
+            _event(
+                "DTSTART:20260707T090000Z\nDTEND:20260707T093000Z\n"
+                "RRULE:FREQ=DAILY;COUNT=3\n"
+                + _alarm("TRIGGER:PT0S")
+                + "\n"
+                + _alarm("TRIGGER:-P1D")
+            )
+        ]
+    )
+    fired = await _setup(hass, calendar)
+
+    await _move_to(hass, freezer, datetime(2026, 7, 7, 9, 0, tzinfo=UTC))
+
+    assert sorted(event.data["recurrence_id"] for event in fired) == [
+        "2026-07-07 09:00:00+00:00",
+        "2026-07-08 09:00:00+00:00",
+    ]
+
+
 async def test_an_alarm_that_came_due_before_the_start_is_not_replayed(
     hass: HomeAssistant, freezer
 ) -> None:
@@ -350,6 +395,28 @@ async def test_a_to_do_alarm_fires_from_its_list(hass: HomeAssistant, freezer) -
     assert datetime.fromisoformat(event.data["due"]) == NOW + timedelta(hours=1)
 
 
+async def test_a_to_do_occurrence_moved_elsewhere_reminds_at_its_new_time(
+    hass: HomeAssistant, freezer
+) -> None:
+    alarm = _alarm("TRIGGER;RELATED=END:-PT30M")
+    series = stored(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
+        "BEGIN:VTODO\nUID:todo-1\nDTSTAMP:20260101T000000Z\nSUMMARY:Bins\n"
+        f"DUE:20260706T090000Z\nRRULE:FREQ=WEEKLY\n{alarm}\nEND:VTODO\n"
+        "BEGIN:VTODO\nUID:todo-1\nDTSTAMP:20260101T000000Z\nSUMMARY:Bins\n"
+        f"RECURRENCE-ID:20260706T090000Z\nDUE:20260706T100000Z\n{alarm}\n"
+        "END:VTODO\nEND:VCALENDAR\n"
+    )
+    fired = await _setup(hass, _calendar(todos=[series]))
+
+    await _move_to(hass, freezer, NOW + timedelta(minutes=30))
+    assert fired == []
+
+    await _move_to(hass, freezer, NOW + timedelta(minutes=90))
+    [event] = fired
+    assert datetime.fromisoformat(event.data["due"]) == NOW + timedelta(hours=2)
+
+
 async def test_an_untitled_to_do_reminds_too(hass: HomeAssistant, freezer) -> None:
     untitled = stored(
         "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\nBEGIN:VTODO\n"
@@ -363,6 +430,27 @@ async def test_an_untitled_to_do_reminds_too(hass: HomeAssistant, freezer) -> No
     [event] = fired
     assert event.data["uid"] == "todo-1"
     assert event.data["summary"] == ""
+
+
+async def test_a_to_do_alarm_a_day_before_keeps_the_wall_clock_across_a_clock_change(
+    hass: HomeAssistant, freezer
+) -> None:
+    freezer.move_to(datetime(2026, 10, 24, 17, 0, tzinfo=UTC))
+    calendar = _calendar(
+        todos=[
+            _todo(
+                "DUE;TZID=Europe/Berlin:20261025T200000\n"
+                + _alarm("TRIGGER;RELATED=END:-P1D")
+            )
+        ]
+    )
+    fired = await _setup(hass, calendar)
+
+    await _move_to(hass, freezer, datetime(2026, 10, 24, 17, 59, tzinfo=UTC))
+    assert fired == []
+
+    await _move_to(hass, freezer, datetime(2026, 10, 24, 18, 0, tzinfo=UTC))
+    assert len(fired) == 1
 
 
 async def test_an_offset_on_a_to_do_without_a_start_counts_from_its_due_date(
@@ -572,3 +660,55 @@ async def test_an_alarm_that_fired_stays_quiet_when_another_is_added_before_it(
     await _poll(hass)
 
     assert len(fired) == 1
+
+
+async def test_an_alarm_that_fired_stays_quiet_after_a_split_renames_its_series(
+    hass: HomeAssistant, freezer
+) -> None:
+    alarm = _alarm("TRIGGER:-PT15M")
+    calendar = _calendar(
+        events=[
+            _event(
+                "DTSTART:20260705T100000Z\nDTEND:20260705T110000Z\n"
+                "RRULE:FREQ=DAILY\n" + alarm
+            )
+        ]
+    )
+    fired = await _setup(hass, calendar)
+    await _move_to(hass, freezer, datetime(2026, 7, 6, 9, 45, tzinfo=UTC))
+    assert len(fired) == 1
+
+    calendar.held["events"] = [
+        _event(
+            "DTSTART:20260705T100000Z\nDTEND:20260705T110000Z\n"
+            "RRULE:FREQ=DAILY;UNTIL=20260705T100000Z\n" + alarm
+        ),
+        _event(
+            "DTSTART:20260706T100000Z\nDTEND:20260706T110000Z\n"
+            "RRULE:FREQ=DAILY\n" + alarm,
+            uid="uid-1-20260706T100000Z",
+        ),
+    ]
+    calendar.objects_by_sync_token.return_value.sync_token = "split"
+    await _move_to(hass, freezer, datetime(2026, 7, 6, 9, 47, tzinfo=UTC))
+    await _poll(hass)
+
+    assert len(fired) == 1
+
+
+async def test_two_events_with_the_same_alarm_both_remind_when_one_is_found_later(
+    hass: HomeAssistant, freezer
+) -> None:
+    body = "DTSTART:20260706T100000Z\nDTEND:20260706T110000Z\n" + _alarm(
+        "TRIGGER:-PT15M"
+    )
+    calendar = _calendar(events=[_event(body)])
+    fired = await _setup(hass, calendar)
+    await _move_to(hass, freezer, datetime(2026, 7, 6, 9, 45, tzinfo=UTC))
+
+    calendar.held["events"] = [_event(body), _event(body, uid="uid-2")]
+    calendar.objects_by_sync_token.return_value.sync_token = "added"
+    await _move_to(hass, freezer, datetime(2026, 7, 6, 9, 47, tzinfo=UTC))
+    await _poll(hass)
+
+    assert [event.data["uid"] for event in fired] == ["uid-1", "uid-2"]

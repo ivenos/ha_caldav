@@ -391,6 +391,96 @@ async def test_an_item_without_a_summary_is_listed_and_found_untitled(
     assert todos[1] == {"uid": "u1", "summary": "", "status": "needs_action"}
 
 
+def _series(uid: str, *parts: str) -> Mock:
+    item = Mock()
+    item.vobject_instance = vobject.readOne(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
+        + "".join(
+            f"BEGIN:VTODO\r\nUID:{uid}\r\nDTSTAMP:20260101T000000Z\r\n{part}"
+            "END:VTODO\r\n"
+            for part in parts
+        )
+        + "END:VCALENDAR\r\n"
+    )
+    item.props = {}
+    return item
+
+
+@pytest.mark.parametrize(
+    ("start", "occurrence"),
+    [
+        ("DUE:20260706T090000Z", "RECURRENCE-ID:20260706T090000Z"),
+        (
+            "DTSTART;VALUE=DATE:20260706\r\nDUE;VALUE=DATE:20260707",
+            "RECURRENCE-ID;VALUE=DATE:20260706",
+        ),
+    ],
+)
+async def test_a_change_made_elsewhere_to_this_occurrence_only_is_what_is_listed(
+    hass: HomeAssistant, start: str, occurrence: str
+) -> None:
+    bins = _series(
+        "bins",
+        f"SUMMARY:Bins\r\n{start}\r\nRRULE:FREQ=WEEKLY\r\nRELATED-TO:chores\r\n"
+        "X-APPLE-SORT-ORDER:0\r\n",
+        f"{occurrence}\r\nSUMMARY:Bins (Wednesday)\r\nDUE:20260708T090000Z\r\n"
+        "DESCRIPTION:Holiday week\r\nPRIORITY:1\r\nX-APPLE-SORT-ORDER:2\r\n",
+    )
+    plants = _series(
+        "plants",
+        "SUMMARY:Plants\r\nDUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY\r\n",
+        "RECURRENCE-ID:20260713T090000Z\r\nSUMMARY:Plants (later)\r\n",
+    )
+    chores = _item("chores", "Chores", "X-APPLE-SORT-ORDER:1")
+    await _setup(hass, [_todo_list("Personal", chores, bins, plants)])
+
+    listed = await hass.services.async_call(
+        "todo",
+        "get_items",
+        {"entity_id": "todo.personal"},
+        blocking=True,
+        return_response=True,
+    )
+    todos = await _search(hass, text="bins")
+
+    items = {item["uid"]: item for item in listed["todo.personal"]["items"]}
+    assert list(items) == ["bins", "chores", "plants"]
+    assert items["bins"]["summary"] == "Bins (Wednesday)"
+    assert items["bins"]["description"] == "Holiday week"
+    assert items["plants"]["summary"] == "Plants"
+    assert todos == [
+        {
+            "uid": "bins",
+            "summary": "Bins (Wednesday)",
+            "status": "needs_action",
+            "due": dt_util.as_local(
+                dt_util.parse_datetime("2026-07-08T09:00:00Z")
+            ).isoformat(),
+            "description": "Holiday week",
+            "priority": 1,
+            "parent_uid": "chores",
+            "rrule": "FREQ=WEEKLY",
+        }
+    ]
+
+
+async def test_an_occurrence_completed_elsewhere_lists_the_series_still_open(
+    hass: HomeAssistant,
+) -> None:
+    bins = _series(
+        "bins",
+        "SUMMARY:Bins\r\nDUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY\r\n",
+        "RECURRENCE-ID:20260706T090000Z\r\nSUMMARY:Bins (done)\r\nSTATUS:COMPLETED\r\n",
+    )
+    await _setup(hass, [_todo_list("Personal", bins)])
+
+    todos = await _search(hass, text="bins")
+
+    assert [(todo["summary"], todo["status"]) for todo in todos] == [
+        ("Bins", "needs_action")
+    ]
+
+
 @pytest.mark.parametrize(
     ("criteria", "found"),
     [

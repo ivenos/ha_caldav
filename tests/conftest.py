@@ -140,7 +140,6 @@ def propfind_answer(found: dict[str, dict[str, object]]) -> Mock:
         for tag, value in props.items():
             element = ET.SubElement(holder, tag)
             if isinstance(value, tuple):
-                # A property holding elements, such as a resource type.
                 for child in value:
                     ET.SubElement(element, child)
             else:

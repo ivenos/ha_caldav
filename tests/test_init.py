@@ -8,6 +8,7 @@ from conftest import propfind_answer
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import (
     CONF_PASSWORD,
+    CONF_SCAN_INTERVAL,
     CONF_TIMEOUT,
     CONF_URL,
     CONF_USERNAME,
@@ -34,6 +35,8 @@ from custom_components.ha_caldav.connection import calendar_key
 from custom_components.ha_caldav.const import (
     CONF_CALENDAR_OPTIONS,
     CONF_CALENDARS,
+    CONF_DAYS,
+    CONF_INCLUDE_ALL_DAY,
     CONF_PRINCIPAL,
     CONF_READ_ONLY,
     DOMAIN,
@@ -218,6 +221,48 @@ async def test_the_builtin_integration_on_another_account_is_fine(
         )
         is None
     )
+
+
+async def test_the_builtin_integration_added_later_on_the_same_account_is_flagged(
+    hass: HomeAssistant,
+) -> None:
+    entry = await _setup(hass)
+    builtin = MockConfigEntry(
+        domain="caldav",
+        data={CONF_URL: ENTRY_DATA[CONF_URL], CONF_USERNAME: "iven"},
+        unique_id="builtin",
+    )
+
+    with patch("homeassistant.components.caldav.async_setup_entry", return_value=True):
+        await hass.config_entries.async_add(builtin)
+        await hass.async_block_till_done()
+
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, f"{ISSUE_BUILTIN_CALDAV}_{entry.entry_id}"
+        )
+        is not None
+    )
+
+
+async def test_removing_the_builtin_integration_clears_the_conflict(
+    hass: HomeAssistant,
+) -> None:
+    builtin = MockConfigEntry(
+        domain="caldav",
+        data={CONF_URL: ENTRY_DATA[CONF_URL], CONF_USERNAME: "iven"},
+        unique_id="builtin",
+    )
+    builtin.add_to_hass(hass)
+    entry = await _setup(hass)
+    issues = ir.async_get(hass)
+    issue_id = f"{ISSUE_BUILTIN_CALDAV}_{entry.entry_id}"
+    assert issues.async_get_issue(DOMAIN, issue_id) is not None
+
+    await hass.config_entries.async_remove(builtin.entry_id)
+    await hass.async_block_till_done()
+
+    assert issues.async_get_issue(DOMAIN, issue_id) is None
 
 
 async def test_a_reload_keeps_a_dismissed_issue(hass: HomeAssistant) -> None:
@@ -457,6 +502,18 @@ async def test_an_account_with_no_calendars_still_sets_up(hass: HomeAssistant) -
     assert entry.state is ConfigEntryState.LOADED
 
 
+async def test_an_account_with_one_failing_calendar_still_sets_up(
+    hass: HomeAssistant,
+) -> None:
+    broken = _calendar("Broken")
+    broken.search.side_effect = requests.ConnectionError("boom")
+    broken.objects_by_sync_token.side_effect = requests.ConnectionError("boom")
+
+    entry = await _setup_with(hass, [broken, _calendar("Personal")])
+
+    assert entry.state is ConfigEntryState.LOADED
+
+
 async def test_an_entry_with_an_empty_selection_falls_back_to_every_calendar(
     hass: HomeAssistant,
 ) -> None:
@@ -628,6 +685,46 @@ async def test_the_builtin_conflict_is_found_through_another_spelling(
 
     issues = ir.async_get(hass)
     assert issues.async_get_issue(DOMAIN, f"{ISSUE_BUILTIN_CALDAV}_{entry.entry_id}")
+
+
+async def test_the_builtin_conflict_is_found_through_another_url_of_the_server(
+    hass: HomeAssistant,
+) -> None:
+    builtin = MockConfigEntry(
+        domain="caldav",
+        data={
+            CONF_URL: "https://cloud.example.com/",
+            CONF_USERNAME: "iven",
+            CONF_PASSWORD: "secret",
+        },
+    )
+    builtin.add_to_hass(hass)
+
+    entry = await _setup(hass)
+
+    issues = ir.async_get(hass)
+    assert issues.async_get_issue(DOMAIN, f"{ISSUE_BUILTIN_CALDAV}_{entry.entry_id}")
+
+
+async def test_the_same_user_on_another_server_is_no_conflict(
+    hass: HomeAssistant,
+) -> None:
+    builtin = MockConfigEntry(
+        domain="caldav",
+        data={
+            CONF_URL: "https://dav.example.org/",
+            CONF_USERNAME: "iven",
+            CONF_PASSWORD: "secret",
+        },
+    )
+    builtin.add_to_hass(hass)
+
+    entry = await _setup(hass)
+
+    issues = ir.async_get(hass)
+    assert not issues.async_get_issue(
+        DOMAIN, f"{ISSUE_BUILTIN_CALDAV}_{entry.entry_id}"
+    )
 
 
 async def test_a_calendar_the_account_stopped_listing_is_not_pruned(
@@ -1058,6 +1155,63 @@ async def test_the_entities_of_a_calendar_deleted_on_the_server_go(
     assert registry.async_get("event.personal_reminders") is None
 
 
+async def _setup_then_delete_work(
+    hass: HomeAssistant, principal: Mock, options: dict
+) -> MockConfigEntry:
+    principal.calendars.return_value = [_calendar("Personal"), _calendar("Work")]
+    _home_set(principal)
+    entry = await _setup_on_account(hass, options)
+    principal.calendars.return_value = [_calendar("Personal")]
+    _home_set(principal)
+    for _ in range(3):
+        await _next_poll(hass)
+    return entry
+
+
+async def test_a_calendar_deleted_on_the_server_leaves_the_stored_options(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    entry = await _setup_then_delete_work(
+        hass,
+        principal,
+        {
+            CONF_CALENDARS: ["/remote.php/dav/Personal", "/remote.php/dav/Work"],
+            CONF_CALENDAR_OPTIONS: {"/remote.php/dav/Work": {CONF_READ_ONLY: True}},
+        },
+    )
+
+    assert entry.options[CONF_CALENDARS] == ["/remote.php/dav/Personal"]
+    assert entry.options[CONF_CALENDAR_OPTIONS] == {}
+
+
+async def test_ticking_every_calendar_follows_the_server_after_one_was_deleted(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    entry = await _setup_then_delete_work(
+        hass,
+        principal,
+        {CONF_CALENDARS: ["/remote.php/dav/Personal", "/remote.php/dav/Work"]},
+    )
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "account"}
+    )
+
+    await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_CALENDARS: ["/remote.php/dav/Personal"],
+            CONF_SCAN_INTERVAL: 15,
+            CONF_DAYS: 7,
+            CONF_INCLUDE_ALL_DAY: True,
+            CONF_READ_ONLY: False,
+        },
+    )
+    await hass.async_block_till_done()
+
+    assert CONF_CALENDARS not in entry.options
+
+
 async def test_the_reminder_entity_stays_while_its_calendar_is_listed(
     hass: HomeAssistant, principal: Mock
 ) -> None:
@@ -1099,6 +1253,40 @@ async def test_a_calendar_only_the_poll_reports_neither_reloads_nor_goes(
 
     reload.assert_not_called()
     assert er.async_get(hass).async_get("calendar.personal") is not None
+
+
+async def test_a_delegation_missed_at_setup_keeps_its_entities(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    own = principal.calendars.return_value
+    home = Mock(url="https://cloud.example.com/remote.php/dav/anna/")
+    home.get_properties.return_value = propfind_answer(
+        {
+            "/remote.php/dav/anna/work/": {
+                dav.DisplayName.tag: Mock(text="anna/work"),
+                dav.ResourceType.tag: (dav.Collection.tag, cdav.Calendar.tag),
+            }
+        }
+    )
+    delegation = Delegation(home, ["mailto:anna@example.com"], "anna")
+    listings = [([*own, _calendar("anna/work")], [delegation])]
+    with (
+        patch("custom_components.ha_caldav.fetch_capabilities", return_value={}),
+        patch(
+            "custom_components.ha_caldav.account_calendars",
+            side_effect=lambda _client: listings[-1],
+        ),
+    ):
+        entry = await _setup_on_account(hass)
+        assert er.async_get(hass).async_get("calendar.anna_work") is not None
+
+        listings.append((own, []))
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        for _ in range(3):
+            await _next_poll(hass)
+
+    assert er.async_get(hass).async_get("calendar.anna_work") is not None
 
 
 async def test_an_entry_from_a_later_major_version_is_not_migrated(

@@ -296,3 +296,25 @@ async def test_only_an_administrator_shares_a_calendar(
         )
 
     write.assert_not_called()
+
+
+async def test_only_an_administrator_lists_the_shares(hass: HomeAssistant) -> None:
+    await _setup(hass)
+    user = MockUser(is_owner=False)
+    user.add_to_hass(hass)
+    user.mock_policy({"entities": {"entity_ids": {"calendar.personal": True}}})
+
+    with (
+        patch("custom_components.ha_caldav.services.read_shares") as read,
+        pytest.raises(Unauthorized),
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "get_calendar_shares",
+            {"entity_id": "calendar.personal"},
+            blocking=True,
+            return_response=True,
+            context=Context(user_id=user.id),
+        )
+
+    read.assert_not_called()

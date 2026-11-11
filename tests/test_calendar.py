@@ -291,6 +291,54 @@ async def test_a_declined_invitation_is_left_out_with_only_busy_events(
     assert [event.summary for event in events] == ["Accepted"]
 
 
+async def test_a_delegated_invitation_is_left_out_with_only_busy_events(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.search.return_value = [
+        _marked("Passed on", timedelta(minutes=-30), _invited("DELEGATED")),
+        _marked("Accepted", timedelta(hours=4), _invited("ACCEPTED")),
+    ]
+    await _setup(hass, [calendar], options={CONF_BUSY_ONLY: True}, addresses=OWN)
+    entity = _entity(hass, "calendar.personal")
+
+    events = await entity.async_get_events(
+        hass, dt_util.utcnow() - timedelta(days=1), dt_util.utcnow() + timedelta(days=1)
+    )
+
+    assert hass.states.get("calendar.personal").state == "off"
+    assert [event.summary for event in events] == ["Accepted"]
+
+
+async def test_a_write_that_timed_out_after_landing_is_shown(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    calendar.objects_by_sync_token.side_effect = lambda token=None: Mock(
+        sync_token=str(len(shown))
+    )
+    shown = [_search_item("Before", timedelta(hours=2), etag='"e1"')]
+    calendar.search.side_effect = lambda **kw: list(shown) if kw.get("event") else []
+    await _setup(hass, [calendar])
+    entity = _entity(hass, "calendar.personal")
+
+    def write(*_args, **_kwargs) -> None:
+        shown.append(_search_item("After", timedelta(hours=1), etag='"e2"'))
+        raise Timeout("stored, but the answer never came")
+
+    with (
+        patch("custom_components.ha_caldav.calendar.create_event", side_effect=write),
+        pytest.raises(HomeAssistantError),
+    ):
+        await entity.async_create_event(
+            summary="After",
+            dtstart=dt_util.now() + timedelta(hours=1),
+            dtend=dt_util.now() + timedelta(hours=2),
+        )
+
+    assert entity.coordinator.data.next_event.summary == "After"
+
+
 async def test_a_declined_occurrence_is_left_out_of_the_panel_with_only_busy_events(
     hass: HomeAssistant,
 ) -> None:
@@ -594,10 +642,14 @@ async def test_get_events_caches_etags(hass: HomeAssistant) -> None:
     assert entity.coordinator.etags == {"uid-1": '"e"'}
 
 
-async def test_failed_write_keeps_etag_for_retry(hass: HomeAssistant) -> None:
-    await _setup(hass, [_calendar("Personal")])
+async def test_a_failed_write_keeps_the_etag_while_the_server_cannot_be_read(
+    hass: HomeAssistant,
+) -> None:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
     entity = _entity(hass, "calendar.personal")
     entity.coordinator.etags = {"uid-1": '"e"'}
+    calendar.search.side_effect = DAVError("down")
 
     with (
         patch(

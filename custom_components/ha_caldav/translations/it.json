@@ -112,7 +112,7 @@
           "timeout": "Quanto tempo attendere la risposta del server a una singola richiesta.",
           "days": "Con quanto anticipo cercare il prossimo evento.",
           "include_all_day": "Se un evento di tutto il giorno può essere il prossimo.",
-          "busy_only": "Esclude gli eventi che risultano liberi e gli inviti che hai rifiutato, anche nella vista del calendario, nelle automazioni e nei promemoria.",
+          "busy_only": "Esclude gli eventi che risultano liberi e gli inviti che hai rifiutato o delegato, anche nella vista del calendario, nelle automazioni e nei promemoria.",
           "read_only": "Nasconde i comandi di creazione, modifica ed eliminazione e le azioni si rifiutano di scrivere. Una ridenominazione in Home Assistant resta allora locale."
         }
       },
@@ -135,7 +135,7 @@
         "data_description": {
           "days": "Con quanto anticipo cercare il prossimo evento.",
           "include_all_day": "Se un evento di tutto il giorno può essere il prossimo.",
-          "busy_only": "Esclude gli eventi che risultano liberi e gli inviti che hai rifiutato, anche nella vista del calendario, nelle automazioni e nei promemoria.",
+          "busy_only": "Esclude gli eventi che risultano liberi e gli inviti che hai rifiutato o delegato, anche nella vista del calendario, nelle automazioni e nei promemoria.",
           "read_only": "Nasconde i comandi di creazione, modifica ed eliminazione e le azioni si rifiutano di scrivere. Una ridenominazione in Home Assistant resta allora locale.",
           "reset": "Scarta tutto ciò che è impostato qui e torna a seguire l'account."
         }
@@ -201,11 +201,17 @@
     "etag_conflict": {
       "message": "Questo elemento è cambiato sul server dall'ultima lettura di Home Assistant. Ricarica il calendario e ripeti la modifica."
     },
+    "invalid_auth": {
+      "message": "Autenticazione non valida"
+    },
     "invalid_rrule": {
       "message": "La regola di ricorrenza non è valida: {reason}"
     },
     "last_selected_calendar": {
       "message": "{name} è l'unico calendario incluso per questo account. Includine prima un altro nelle opzioni."
+    },
+    "delegated_calendar": {
+      "message": "{name} appartiene a un altro account, solo il suo proprietario può eliminarlo."
     },
     "mixed_start_and_due": {
       "message": "Inizio ({start}) e scadenza di un'attività devono essere dello stesso tipo: entrambi un giorno, oppure entrambi un giorno con ora."
@@ -224,6 +230,9 @@
     },
     "no_free_busy": {
       "message": "Questo server non gestisce la pianificazione CalDAV, quindi non può dire quando altre persone sono occupate."
+    },
+    "no_busy_query": {
+      "message": "Questo server non può dire quando questo calendario è occupato."
     },
     "no_start_in_object": {
       "message": "Questo evento non ha una data di inizio e non può essere modificato qui."
@@ -311,6 +320,9 @@
     },
     "no_events": {
       "message": "{name} non accetta eventi."
+    },
+    "no_todos": {
+      "message": "{name} non accetta attività."
     },
     "no_journal_in_object": {
       "message": "Questo elemento non è salvato come voce di diario e non può essere modificato qui."
@@ -1088,7 +1100,7 @@
     },
     "get_calendar_shares": {
       "name": "Ottieni condivisioni calendario",
-      "description": "Restituisce gli account con cui il calendario è condiviso e cosa può fare ciascuno."
+      "description": "Restituisce gli account con cui il calendario è condiviso e cosa può fare ciascuno, solo amministratori."
     },
     "respond_to_invitation": {
       "name": "Rispondi a un invito",

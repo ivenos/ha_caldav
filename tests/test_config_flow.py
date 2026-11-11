@@ -6,7 +6,11 @@ from unittest.mock import Mock, patch
 
 from caldav.davclient import requests
 from caldav.lib.error import AuthorizationError
-from homeassistant.config_entries import SOURCE_RECONFIGURE, SOURCE_USER
+from homeassistant.config_entries import (
+    SOURCE_RECONFIGURE,
+    SOURCE_USER,
+    ConfigEntryState,
+)
 from homeassistant.const import (
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
@@ -21,6 +25,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 import urllib3
 
+from custom_components.ha_caldav.capability import Capability
 from custom_components.ha_caldav.config_flow import _labels
 from custom_components.ha_caldav.connection import HostLockedSession, distinctive
 from custom_components.ha_caldav.const import (
@@ -782,6 +787,76 @@ async def test_a_per_calendar_override_reaches_the_coordinator(
     assert work.read_only is True
 
 
+async def _calendar_form(hass: HomeAssistant, entry, key: str):
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "pick"}
+    )
+    return await hass.config_entries.options.async_configure(
+        result["flow_id"], {"calendar": key}
+    )
+
+
+@pytest.mark.parametrize(
+    "components",
+    [{"VTODO"}, {"VJOURNAL"}, {"VTODO", "VJOURNAL"}],
+)
+async def test_a_calendar_without_events_is_only_offered_read_only(
+    hass: HomeAssistant, components: set[str]
+) -> None:
+    with patch(
+        "custom_components.ha_caldav.fetch_capabilities",
+        return_value={
+            "/remote.php/dav/Personal": Capability(frozenset(components), True)
+        },
+    ):
+        entry = await _setup_entry(hass)
+
+    without_events = await _calendar_form(hass, entry, "/remote.php/dav/Personal")
+    unknown = await _calendar_form(hass, entry, "/remote.php/dav/Work")
+
+    assert _fields(without_events) == {CONF_READ_ONLY, "reset"}
+    assert _fields(unknown) == {
+        CONF_DAYS,
+        CONF_INCLUDE_ALL_DAY,
+        CONF_BUSY_ONLY,
+        CONF_READ_ONLY,
+        "reset",
+    }
+
+
+async def test_saving_a_to_do_list_drops_the_settings_it_no_longer_offers(
+    hass: HomeAssistant,
+) -> None:
+    with patch(
+        "custom_components.ha_caldav.fetch_capabilities",
+        return_value={
+            "/remote.php/dav/Personal": Capability(frozenset({"VTODO"}), True)
+        },
+    ):
+        entry = await _setup_entry(
+            hass,
+            options={
+                CONF_CALENDAR_OPTIONS: {
+                    "/remote.php/dav/Personal": {CONF_DAYS: 30, CONF_BUSY_ONLY: True}
+                }
+            },
+        )
+    assert entry.state is ConfigEntryState.LOADED
+
+    result = await _calendar_form(hass, entry, "/remote.php/dav/Personal")
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.return_value.calendars.return_value = []
+        await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_READ_ONLY: True, "reset": False}
+        )
+        await hass.async_block_till_done()
+
+    assert entry.options[CONF_CALENDAR_OPTIONS] == {
+        "/remote.php/dav/Personal": {CONF_READ_ONLY: True}
+    }
+
+
 async def test_credentials_typed_into_the_url_are_not_stored(
     hass: HomeAssistant,
 ) -> None:
@@ -937,7 +1012,7 @@ async def test_the_account_form_tells_two_calendars_of_one_name_apart(
         for key, value in result["data_schema"].schema.items()
         if key == CONF_CALENDARS
     )
-    assert sorted(field.options.values()) == [
+    assert sorted(option["label"] for option in field.config["options"]) == [
         "Personal (dav/Personal)",
         "Personal (shared/Personal)",
     ]
@@ -1607,6 +1682,57 @@ async def test_an_account_entered_by_another_of_its_urls_is_not_set_up_twice(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+
+
+async def test_a_second_user_on_a_server_without_a_principal_is_not_a_duplicate(
+    hass: HomeAssistant,
+) -> None:
+    url = USER_INPUT[CONF_URL]
+    MockConfigEntry(
+        domain=DOMAIN,
+        data={**USER_INPUT, CONF_USERNAME: "anna", CONF_PRINCIPAL: url},
+        unique_id=f"{url}#anna",
+    ).add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    with (
+        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client,
+        patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
+    ):
+        client.return_value.principal.return_value.url = url
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], USER_INPUT
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+
+
+async def test_reconfiguring_an_entry_that_stores_its_principal_is_not_refused(
+    hass: HomeAssistant,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={**USER_INPUT, CONF_PRINCIPAL: PRINCIPAL},
+        unique_id=f"{USER_INPUT[CONF_URL]}#{USER_INPUT[CONF_USERNAME]}",
+    )
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reconfigure_flow(hass)
+    with (
+        patch("custom_components.ha_caldav.config_flow.caldav.DAVClient") as client,
+        patch("custom_components.ha_caldav.async_setup_entry", return_value=True),
+    ):
+        client.return_value.principal.return_value.url = PRINCIPAL
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_URL: USER_INPUT[CONF_URL], CONF_VERIFY_SSL: False}
+        )
+        await hass.async_block_till_done()
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data[CONF_VERIFY_SSL] is False
 
 
 async def test_reconfigure_refuses_to_point_an_entry_at_another_entrys_account(

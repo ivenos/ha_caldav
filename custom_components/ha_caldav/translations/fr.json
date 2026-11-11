@@ -112,7 +112,7 @@
           "timeout": "Combien de temps attendre la réponse du serveur à une seule requête.",
           "days": "Sur combien de jours chercher pour déterminer le prochain événement.",
           "include_all_day": "Si un événement sur toute la journée peut être le prochain.",
-          "busy_only": "Ignore les événements qui apparaissent comme libres et les invitations que vous avez refusées, aussi dans la vue du calendrier, pour les automatisations et pour les rappels.",
+          "busy_only": "Ignore les événements qui apparaissent comme libres et les invitations que vous avez refusées ou déléguées, aussi dans la vue du calendrier, pour les automatisations et pour les rappels.",
           "read_only": "Masque les commandes de création, de modification et de suppression, et les actions refusent d'écrire. Un renommage dans Home Assistant reste alors local."
         }
       },
@@ -135,7 +135,7 @@
         "data_description": {
           "days": "Sur combien de jours chercher pour déterminer le prochain événement.",
           "include_all_day": "Si un événement sur toute la journée peut être le prochain.",
-          "busy_only": "Ignore les événements qui apparaissent comme libres et les invitations que vous avez refusées, aussi dans la vue du calendrier, pour les automatisations et pour les rappels.",
+          "busy_only": "Ignore les événements qui apparaissent comme libres et les invitations que vous avez refusées ou déléguées, aussi dans la vue du calendrier, pour les automatisations et pour les rappels.",
           "read_only": "Masque les commandes de création, de modification et de suppression, et les actions refusent d'écrire. Un renommage dans Home Assistant reste alors local.",
           "reset": "Abandonne tout ce qui est réglé ici et suit de nouveau le compte."
         }
@@ -201,11 +201,17 @@
     "etag_conflict": {
       "message": "Cet élément a changé sur le serveur depuis la dernière lecture par Home Assistant. Rechargez le calendrier et refaites la modification."
     },
+    "invalid_auth": {
+      "message": "Authentification non valide"
+    },
     "invalid_rrule": {
       "message": "La règle de récurrence n'est pas valide : {reason}"
     },
     "last_selected_calendar": {
       "message": "{name} est le seul calendrier inclus pour ce compte. Incluez-en d'abord un autre dans les options."
+    },
+    "delegated_calendar": {
+      "message": "{name} appartient à un autre compte, seul son propriétaire peut le supprimer."
     },
     "mixed_start_and_due": {
       "message": "Le début ({start}) et l'échéance d'une tâche doivent être de même nature : tous deux un jour, ou tous deux un jour avec heure."
@@ -224,6 +230,9 @@
     },
     "no_free_busy": {
       "message": "Ce serveur ne gère pas la planification CalDAV, il ne peut donc pas indiquer quand d'autres personnes sont occupées."
+    },
+    "no_busy_query": {
+      "message": "Ce serveur ne peut pas indiquer quand ce calendrier est occupé."
     },
     "no_start_in_object": {
       "message": "Cet événement n'a pas de date de début et ne peut pas être modifié ici."
@@ -311,6 +320,9 @@
     },
     "no_events": {
       "message": "{name} n'accepte pas les événements."
+    },
+    "no_todos": {
+      "message": "{name} n'accepte pas les tâches."
     },
     "no_journal_in_object": {
       "message": "Cet élément n'est pas enregistré comme entrée de journal et ne peut pas être modifié ici."
@@ -1088,7 +1100,7 @@
     },
     "get_calendar_shares": {
       "name": "Obtenir les partages du calendrier",
-      "description": "Renvoie les comptes avec lesquels le calendrier est partagé et ce que chacun peut faire."
+      "description": "Renvoie les comptes avec lesquels le calendrier est partagé et ce que chacun peut faire, administrateurs uniquement."
     },
     "respond_to_invitation": {
       "name": "Répondre à une invitation",

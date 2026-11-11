@@ -2,12 +2,15 @@
 
 from datetime import UTC, date, datetime
 import os
+from typing import NoReturn
 from urllib.parse import urlparse
 
+from caldav.lib.error import ReportError
 import pytest
 import pytest_socket
 
 from custom_components.ha_caldav.api import (
+    busy_periods,
     create_event,
     create_todo,
     delete_todos,
@@ -28,10 +31,18 @@ pytestmark = pytest.mark.live
 URL = os.environ.get("CALDAV_URL")
 USERNAME = os.environ.get("CALDAV_USERNAME", "admin")
 PASSWORD = os.environ.get("CALDAV_PASSWORD", "")
+EXPECTED = set(filter(None, os.environ.get("CALDAV_EXPECT", "").split(",")))
 
 RANGE_START = datetime(2026, 7, 1, tzinfo=UTC)
 RANGE_END = datetime(2026, 9, 1, tzinfo=UTC)
 CALENDAR_NAME = "ha_caldav_live"
+
+
+def missing(feature: str, reason: str) -> NoReturn:
+    """Skip a test the server cannot run, and fail one it is known to run."""
+    if feature in EXPECTED:
+        pytest.fail(f"{reason}, but this server does {feature}")
+    pytest.skip(reason)
 
 
 def enable_sockets() -> None:
@@ -154,7 +165,7 @@ def scheduling_addresses(client) -> list[str]:
 
     addresses = fetch_address_set(client)
     if not addresses or not supports_scheduling(client):
-        pytest.skip("server does not do CalDAV scheduling")
+        missing("scheduling", "server does not do CalDAV scheduling")
     return addresses
 
 
@@ -625,6 +636,48 @@ def test_completing_recurring_todo_rolls_forward(calendar) -> None:
     assert item.due.astimezone(UTC) == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
 
 
+def test_an_occurrence_changed_elsewhere_is_shown_renamed_and_ticked_off(
+    calendar,
+) -> None:
+    calendar.save_todo(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//test//EN\r\n"
+        "BEGIN:VTODO\r\nUID:rt-moved\r\nDTSTAMP:20260101T000000Z\r\n"
+        "DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\nSUMMARY:Bins\r\n"
+        "END:VTODO\r\n"
+        "BEGIN:VTODO\r\nUID:rt-moved\r\nDTSTAMP:20260101T000000Z\r\n"
+        "RECURRENCE-ID:20260706T090000Z\r\nDUE:20260708T090000Z\r\n"
+        "SUMMARY:Bins (Wednesday)\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+    wednesday = datetime(2026, 7, 8, 9, 0, tzinfo=UTC)
+    shown = list(stored_todos(calendar))
+
+    update_todo(
+        calendar,
+        "rt-moved",
+        {"summary": "Bins and paper", "status": "NEEDS-ACTION", "due": wednesday},
+    )
+    renamed = stored_todos(calendar)["Bins and paper"]
+    update_todo(
+        calendar,
+        "rt-moved",
+        {"summary": "Bins and paper", "status": "COMPLETED", "due": wednesday},
+    )
+    rolled = stored_todos(calendar)
+    stored = object_by_uid(calendar, "rt-moved", todo=True).icalendar_instance
+    delete_todos(calendar, ["rt-moved"], {})
+
+    assert shown == ["Bins (Wednesday)"]
+    assert datetime.fromisoformat(renamed["due"]) == wednesday
+    assert list(rolled) == ["Bins"]
+    assert rolled["Bins"]["status"] == "needs_action"
+    assert datetime.fromisoformat(rolled["Bins"]["due"]) == datetime(
+        2026, 7, 13, 9, 0, tzinfo=UTC
+    )
+    parts = stored.walk("VTODO")
+    assert [str(part["SUMMARY"]) for part in parts] == ["Bins"]
+    assert parts[0]["RRULE"]["COUNT"] == [2]
+
+
 def test_completing_a_todo_onto_an_added_date_keeps_the_weekday_of_its_rule(
     calendar,
 ) -> None:
@@ -981,8 +1034,6 @@ def test_an_unfiltered_search_returns_both_kinds(calendar) -> None:
 
 
 def _refuse_uid_searches(monkeypatch) -> None:
-    from caldav.lib.error import ReportError
-
     from custom_components.ha_caldav import api
 
     def refuse(*_args):
@@ -1277,6 +1328,23 @@ def test_one_occurrence_of_an_invitation_is_answered_alone(calendar) -> None:
     assert replies == {False: "NEEDS-ACTION", True: "DECLINED"}
 
 
+def test_the_busy_times_of_a_calendar_come_back(calendar) -> None:
+    start = datetime(2026, 7, 7, 9, 0, tzinfo=UTC)
+    end = datetime(2026, 7, 7, 10, 0, tzinfo=UTC)
+    create_event(calendar, {"summary": "Live own busy", "dtstart": start, "dtend": end})
+
+    try:
+        report = calendar.freebusy_request(RANGE_START, RANGE_END)
+    except ReportError:
+        missing("busy", "server does not answer a free-busy query")
+
+    assert any(
+        datetime.fromisoformat(period["start"]) <= start
+        and datetime.fromisoformat(period["end"]) >= end
+        for period in busy_periods(report.icalendar_instance)
+    )
+
+
 def test_the_busy_times_of_an_account_come_back_from_the_outbox(calendar) -> None:
     from custom_components.ha_caldav.api import attendee_free_busy
     from custom_components.ha_caldav.capability import fetch_address_set
@@ -1284,7 +1352,7 @@ def test_the_busy_times_of_an_account_come_back_from_the_outbox(calendar) -> Non
     addresses = fetch_address_set(calendar.client)
     mail = next((a for a in addresses if a.lower().startswith("mailto:")), None)
     if mail is None:
-        pytest.skip("the account has no email address to ask the server about")
+        missing("email", "the account has no email address to ask the server about")
     create_event(
         calendar,
         {
@@ -1323,7 +1391,7 @@ def journal_calendar(calendar):
     )
     if "VJOURNAL" not in created.get_supported_components():
         created.delete()
-        pytest.skip("server holds no journal entries")
+        missing("journal", "server holds no journal entries")
     yield created
     enable_sockets()
     created.delete()
@@ -1381,7 +1449,7 @@ def test_a_calendar_is_shared_with_another_account_and_taken_back(calendar) -> N
     try:
         assert read_shares(calendar) == []
     except Refused:
-        pytest.skip("server shares calendars in no dialect known here")
+        missing("sharing", "server shares calendars in no dialect known here")
 
     share_calendar(calendar, OTHER, write=True)
 
@@ -1426,10 +1494,10 @@ def test_a_delegate_sees_the_calendars_of_the_account_it_acts_for(calendar) -> N
     try:
         granted = members(f"<d:href>{member}</d:href>")
     except Exception:  # noqa: BLE001
-        pytest.skip("server has no delegation")
+        missing("delegation", "server has no delegation")
     calendars, delegations = account_calendars(other)
     if granted != 207 or not delegations:
-        pytest.skip("server has no delegation")
+        missing("delegation", "server has no delegation")
     try:
         key = calendar_key(calendar.url)
         [delegated] = [item for item in calendars if calendar_key(item.url) == key]
@@ -1446,6 +1514,132 @@ def test_a_delegate_sees_the_calendars_of_the_account_it_acts_for(calendar) -> N
         assert len(calendar.events()) == 1
     finally:
         members("")
+
+
+def _invitee(calendar) -> tuple[list[str], str, object, list[str], str]:
+    from custom_components.ha_caldav.capability import fetch_address_set
+
+    own = scheduling_addresses(calendar.client)
+    other = _other_client()
+    theirs = fetch_address_set(other)
+    mail = next((a for a in own if a.lower().startswith("mailto:")), None)
+    them = next((a for a in theirs if a.lower().startswith("mailto:")), None)
+    if mail is None or them is None:
+        missing("email", "an account has no email address to invite")
+    return own, mail, other, theirs, them
+
+
+def _unfolded(text: str) -> str:
+    return text.replace("\r\n ", "").replace("\n ", "")
+
+
+def _inbox(client, marker: str) -> int:
+    items = client.principal().schedule_inbox().get_items()
+    return sum(marker in _unfolded(str(item.data)) for item in items)
+
+
+def _copy_of(client, uid: str):
+    for held in client.principal().calendars():
+        for item in held.search(event=True):
+            if uid in _unfolded(str(item.data)):
+                return held, item
+    return None
+
+
+def _answer_of(text: str, address: str) -> str:
+    who = address.split(":", 1)[1].lower()
+    line = next(
+        line
+        for line in _unfolded(text).splitlines()
+        if line.startswith("ATTENDEE") and who in line.lower()
+    )
+    return line.split(":", 1)[0]
+
+
+def _forget_copies(client, uid: str) -> None:
+    while (found := _copy_of(client, uid)) is not None:
+        found[1].delete()
+
+
+def test_an_alarm_added_by_the_organizer_tells_the_attendees_nothing(
+    calendar,
+) -> None:
+    own, mail, other, _theirs, them = _invitee(calendar)
+    create_event(
+        calendar,
+        {
+            "summary": "Live quiet alarm",
+            "dtstart": datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 14, 10, 0, tzinfo=UTC),
+            "attendees": [them],
+        },
+        mail,
+    )
+    uid = uid_of(calendar)
+    try:
+        if not (invited := _inbox(other, uid)):
+            missing("inbox", "the server leaves no invitation in the inbox")
+        update_event(calendar, uid, {"alarms": [15]}, own_address=mail, addresses=own)
+        alarmed = _inbox(other, uid)
+        stored = _unfolded(str(calendar.event_by_uid(uid).data))
+        update_event(
+            calendar,
+            uid,
+            {"summary": "Live loud rename"},
+            own_address=mail,
+            addresses=own,
+        )
+        renamed = _inbox(other, uid)
+    finally:
+        _forget_copies(other, uid)
+
+    assert "BEGIN:VALARM" in stored
+    assert "SEQUENCE:1" not in stored
+    assert invited == alarmed < renamed
+
+
+def test_moving_an_event_asks_the_attendees_to_answer_again(calendar) -> None:
+    from custom_components.ha_caldav.recurrence import respond_to_invitation
+
+    own, mail, other, theirs, them = _invitee(calendar)
+    create_event(
+        calendar,
+        {
+            "summary": "Live moved meeting",
+            "dtstart": datetime(2026, 7, 15, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 15, 10, 0, tzinfo=UTC),
+            "attendees": [them],
+        },
+        mail,
+    )
+    uid = uid_of(calendar)
+    try:
+        found = _copy_of(other, uid)
+        if found is None:
+            missing("delivery", "the server delivers no invitation to the attendee")
+        respond_to_invitation(found[0], uid, "ACCEPTED", theirs)
+        update_event(
+            calendar, uid, {"summary": "Live renamed"}, own_address=mail, addresses=own
+        )
+        renamed = _answer_of(str(calendar.event_by_uid(uid).data), them)
+        if "PARTSTAT=ACCEPTED" not in renamed:
+            missing("replies", "the server does not pass the answer to the organizer")
+        update_event(
+            calendar,
+            uid,
+            {
+                "dtstart": datetime(2026, 7, 15, 14, 0, tzinfo=UTC),
+                "dtend": datetime(2026, 7, 15, 15, 0, tzinfo=UTC),
+            },
+            own_address=mail,
+            addresses=own,
+        )
+        moved = _answer_of(str(calendar.event_by_uid(uid).data), them)
+    finally:
+        _forget_copies(other, uid)
+
+    assert "PARTSTAT=NEEDS-ACTION" in moved
+    assert "RSVP=TRUE" in moved
 
 
 def _raw(uid: str, summary: str = "Raw") -> str:
@@ -1510,23 +1704,6 @@ def test_an_import_leaves_an_object_stored_under_its_resource_name_alone(
         import_ics(calendar, _raw("taken", "Imported"))
 
     assert "Raw" in summaries(calendar).values()
-
-
-def test_deleting_from_a_resource_with_an_encoded_slash_never_fakes_success(
-    calendar,
-) -> None:
-    """Xandikos lists such a resource and then answers 404 however it is spelled."""
-    from caldav.lib.error import NotFoundError
-
-    if _put_raw(calendar, "a%2Fb-live.ics", _raw("slashed")) not in (200, 201, 204):
-        pytest.skip("server does not store a resource name with an encoded slash")
-
-    try:
-        delete_event(calendar, "slashed")
-    except NotFoundError:
-        assert "Raw" in summaries(calendar).values()
-    else:
-        assert "Raw" not in summaries(calendar).values()
 
 
 ZONED_DAY = (

@@ -16,6 +16,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity_component import EntityComponent
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from test_subtasks import TodoList, _task
 import vobject
 
 from custom_components.ha_caldav.const import CONF_READ_ONLY, DOMAIN
@@ -253,6 +254,22 @@ def test_reorder_writes_nothing_when_the_order_already_holds() -> None:
     todos["b"].save.assert_not_called()
 
 
+def test_an_item_written_with_two_sequences_can_still_be_dragged() -> None:
+    from custom_components.ha_caldav.api import reorder_todos
+
+    todos = TodoList(
+        _task("a", "X-APPLE-SORT-ORDER:0"),
+        _task("b", "X-APPLE-SORT-ORDER:1024", "SEQUENCE:1", "SEQUENCE:2"),
+    )
+
+    reorder_todos(todos, ["b", "a"])
+
+    held = todos.held()
+    assert float(str(held["b"]["X-APPLE-SORT-ORDER"])) < float(
+        str(held["a"]["X-APPLE-SORT-ORDER"])
+    )
+
+
 async def test_move_reorders_around_the_previous_item(hass: HomeAssistant) -> None:
     await _setup(hass)
     entity = _entity(hass)
@@ -282,6 +299,36 @@ async def test_move_without_a_previous_item_goes_to_the_front(
         await entity.async_move_todo_item("b")
 
     assert reorder.call_args.args[1] == ["b", "a"]
+
+
+async def test_dragging_a_todo_someone_else_organizes_keeps_its_sequence(
+    hass: HomeAssistant,
+) -> None:
+    entry = await _setup(hass)
+    entry.runtime_data.address_set = ["mailto:me@example.com"]
+    entity = _entity(hass)
+    entity.calendar = TodoList(
+        _task("a", "X-APPLE-SORT-ORDER:0"),
+        _task(
+            "b",
+            "X-APPLE-SORT-ORDER:1024",
+            "ORGANIZER:mailto:boss@example.com",
+            "ATTENDEE:mailto:me@example.com",
+            "SEQUENCE:3",
+        ),
+    )
+    entity.coordinator.data.todos = [
+        TodoItem(uid="a", summary="a"),
+        TodoItem(uid="b", summary="b"),
+    ]
+
+    await entity.async_move_todo_item("b")
+
+    held = entity.calendar.held()
+    assert float(str(held["b"]["X-APPLE-SORT-ORDER"])) < float(
+        str(held["a"]["X-APPLE-SORT-ORDER"])
+    )
+    assert int(held["b"]["SEQUENCE"]) == 3
 
 
 async def test_moving_an_item_that_is_not_on_the_list_is_refused(
@@ -703,7 +750,7 @@ async def test_an_edit_the_server_has_moved_past_reads_the_list_again(
     assert refreshes
 
 
-async def test_a_write_the_server_refused_does_not_read_the_list_again(
+async def test_a_failed_write_reads_the_list_again(
     hass: HomeAssistant,
 ) -> None:
     await _setup(hass)
@@ -722,4 +769,85 @@ async def test_a_write_the_server_refused_does_not_read_the_list_again(
     ):
         await entity.async_update_todo_item(TodoItem(uid="uid-1", summary="Milk"))
 
-    assert not refreshes
+    assert refreshes
+
+
+async def _setup_list(hass: HomeAssistant, todos: TodoList) -> None:
+    calendar = _calendar("Personal")
+    calendar.search.side_effect = todos.search
+    entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
+    entry.add_to_hass(hass)
+    with patch("custom_components.ha_caldav.caldav.DAVClient") as client:
+        client.return_value.principal.return_value.calendars.return_value = [calendar]
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+def _created(second: int) -> str:
+    return f"CREATED:20260101T1000{second:02}Z"
+
+
+async def test_a_subtask_without_a_position_is_listed_right_under_its_parent(
+    hass: HomeAssistant,
+) -> None:
+    await _setup_list(
+        hass,
+        TodoList(
+            _task("pinned", "RELATED-TO:shop", "X-APPLE-SORT-ORDER:0"),
+            _task("errands", _created(0)),
+            _task("shop", _created(1)),
+            _task("milk", "RELATED-TO:shop", _created(1)),
+            _task("orphan", "RELATED-TO:elsewhere", _created(2)),
+            _task("bread", "RELATED-TO:shop", _created(3)),
+            _task("oat", "RELATED-TO:milk", _created(5)),
+            _task("loop-a", "RELATED-TO:loop-b", _created(6)),
+            _task("loop-b", "RELATED-TO:loop-a", _created(7)),
+        ),
+    )
+
+    found = await hass.services.async_call(
+        DOMAIN,
+        "search_todos",
+        {"entity_id": "todo.personal"},
+        blocking=True,
+        return_response=True,
+    )
+
+    order = [
+        "pinned",
+        "errands",
+        "shop",
+        "milk",
+        "oat",
+        "bread",
+        "orphan",
+        "loop-a",
+        "loop-b",
+    ]
+    assert [item.uid for item in _entity(hass).todo_items] == order
+    assert [todo["uid"] for todo in found["todo.personal"]["todos"]] == order
+
+
+async def test_a_drag_lands_where_dropped_in_the_list_with_subtasks_under_parents(
+    hass: HomeAssistant,
+) -> None:
+    await _setup_list(
+        hass,
+        TodoList(
+            _task("shop", _created(0)),
+            _task("laundry", _created(1)),
+            _task("milk", "RELATED-TO:shop", _created(2)),
+            _task("dishes", _created(3)),
+        ),
+    )
+    entity = _entity(hass)
+
+    await entity.async_move_todo_item("dishes", previous_uid="milk")
+    await entity.coordinator.async_refresh()
+
+    assert [item.uid for item in entity.todo_items] == [
+        "shop",
+        "milk",
+        "dishes",
+        "laundry",
+    ]

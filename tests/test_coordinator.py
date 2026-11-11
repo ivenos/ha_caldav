@@ -1,6 +1,6 @@
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import warnings
 from zoneinfo import ZoneInfo
 
@@ -8,10 +8,15 @@ import caldav
 from caldav.davclient import requests
 from conftest import stored
 from homeassistant.components.todo import TodoItemStatus
+from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
+from icalendar import vRecur
 import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 import vobject
 
+from custom_components.ha_caldav.capability import Capability
+from custom_components.ha_caldav.const import DOMAIN
 from custom_components.ha_caldav.coordinator import (
     HaCaldavCoordinator,
     calendar_unique_id,
@@ -28,6 +33,8 @@ from custom_components.ha_caldav.coordinator import (
     to_todo,
     todo_unique_id,
 )
+from custom_components.ha_caldav.errors import Refused
+from custom_components.ha_caldav.extras import check_expandable
 
 
 def vevent(body: str):
@@ -570,3 +577,82 @@ def test_a_failed_sync_report_does_not_read_the_whole_collection() -> None:
 
     assert bodies
     assert all(b"sync-collection" in body for body in bodies)
+
+
+def test_a_sync_report_listing_changes_counts_as_changed_under_the_same_token() -> None:
+    calendar = Mock()
+    calendar.objects_by_sync_token.return_value = SimpleNamespace(
+        sync_token="t1", objects=[Mock()]
+    )
+    poller = SimpleNamespace(_sync_collection=True, _sync_token="t1", calendar=calendar)
+
+    assert HaCaldavCoordinator._sync_changed(poller) == (True, "t1")
+
+
+def _upcoming(summary: str) -> caldav.Event:
+    start = dt_util.utcnow() + timedelta(hours=2)
+    end = start + timedelta(hours=1)
+    return stored(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
+        f"BEGIN:VEVENT\nUID:{summary}\nDTSTAMP:20260101T000000Z\n"
+        f"DTSTART:{start:%Y%m%dT%H%M%S}Z\nDTEND:{end:%Y%m%dT%H%M%S}Z\n"
+        f"SUMMARY:{summary}\nEND:VEVENT\nEND:VCALENDAR\n",
+        f'"{summary}"',
+    )
+
+
+async def test_an_own_write_is_read_even_when_the_sync_token_did_not_move(
+    hass: HomeAssistant,
+) -> None:
+    shown = ["Before"]
+    calendar = Mock()
+    calendar.name = "Personal"
+    calendar.url = "https://cloud.example.com/remote.php/dav/personal"
+    calendar.search.side_effect = lambda **kw: (
+        [_upcoming(summary) for summary in shown] if kw.get("event") else []
+    )
+    calendar.objects_by_sync_token.return_value = SimpleNamespace(
+        sync_token="1762890000", objects=[]
+    )
+    entry = MockConfigEntry(domain=DOMAIN, unique_id="x")
+    entry.add_to_hass(hass)
+    coordinator = HaCaldavCoordinator(
+        hass,
+        entry,
+        calendar,
+        Capability(frozenset({"VEVENT"}), writable=True),
+        days=7,
+        include_all_day=True,
+        scan_interval=timedelta(minutes=15),
+    )
+    await coordinator.async_refresh()
+    shown[:] = ["After"]
+
+    coordinator.forget_etags("etags", ())
+    await coordinator.async_refresh()
+
+    assert coordinator.data.next_event.summary == "After"
+
+
+EVERY_HOUR = ",".join(map(str, range(24)))
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "FREQ=HOURLY;BYMINUTE=" + ",".join(map(str, range(60))),
+        f"FREQ=DAILY;BYHOUR={EVERY_HOUR};BYMINUTE=0,5",
+        "FREQ=HOURLY;BYMINUTE=0,30",
+    ],
+    ids=["every_minute", "every_five_minutes", "every_half_hour"],
+)
+def test_a_rule_denser_than_hourly_in_disguise_is_refused(rule: str) -> None:
+    with pytest.raises(Refused, match="rrule_too_dense"):
+        check_expandable(vRecur.from_ical(rule), datetime(2026, 7, 6, 9, tzinfo=UTC))
+
+
+@pytest.mark.parametrize(
+    "rule", ["FREQ=HOURLY", "FREQ=HOURLY;INTERVAL=4", f"FREQ=DAILY;BYHOUR={EVERY_HOUR}"]
+)
+def test_a_rule_at_most_hourly_is_not_refused(rule: str) -> None:
+    check_expandable(vRecur.from_ical(rule), datetime(2026, 7, 6, 9, tzinfo=UTC))

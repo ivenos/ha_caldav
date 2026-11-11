@@ -33,6 +33,10 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
 )
 import voluptuous as vol
 
@@ -131,7 +135,7 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
                 # The url that answered, so a bootstrapped account matches itself.
                 await self.async_set_unique_id(account_key(url, cleaned[CONF_USERNAME]))
                 self._abort_if_unique_id_configured()
-                if self._held_elsewhere(principal):
+                if self._held_elsewhere(principal, url, cleaned[CONF_USERNAME]):
                     return self.async_abort(reason="already_configured")
                 return self.async_create_entry(
                     title=_title(url, cleaned[CONF_USERNAME]),
@@ -166,7 +170,9 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
             if error is None:
                 unique_id = account_key(url, cleaned[CONF_USERNAME])
                 await self.async_set_unique_id(unique_id)
-                if self._held_elsewhere(principal, entry.entry_id) or any(
+                if self._held_elsewhere(
+                    principal, url, cleaned[CONF_USERNAME], entry.entry_id
+                ) or any(
                     other.unique_id == unique_id and other.entry_id != entry.entry_id
                     for other in self._async_current_entries()
                 ):
@@ -219,16 +225,21 @@ class HaCaldavConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders={CONF_USERNAME: entry.data[CONF_USERNAME]},
         )
 
-    def _held_elsewhere(self, principal: str, entry_id: str | None = None) -> bool:
+    def _held_elsewhere(
+        self, principal: str, url: str, username: str, entry_id: str | None = None
+    ) -> bool:
         """Return whether another entry holds the account of this principal url.
 
         Entered as its calendar home or a calendar url, an account answers
         under another url but with the same principal.
         """
         key = principal_key(principal)
+        # caldav takes the url itself for the principal when the server names none.
+        named = key != principal_key(url)
         return any(
             (held := other.data.get(CONF_PRINCIPAL))
             and principal_key(held) == key
+            and (named or other.data.get(CONF_USERNAME) == username)
             and other.entry_id != entry_id
             for other in self._async_current_entries()
         )
@@ -279,7 +290,16 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
         if choices:
             fields[
                 vol.Optional(CONF_CALENDARS, default=_selected_keys(options, choices))
-            ] = cv.multi_select(_labels(choices))
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=key, label=label)
+                        for key, label in _labels(choices).items()
+                    ],
+                    multiple=True,
+                    mode=SelectSelectorMode.LIST,
+                )
+            )
         fields[
             vol.Optional(
                 CONF_SCAN_INTERVAL,
@@ -356,12 +376,13 @@ class HaCaldavOptionsFlow(OptionsFlowWithReload):
             )
 
         current = overrides.get(key, {})
+        events = managed is None or managed.capability.supports_events
         return self.async_show_form(
             step_id="calendar",
             description_placeholders={"calendar": name},
             data_schema=vol.Schema(
                 {
-                    **_calendar_fields({**account, **current}),
+                    **_calendar_fields({**account, **current}, events),
                     vol.Optional(CONF_RESET, default=False): cv.boolean,
                 }
             ),
@@ -406,15 +427,23 @@ def _number(low: int, high: int, unit: str) -> NumberSelector:
     )
 
 
-def _calendar_fields(values: Mapping[str, Any]) -> dict[Any, Any]:
-    """Return the fields a single calendar can override, filled in with these."""
+def _calendar_fields(values: Mapping[str, Any], events: bool = True) -> dict[Any, Any]:
+    """Return the fields a single calendar can override, filled in with these.
+
+    Without events, only read-only has anything to act on.
+    """
+    read_only = {
+        vol.Optional(CONF_READ_ONLY, default=values[CONF_READ_ONLY]): cv.boolean
+    }
+    if not events:
+        return read_only
     return {
         vol.Optional(CONF_DAYS, default=values[CONF_DAYS]): _number(1, 365, "d"),
         vol.Optional(
             CONF_INCLUDE_ALL_DAY, default=values[CONF_INCLUDE_ALL_DAY]
         ): cv.boolean,
         vol.Optional(CONF_BUSY_ONLY, default=values[CONF_BUSY_ONLY]): cv.boolean,
-        vol.Optional(CONF_READ_ONLY, default=values[CONF_READ_ONLY]): cv.boolean,
+        **read_only,
     }
 
 

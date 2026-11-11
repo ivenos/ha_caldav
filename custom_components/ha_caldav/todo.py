@@ -171,7 +171,7 @@ class HaCaldavTodoListEntity(HaCaldavEntity, TodoListEntity):
                 return
             place = 0 if previous_uid is None else wanted.index(previous_uid) + 1
             wanted.insert(place, uid)
-            reorder_todos(self.calendar, wanted)
+            reorder_todos(self.calendar, wanted, self.addresses)
 
         # A renumbering rewrites every item.
         await self.async_write(reorder, "reorder", forget=("todo_etags", tuple(order)))

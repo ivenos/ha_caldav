@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from urllib.parse import urlparse
 
 import caldav
+from homeassistant.config_entries import (
+    SIGNAL_CONFIG_ENTRY_CHANGED,
+    ConfigEntry,
+    ConfigEntryChange,
+)
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, Platform
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
@@ -15,6 +21,7 @@ from homeassistant.helpers import (
     entity_registry as er,
     issue_registry as ir,
 )
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.typing import ConfigType
 
 from .capability import (
@@ -239,6 +246,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
         )
     )
     _async_check_for_issues(hass, entry)
+
+    @callback
+    def builtin_changed(change: ConfigEntryChange, other: ConfigEntry) -> None:
+        if other.domain == "caldav":
+            _async_check_builtin_conflict(hass, entry)
+
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, SIGNAL_CONFIG_ENTRY_CHANGED, builtin_changed)
+    )
     return True
 
 
@@ -289,7 +305,9 @@ async def _async_connect(
         return client, calendars, delegations
     if refused is not None:
         _LOGGER.debug("Authorization failed: %s", refused)
-        raise ConfigEntryAuthFailed("Authorization failed") from refused
+        raise ConfigEntryAuthFailed(
+            translation_domain=DOMAIN, translation_key="invalid_auth"
+        ) from refused
     # caldav puts the whole response body into its error text.
     _LOGGER.debug("Cannot connect to CalDAV server: %s", last_error)
     raise ConfigEntryNotReady(
@@ -458,7 +476,11 @@ def _async_follow_the_server(
                 hass, _async_reload_once_listed(hass, entry, client, wanted)
             )
         for key in missing:
-            missing[key] = 0 if key in calendars else missing[key] + 1
+            if key in calendars:
+                missing[key] = 0
+            # A home that did not answer this poll may still hold the calendar.
+            elif key.rpartition("/")[0] in found:
+                missing[key] += 1
         if gone := {key for key, polls in missing.items() if polls >= _GONE_POLLS}:
             _async_forget_calendars(hass, entry, gone)
             for key in gone:
@@ -513,6 +535,15 @@ def _async_forget_calendars(
         if _registered_key(entry.entry_id, record.unique_id, record.domain) in keys:
             _LOGGER.debug("Removing %s; its calendar is gone", record.entity_id)
             registry.async_remove(record.entity_id)
+    options = dict(entry.options)
+    if rest := [key for key in options.get(CONF_CALENDARS) or [] if key not in keys]:
+        options[CONF_CALENDARS] = rest
+    if isinstance(per_calendar := options.get(CONF_CALENDAR_OPTIONS), dict):
+        options[CONF_CALENDAR_OPTIONS] = {
+            key: value for key, value in per_calendar.items() if key not in keys
+        }
+    if options != entry.options:
+        hass.config_entries.async_update_entry(entry, options=options)
 
 
 @callback
@@ -611,13 +642,15 @@ def _async_check_for_issues(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
 def _async_check_builtin_conflict(
     hass: HomeAssistant, entry: HaCaldavConfigEntry
 ) -> None:
-    """Warn when the built-in caldav integration serves the same account."""
-    ours = account_key(entry.data[CONF_URL], entry.data[CONF_USERNAME])
-    clash = any(
-        account_key(
-            str(other.data.get(CONF_URL, "")), str(other.data.get(CONF_USERNAME, ""))
-        )
-        == ours
+    """Warn when the built-in caldav integration serves the same account.
+
+    The same user on the same host is the same account, whichever of its urls
+    either integration was given.
+    """
+    host = _host(entry.data[CONF_URL])
+    clash = bool(host) and any(
+        _host(str(other.data.get(CONF_URL, ""))) == host
+        and other.data.get(CONF_USERNAME) == entry.data[CONF_USERNAME]
         for other in hass.config_entries.async_entries("caldav")
     )
     issue_id = f"{ISSUE_BUILTIN_CALDAV}_{entry.entry_id}"
@@ -633,6 +666,13 @@ def _async_check_builtin_conflict(
         translation_key=ISSUE_BUILTIN_CALDAV,
         translation_placeholders={"account": entry.title},
     )
+
+
+def _host(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> bool:

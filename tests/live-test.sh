@@ -18,6 +18,7 @@ network="$name-net"
 username="admin"
 password='TestPass!2026'
 other=""
+expect=""
 
 cleanup() {
   docker rm -fv "$name" "$database" >/dev/null 2>&1 || true
@@ -76,6 +77,7 @@ case "$server" in
         php occ user:setting "$account" settings email "$account@example.com" >/dev/null
     done
     url="http://localhost:8080/remote.php/dav"
+    expect="scheduling,email,inbox,replies,busy,journal,sharing,delegation"
     ;;
 
   radicale)
@@ -85,6 +87,7 @@ case "$server" in
     wait_for http://localhost:5232/ 40 2
     other="other"
     url="http://localhost:5232/"
+    expect="busy,journal"
     ;;
 
   xandikos)
@@ -93,6 +96,7 @@ case "$server" in
       --autocreate --defaults -d /data -l 0.0.0.0 -p 8000 --route-prefix=/ >/dev/null
     wait_for http://localhost:8000/ 40 2
     url="http://localhost:8000/"
+    expect="busy,journal"
     ;;
 
   baikal)
@@ -155,6 +159,7 @@ foreach ([$file, dirname($file), "$root/config/baikal.yaml"] as $path) {
 }
 PHP
     url="http://localhost:8082/dav.php/"
+    expect="scheduling,busy,journal,sharing,delegation"
     ;;
 
   sogo)
@@ -248,6 +253,7 @@ EOF
       exit 1
     }
     url="http://localhost:8084/SOGo/dav/"
+    expect="scheduling,email,delegation"
     ;;
 
   *)
@@ -261,7 +267,7 @@ pytest="$root/.venv/bin/pytest"
 [[ -x $pytest ]] || pytest=pytest
 set +e
 CALDAV_URL="$url" CALDAV_USERNAME="$username" CALDAV_PASSWORD="$password" \
-  CALDAV_OTHER_USERNAME="$other" "$pytest" -m live "$@"
+  CALDAV_OTHER_USERNAME="$other" CALDAV_EXPECT="$expect" "$pytest" -m live "$@"
 status=$?
 set -e
 if [[ $status -ne 0 ]]; then

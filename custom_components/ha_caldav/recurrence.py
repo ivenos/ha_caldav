@@ -37,6 +37,8 @@ from .api import (
     delete_resource,
     held_etag,
     object_by_uid,
+    only_personal,
+    organized_elsewhere,
     put_resource,
     save_document,
     stamp,
@@ -52,6 +54,7 @@ from .extras import (
     date_values,
     framed_rule,
     holders,
+    parse_rule,
     replace,
     reset_replies,
     rule_from,
@@ -67,7 +70,6 @@ _MAX_OCCURRENCES = 100_000
 
 _RECURRING = ("RRULE", "RDATE", "EXDATE", "EXRULE")
 
-# How many occurrences two spellings of a rule have to agree on.
 _COMPARED = 500
 
 
@@ -89,7 +91,8 @@ def update_event(
     tag = held_etag(dav_event, expected_etag)
     ical = _collapsed(dav_event.icalendar_instance)
     master = _master(ical)
-    save = partial(_save, dav_event, ical, addresses=addresses, tag=tag)
+    quiet = only_personal(data)
+    save = partial(_save, dav_event, ical, addresses=addresses, tag=tag, quiet=quiet)
 
     if recurrence_id is None:
         if data.get("rrule") and "RECURRENCE-ID" in master:
@@ -107,7 +110,10 @@ def update_event(
 
     if not this_and_future:
         target = _exception(ical, master, occurrence, recurrence_id)
+        before = _timing(target)
         _apply(target, _without_rrule(data), own_address)
+        if _timing(target) != before:
+            _ask_again(ical, target, addresses)
         _share_organizer(ical, target)
         save(target)
         return
@@ -117,11 +123,10 @@ def update_event(
         # names the start of an exception there, the master sits on the slot.
         if (split := _override(ical, occurrence)) is not None:
             if _rule_rewritten(master, data) and not data["rrule"]:
-                # With no rule left the series is the one occurrence on show.
                 data = {**_shown_span(split), **data}
             else:
                 _apply(split, _without_times(data), own_address)
-                stamp(split, addresses)
+                stamp(split, addresses, quiet)
                 data = _rebased(master, data, occurrence, split["DTSTART"].dt)
         _update_series(ical, master, data, own_address, save, addresses)
         return
@@ -144,7 +149,7 @@ def update_event(
         and (following := _next_on_rule(master, occurrence)) is not None
     ):
         detached, data = _detach_dates(
-            calendar, ical, master, data, occurrence, following, own_address
+            calendar, ical, master, data, occurrence, following, own_address, addresses
         )
         occurrence = following
 
@@ -152,7 +157,7 @@ def update_event(
     # the tail instead of duplicating it.
     tail = save_document(
         calendar,
-        _tail_document(ical, master, data, occurrence, own_address),
+        _tail_document(ical, master, data, occurrence, own_address, addresses),
         as_todo=False,
         overwrite=True,
     )
@@ -163,7 +168,7 @@ def update_event(
         if _series_empty(master) and not _overrides(ical):
             delete_components(dav_event, "VEVENT", tag)
         else:
-            save(master)
+            _save(dav_event, ical, master, addresses, tag)
     except WRITE_ERRORS:
         # The server may have committed the cap before the timeout.
         if _head_uncapped(calendar, uid, occurrence):
@@ -188,6 +193,7 @@ def _update_series(
     """Apply an edit to every occurrence of a series and save it."""
     # As written, not as an instant: to_utc reads a bare date as local midnight.
     old_start = master["DTSTART"].dt
+    old_timing = _timing(master)
     old_rule = master.get("RRULE")
     old_text = _rule_string(master)
     _apply(master, data, own_address)
@@ -230,6 +236,7 @@ def _update_series(
                 for override in _overrides(ical):
                     if override is not master:
                         _shift_override(override, move, master, old_start)
+                        _ask_again(ical, override, addresses)
                         stamp(override, addresses)
                 _shift_dates(master, move)
             if rule_changed:
@@ -242,7 +249,27 @@ def _update_series(
                                 ical, master, override, _slots_after(master, rid)
                             )
                         ical.subcomponents.remove(override)
+    if start_moved or rule_changed or _timing(master) != old_timing:
+        _ask_again(ical, master, addresses)
     save(master)
+
+
+def _timing(component: Any) -> tuple[Any, ...]:
+    """Return when a component starts and ends, as instants beside their value type."""
+    start = component["DTSTART"].dt if "DTSTART" in component else None
+    end = component["DTEND"].dt if "DTEND" in component else None
+    if end is None and start is not None and "DURATION" in component:
+        end = start + component["DURATION"].dt
+    return tuple(
+        None if value is None else (isinstance(value, datetime), to_utc(value))
+        for value in (start, end)
+    )
+
+
+def _ask_again(ical: Any, component: Any, addresses: list[str] | None) -> None:
+    """Have the attendees answer again, unless this is someone else's invitation."""
+    if not any(organized_elsewhere(item, addresses) for item in ical.walk("VEVENT")):
+        reset_replies(component, addresses)
 
 
 def _same_rule(
@@ -685,6 +712,7 @@ def _tail_document(
     data: dict[str, Any],
     occurrence: datetime | date,
     own_address: str | None = None,
+    addresses: list[str] | None = None,
 ) -> ICalCalendar:
     """Return the tail of a split as a document of its own.
 
@@ -705,11 +733,10 @@ def _tail_document(
     # one, while the tail master is anchored on the rule slot.
     split = _override(source, occurrence)
     if split is not None and removed:
-        # With no rule left the tail is the one occurrence on show.
         data = {**_shown_span(split), **data}
         split = None
     baseline = split["DTSTART"].dt if split is not None else occurrence
-    reset_replies(vevent)
+    _ask_again(source, vevent, addresses)
     _anchor_at(vevent, master, occurrence)
     slot = vevent["DTSTART"].dt
     _apply(
@@ -777,7 +804,7 @@ def _tail_document(
             for override in carried:
                 _shift_override(override, move, vevent, slot)
     for override in carried:
-        reset_replies(override)
+        _ask_again(source, override, addresses)
     zones = [sub for sub in source.subcomponents if sub.name == "VTIMEZONE"]
     # Master first: caldav reads the first non-timezone component, and a
     # RECURRENCE-ID there sends it looking for a uid that does not exist yet.
@@ -901,7 +928,7 @@ def _rule_rewritten(master: Any, data: dict[str, Any]) -> bool:
         return "RRULE" in master
     return (
         "RRULE" not in master
-        or vRecur.from_ical(supplied).to_ical() != master["RRULE"].to_ical()
+        or parse_rule(supplied).to_ical() != master["RRULE"].to_ical()
     )
 
 
@@ -910,7 +937,7 @@ def _wanted_rule(master: Any, data: dict[str, Any], kept: vRecur | None) -> vRec
 
     The editor echoes the COUNT of the whole series.
     """
-    wanted = vRecur.from_ical(data["rrule"])
+    wanted = parse_rule(data["rrule"])
     count = master["RRULE"].get("COUNT") if "RRULE" in master else None
     if kept is not None and count and wanted.get("COUNT") == count:
         wanted["COUNT"] = kept["COUNT"]
@@ -938,6 +965,7 @@ def _detach_dates(
     occurrence: datetime | date,
     following: datetime | date,
     own_address: str | None,
+    addresses: list[str] | None = None,
 ) -> tuple[list[Any], dict[str, Any]]:
     """Write the added dates from a split up to the next rule slot as single events.
 
@@ -961,7 +989,7 @@ def _detach_dates(
     }
     written = []
     for instant in sorted(moments):
-        document = _alone(ical, master, moments[instant])
+        document = _alone(ical, master, moments[instant], addresses)
         vevent = _master(document)
         if instant == low:
             _apply(vevent, _without_rrule(data), own_address)
@@ -976,14 +1004,25 @@ def _detach_dates(
                 calendar, zoned_document(document), as_todo=False, overwrite=True
             )
         )
+    ranged = _governing(ical, master, following)
+    if ranged is not None and leaving(ranged["RECURRENCE-ID"].dt):
+        slots = chain([following], _slots_after(master, following))
+        _extend_range(ical, master, ranged, slots)
     _filter_dates(master, "RDATE", lambda value: not leaving(value))
     for override in _overrides(ical):
         if override is not master and leaving(override["RECURRENCE-ID"].dt):
             ical.subcomponents.remove(override)
-    return written, _rebased(master, data, following, baseline)
+    shown = _override(ical, following)
+    target = following if shown is None else shown["DTSTART"].dt
+    return written, _rebased(master, data, target, baseline)
 
 
-def _alone(ical: Any, master: Any, moment: datetime | date) -> ICalCalendar:
+def _alone(
+    ical: Any,
+    master: Any,
+    moment: datetime | date,
+    addresses: list[str] | None = None,
+) -> ICalCalendar:
     """Return one occurrence of a series as a document of its own."""
     source = ICalCalendar.from_ical(ical.to_ical())
     vevent = _override(source, moment)
@@ -998,7 +1037,7 @@ def _alone(ical: Any, master: Any, moment: datetime | date) -> ICalCalendar:
     replace(vevent, "dtstamp", now)
     replace(vevent, "last-modified", now)
     replace(vevent, "sequence", None)
-    reset_replies(vevent)
+    _ask_again(source, vevent, addresses)
     zones = [sub for sub in source.subcomponents if sub.name == "VTIMEZONE"]
     source.subcomponents = [*zones, vevent]
     return source
@@ -1265,7 +1304,7 @@ def _apply(
         replace(component, "location", data["location"])
     if "rrule" in data:
         rrule = data["rrule"]
-        recur = vRecur.from_ical(rrule) if rrule else None
+        recur = parse_rule(rrule) if rrule else None
         if recur is not None and "DTSTART" in component:
             recur = framed_rule(recur, component["DTSTART"].dt)
         replace(component, "rrule", recur)
@@ -1353,11 +1392,15 @@ def _save(
     touched: Any | None,
     addresses: list[str] | None = None,
     tag: str | None = None,
+    quiet: bool = False,
 ) -> None:
-    """Write the object back over the version read, marking what the edit revised."""
+    """Write the object back over the version read, marking what the edit revised.
+
+    A quiet edit is a personal one, no new version and announced to no one.
+    """
     if touched is not None:
-        stamp(touched, addresses)
+        stamp(touched, addresses, quiet)
     # An edit can introduce a TZID the object never defined. The document,
     # not its text, which caldav would run through vcal.fix.
     dav_event.icalendar_instance = zoned_document(ical)
-    put_resource(dav_event, tag)
+    put_resource(dav_event, tag, quiet=quiet)

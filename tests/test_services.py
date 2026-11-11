@@ -526,6 +526,23 @@ async def test_create_calendar_reloads_the_account(hass: HomeAssistant) -> None:
     reload.assert_called_once_with(entry.entry_id)
 
 
+async def test_a_new_calendar_needs_a_name(hass: HomeAssistant) -> None:
+    entry = await _setup(hass)
+
+    with (
+        patch("custom_components.ha_caldav.services.create_calendar") as create,
+        pytest.raises(vol.Invalid),
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "create_calendar",
+            {"config_entry_id": entry.entry_id, "name": ""},
+            blocking=True,
+        )
+
+    create.assert_not_called()
+
+
 async def test_a_read_only_account_gets_no_new_calendar(hass: HomeAssistant) -> None:
     entry = await _setup(hass, options={CONF_READ_ONLY: True})
 
@@ -617,6 +634,25 @@ async def test_deleting_an_ambiguous_calendar_is_refused(
     delete.assert_not_called()
 
 
+async def test_deleting_a_delegated_calendar_is_refused(hass: HomeAssistant) -> None:
+    entry = await _setup(hass)
+    _managed(entry, "Personal").addresses = ["mailto:boss@example.com"]
+
+    with (
+        patch("custom_components.ha_caldav.services.delete_calendar") as delete,
+        pytest.raises(ServiceValidationError) as refusal,
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "delete_calendar",
+            {"config_entry_id": entry.entry_id, "name": "Personal"},
+            blocking=True,
+        )
+
+    assert refusal.value.translation_key == "delegated_calendar"
+    delete.assert_not_called()
+
+
 async def test_deleting_a_calendar_that_is_not_there_is_rejected(
     hass: HomeAssistant,
 ) -> None:
@@ -645,6 +681,28 @@ async def test_an_unknown_account_is_rejected(hass: HomeAssistant) -> None:
         )
 
     assert refusal.value.translation_key == "unknown_account"
+
+
+async def test_an_account_of_another_integration_is_rejected(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+    other = MockConfigEntry(domain="local_calendar", state=ConfigEntryState.LOADED)
+    other.add_to_hass(hass)
+
+    with (
+        patch("custom_components.ha_caldav.services.create_calendar") as create,
+        pytest.raises(ServiceValidationError) as refusal,
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "create_calendar",
+            {"config_entry_id": other.entry_id, "name": "Holidays"},
+            blocking=True,
+        )
+
+    assert refusal.value.translation_key == "unknown_account"
+    create.assert_not_called()
 
 
 async def test_a_server_error_becomes_a_home_assistant_error(
@@ -1614,6 +1672,59 @@ async def test_free_busy_periods_written_on_one_line_are_all_reported(
     ]
 
 
+async def _free_busy_periods(hass: HomeAssistant, answer: str) -> list[dict]:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    calendar.freebusy_request.return_value = Mock(
+        icalendar_instance=ICalCalendar.from_ical(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
+            f"{answer}END:VCALENDAR\r\n"
+        )
+    )
+    result = await hass.services.async_call(
+        DOMAIN,
+        "get_free_busy",
+        {
+            "entity_id": "calendar.personal",
+            "start": "2026-07-06 00:00:00",
+            "end": "2026-07-07 00:00:00",
+        },
+        blocking=True,
+        return_response=True,
+    )
+    return result["calendar.personal"]["periods"]
+
+
+async def test_a_free_busy_answer_of_one_component_per_busy_span_is_reported(
+    hass: HomeAssistant,
+) -> None:
+    span = (
+        "BEGIN:VFREEBUSY\r\nDTSTART:20260706T{}0000Z\r\nDTEND:20260706T{}0000Z\r\n"
+        "DTSTAMP:20260101T000000Z\r\nFBTYPE:BUSY\r\nEND:VFREEBUSY\r\n"
+    )
+
+    periods = await _free_busy_periods(
+        hass, span.format("09", "10") + span.format("14", "15")
+    )
+
+    assert periods == [
+        {"start": "2026-07-06T09:00:00+00:00", "end": "2026-07-06T10:00:00+00:00"},
+        {"start": "2026-07-06T14:00:00+00:00", "end": "2026-07-06T15:00:00+00:00"},
+    ]
+
+
+async def test_the_range_a_free_busy_answer_covers_is_not_reported_busy(
+    hass: HomeAssistant,
+) -> None:
+    periods = await _free_busy_periods(
+        hass,
+        "BEGIN:VFREEBUSY\r\nDTSTART:20260706T000000Z\r\nDTEND:20260707T000000Z\r\n"
+        "DTSTAMP:20260101T000000Z\r\nEND:VFREEBUSY\r\n",
+    )
+
+    assert periods == []
+
+
 async def test_an_update_carries_the_window_it_was_given(hass: HomeAssistant) -> None:
     entry = await _setup(hass)
 
@@ -1980,6 +2091,51 @@ async def test_an_empty_text_from_an_automation_clears_the_field(
     data = update.call_args.args[2]
     assert data["location"] is None
     assert data["url"] is None
+
+
+EMPTY_EXTRAS = ["attendees", "categories", "organizer", "url", "attachments"]
+
+
+@pytest.mark.parametrize("field", EMPTY_EXTRAS)
+async def test_an_empty_text_on_an_edit_clears_the_property(
+    hass: HomeAssistant, field: str
+) -> None:
+    await _setup(hass)
+
+    with patch("custom_components.ha_caldav.calendar.update_event") as update:
+        await hass.services.async_call(
+            DOMAIN,
+            "update_event",
+            {"entity_id": "calendar.personal", "uid": "uid-1", field: ""},
+            blocking=True,
+        )
+
+    assert update.call_args.args[2] == {field: None}
+
+
+@pytest.mark.parametrize("field", EMPTY_EXTRAS)
+async def test_an_empty_text_on_a_new_event_writes_no_property(
+    hass: HomeAssistant, field: str
+) -> None:
+    calendar = _calendar("Personal")
+    _record_writes(calendar)
+    await _setup(hass, [calendar])
+
+    await hass.services.async_call(
+        DOMAIN,
+        "create_event",
+        {
+            "entity_id": "calendar.personal",
+            "summary": "Standup",
+            "start_date_time": "2026-07-06 09:00:00",
+            "end_date_time": "2026-07-06 10:00:00",
+            field: "",
+        },
+        blocking=True,
+    )
+
+    [event] = ICalCalendar.from_ical(calendar.client.bodies[-1]).walk("VEVENT")
+    assert not {"ATTENDEE", "ORGANIZER", "CATEGORIES", "URL", "ATTACH"} & set(event)
 
 
 async def test_an_empty_rule_on_a_new_event_is_no_rule(hass: HomeAssistant) -> None:

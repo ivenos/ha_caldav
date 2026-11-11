@@ -699,6 +699,38 @@ TODOS = (
     ),
 )
 
+UNPLACEABLE_TODOS = (
+    Case(
+        "a_floating_creation_time_at_the_edge_of_what_a_datetime_holds",
+        document(vtodo("SUMMARY:Old\r\nCREATED:99991231T235959")),
+        "The list is ordered by creation in UTC, and west of UTC that is past"
+        " the year 9999.",
+    ),
+    Case(
+        "a_zoned_creation_time_at_the_edge_of_what_a_datetime_holds",
+        document(
+            vtodo("SUMMARY:Old\r\nCREATED;TZID=America/Los_Angeles:99991231T235959")
+        ),
+        "The same, with the zone written into the property.",
+    ),
+    Case(
+        "a_start_in_the_year_1",
+        document(vtodo("SUMMARY:Old\r\nDTSTART:00010101T010000Z")),
+        "The start is shown in the local zone, and west of UTC that is before"
+        " the year 1.",
+    ),
+    Case(
+        "a_start_in_the_year_1_with_an_alarm",
+        document(
+            vtodo(
+                "SUMMARY:Old\r\nDTSTART:00010101T010000Z\r\n"
+                "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nEND:VALARM"
+            )
+        ),
+        "The same start, with an alarm to place before it.",
+    ),
+)
+
 
 def poll_calendar(items: list[StoredObject]) -> Mock:
     calendar = Mock()
@@ -807,7 +839,7 @@ def test_reading_one_component_never_raises(case: Case) -> None:
         assert isinstance(read_extras(component), dict)
 
 
-@cases(*TODOS)
+@cases(*TODOS, *UNPLACEABLE_TODOS)
 async def test_one_bad_todo_does_not_cost_the_list_its_poll(
     hass: HomeAssistant, case: Case
 ) -> None:

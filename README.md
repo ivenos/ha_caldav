@@ -56,10 +56,12 @@ Setup asks for the server URL, username and password, and whether to verify the 
 | Seconds a request may take | `30` | How long to wait for the server to answer, 5-120 |
 | Days ahead | `7` | How far ahead to look for the upcoming event, 1-365 |
 | Include all-day events | `on` | Whether an all-day event can be the upcoming event |
-| Only busy events | `off` | Leaves out events that show as free and invitations you declined, in the state, the calendar view, automations and reminders |
+| Only busy events | `off` | Leaves out events that show as free and invitations you declined or passed on, in the state, the calendar view, automations and reminders |
 | Read-only | `off` | Hides the create, edit and delete controls, and the actions refuse to write |
 
-The last four options can also be set per calendar.
+The last four options can also be set per calendar, only Read-only for a to-do list or journal without events.
+
+Renaming a calendar or to-do list in Home Assistant renames it on the server, and its other entities follow. A read-only calendar keeps its name there.
 
 The calendar entity shows the upcoming event with its `url`, `status`, `transparency`, `classification`, `priority`, `categories`, `attendees`, `organizer`, `alarms` and `attachments` as attributes.
 
@@ -78,12 +80,14 @@ Called as `ha_caldav.<action>` on a calendar or to-do list, `create_calendar` an
 | `create_journal`, `update_journal`, `delete_journal` | Create, change or delete a journal entry |
 | `search_journals` | Returns the `journals` of a calendar, optionally filtered by text or a start and end |
 | `move_event`, `move_todo` | Move or copy an event to another calendar, or a to-do and its subtasks to another list |
-| `import_ics`, `export_ics` | Import iCalendar data, or return it as `ics` |
+| `import_ics`, `export_ics` | Import iCalendar data without sending invitations, or return it as `ics` |
 | `set_calendar_color` | Set the calendar color on the server |
-| `share_calendar`, `unshare_calendar`, `get_calendar_shares` | Share a calendar with another account on the server for reading or writing, or stop sharing it, administrators only. Returns its `shares` |
-| `create_calendar`, `delete_calendar` | Create a calendar for events, to-dos or journal entries, or delete one, administrators only |
+| `share_calendar`, `unshare_calendar`, `get_calendar_shares` | Share a calendar with another account on the server for reading or writing, stop sharing it, or return its `shares`, administrators only |
+| `create_calendar`, `delete_calendar` | Create a calendar for events, to-dos or journal entries, or delete one of the account's own, administrators only |
 
-An alarm of an event in the next 35 days, or in the days ahead if that is longer, or of an open to-do fires the event `ha_caldav_reminder` with `entity_id`, `uid`, `summary`, `description`, `start` and the `alarm`, plus `recurrence_id`, `location` and `end` for an event or `due` for a to-do. Each calendar with events or to-dos also gets a reminder entity named after it, which gets the same fields except `entity_id`, with the event type `event` or `todo`, and can be picked as a trigger in the automation editor. Completing, canceling or deleting a to-do does the same to its subtasks, and reopening one reopens the to-dos above it.
+An alarm of an event in the next 35 days, or in the days ahead if that is longer, or of an open to-do fires the event `ha_caldav_reminder` with `entity_id`, `uid`, `summary`, `description`, `start` and the `alarm`, plus `recurrence_id`, `location` and `end` for an event or `due` for a to-do. Each calendar with events or to-dos also gets a reminder entity named after it, which gets the same fields except `entity_id`, with the event type `event` or `todo`, and can be picked as a trigger in the automation editor. Completing, canceling or deleting a to-do does the same to its subtasks, and reopening one reopens the to-dos above it. A subtask without a position of its own is listed right under its parent. When another app changed only the current occurrence of a recurring to-do, the list shows that occurrence, and an edit in Home Assistant changes it.
+
+Changing only the alarms of an event or to-do, or the order of a to-do list, sends nothing to the attendees. Moving an event you organize, or changing how it repeats, asks the attendees to answer again.
 
 ## Compatibility
 
@@ -92,6 +96,7 @@ An alarm of an event in the next 35 days, or in the days ahead if that is longer
 | Events, to-dos, calendar names and colors | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Journal entries | ✅ | ✅ | ✅ | ✅ | ❌ |
 | Invitations | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Busy times of a calendar | ✅ | ✅ | ✅ | ✅ | ❌ |
 | Free/busy of other people | ✅ | 🟡 | ❌ | ❌ | ✅ |
 | Sharing a calendar | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Delegated calendars | ✅ | ✅ | ❌ | ❌ | ✅ |

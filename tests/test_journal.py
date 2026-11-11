@@ -318,6 +318,40 @@ async def test_an_entry_is_changed_and_deleted_by_its_uid(hass: HomeAssistant) -
     assert delete.call_args.args[1] == "note-1"
 
 
+@pytest.mark.parametrize("field", ["categories", "url", "attachments"])
+async def test_an_empty_text_leaves_a_new_entry_without_the_property(
+    hass: HomeAssistant, field: str
+) -> None:
+    await _setup(hass, {"Diary": {"VJOURNAL"}})
+
+    with patch("custom_components.ha_caldav.services.create_journal") as create:
+        await hass.services.async_call(
+            DOMAIN,
+            "create_journal",
+            {"entity_id": "calendar.diary", "summary": "Monday", field: ""},
+            blocking=True,
+        )
+
+    assert create.call_args.args[1] == {"summary": "Monday"}
+
+
+@pytest.mark.parametrize("field", ["categories", "url", "attachments"])
+async def test_an_empty_text_on_an_entry_edit_clears_the_property(
+    hass: HomeAssistant, field: str
+) -> None:
+    await _setup(hass, {"Diary": {"VJOURNAL"}})
+
+    with patch("custom_components.ha_caldav.services.update_journal") as update:
+        await hass.services.async_call(
+            DOMAIN,
+            "update_journal",
+            {"entity_id": "calendar.diary", "uid": "note-1", field: ""},
+            blocking=True,
+        )
+
+    assert update.call_args.args[1:3] == ("note-1", {field: None})
+
+
 @pytest.mark.parametrize(
     ("service", "data"),
     [

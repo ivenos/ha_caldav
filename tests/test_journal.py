@@ -16,6 +16,7 @@ import voluptuous as vol
 from custom_components.ha_caldav.api import export_ics, import_ics
 from custom_components.ha_caldav.capability import Capability
 from custom_components.ha_caldav.const import DOMAIN
+from custom_components.ha_caldav.coordinator import UNFILTERED
 from custom_components.ha_caldav.errors import Refused
 from custom_components.ha_caldav.journal import (
     create_journal,
@@ -167,7 +168,7 @@ def test_entries_are_read_with_the_dated_ones_first() -> None:
         "categories": ["diary"],
     }
     assert "start" not in journals[2]
-    assert calendar.search.call_args.kwargs == {"journal": True}
+    assert calendar.search.call_args.kwargs == {"journal": True, **UNFILTERED}
 
 
 def test_a_window_is_handed_to_the_server() -> None:
@@ -181,6 +182,7 @@ def test_a_window_is_handed_to_the_server() -> None:
         "journal": True,
         "start": start,
         "end": end,
+        **UNFILTERED,
     }
 
 

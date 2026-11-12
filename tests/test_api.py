@@ -110,6 +110,21 @@ def test_import_refuses_a_document_that_would_overwrite() -> None:
     assert calendar.client.puts == []
 
 
+def test_import_refuses_a_kind_the_calendar_does_not_hold_before_writing() -> None:
+    calendar = _missing_calendar()
+    todo = EVENT.replace("VEVENT", "VTODO").replace("DTEND", "DUE")
+
+    with pytest.raises(Refused, match="no_todos"):
+        import_ics(calendar, todo, frozenset({"VEVENT"}))
+
+    assert calendar.client.puts == []
+
+
+def test_import_of_an_empty_text_says_the_document_is_empty() -> None:
+    with pytest.raises(Refused, match="document_empty"):
+        import_ics(_missing_calendar(), "  \n")
+
+
 def test_import_keeps_relations_and_carries_one_timezone() -> None:
     calendar = _missing_calendar()
 
@@ -1505,10 +1520,10 @@ def test_a_move_keeps_the_original_when_the_copy_will_not_land() -> None:
     assert source.client.deletes == []
 
 
-def _stored_move() -> tuple[Mock, Mock, CaldavEvent]:
+def _stored_move(data: str = EVENT) -> tuple[Mock, Mock, CaldavEvent]:
     source, target = dav_calendar(), _missing_calendar()
-    stored = CaldavEvent(source.client, data=EVENT, url=f"{source.url}uid-1.ics")
-    source.client.stored[str(stored.url)] = (EVENT, '"e1"')
+    stored = CaldavEvent(source.client, data=data, url=f"{source.url}uid-1.ics")
+    source.client.stored[str(stored.url)] = (data, '"e1"')
     source.event_by_uid.return_value = stored
     return source, target, stored
 
@@ -1522,12 +1537,54 @@ def test_a_move_asks_the_server_to_tell_no_one() -> None:
     assert source.client.delete_headers[0]["Schedule-Reply"] == "F"
 
 
-def test_a_copy_is_announced_like_any_new_event() -> None:
+def _move_within_one_account() -> tuple[Mock, Mock]:
+    source, target, _ = _stored_move()
+    target.client = source.client
+    target.url = URL("https://dav.test/work/")
+    return source, target
+
+
+def test_a_move_within_one_account_is_a_single_move() -> None:
+    source, target = _move_within_one_account()
+
+    move_event(source, target, "uid-1", keep_original=False)
+
+    assert source.client.moves == [(f"{source.url}uid-1.ics", f"{target.url}uid-1.ics")]
+    assert source.client.puts == source.client.deletes == []
+
+
+def test_a_move_the_server_refuses_is_made_as_a_copy() -> None:
+    source, target = _move_within_one_account()
+    source.client.move_status = 502
+
+    move_event(source, target, "uid-1", keep_original=False)
+
+    assert len(source.client.puts) == len(source.client.deletes) == 1
+
+
+def test_a_copy_tells_no_one() -> None:
     source, target, _ = _stored_move()
 
     move_event(source, target, "uid-1", keep_original=True)
 
-    assert "Schedule-Reply" not in target.client.put_headers[0]
+    assert target.client.put_headers[0]["Schedule-Reply"] == "F"
+    assert source.client.deletes == []
+
+
+def test_an_invitation_from_someone_else_is_moved_but_not_copied() -> None:
+    invitation = EVENT.replace(
+        "SUMMARY:Standup\r\n",
+        "SUMMARY:Standup\r\nORGANIZER:mailto:boss@example.com\r\n"
+        "ATTENDEE:mailto:iven@example.com\r\n",
+    )
+    source, target, _ = _stored_move(invitation)
+
+    with pytest.raises(Refused, match="invitation_copied"):
+        move_event(source, target, "uid-1", True, ["mailto:iven@example.com"])
+    assert target.client.puts == []
+
+    move_event(source, target, "uid-1", False, ["mailto:iven@example.com"])
+    assert len(target.client.puts) == 1
 
 
 def test_a_move_the_server_finished_by_itself_succeeds() -> None:
@@ -2374,7 +2431,7 @@ def test_a_dragged_todo_is_no_new_version_and_announced_to_no_one() -> None:
     }
     calendar.search.return_value = list(todos.values())
 
-    reorder_todos(calendar, ["c", "a", "b"], ["mailto:me@example.com"])
+    reorder_todos(calendar, ["c", "a", "b"])
 
     moved = todos["c"]
     assert int(moved.icalendar_component["SEQUENCE"]) == 2

@@ -24,7 +24,7 @@ from .const import (
     ATTR_EVENT_STATUS,
     ATTR_URL,
 )
-from .coordinator import get_attr_value, master_of, to_local
+from .coordinator import UNFILTERED, get_attr_value, master_of, to_local
 from .errors import Refused
 from .extras import apply_extras, read_extras, replace
 
@@ -94,7 +94,7 @@ def read_journals(
     """
     window = {key: value for key, value in (("start", start), ("end", end)) if value}
     found = []
-    for item in calendar.search(journal=True, **window):
+    for item in calendar.search(journal=True, **window, **UNFILTERED):
         entry = master_of(item, "vjournal")
         if entry is None or (uid := get_attr_value(entry, "uid")) is None:
             continue

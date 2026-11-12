@@ -213,6 +213,12 @@
     "delegated_calendar": {
       "message": "{name} gehört einem anderen Konto; nur dessen Besitzer kann ihn löschen."
     },
+    "delegated_share": {
+      "message": "{name} gehört einem anderen Konto; nur dessen Besitzer kann ihn teilen."
+    },
+    "invitation_copied": {
+      "message": "Der Termin ist eine Einladung von jemand anderem und lässt sich nur verschieben, nicht kopieren."
+    },
     "mixed_start_and_due": {
       "message": "Start ({start}) und Fälligkeit einer Aufgabe müssen von derselben Art sein: beide ein Tag oder beide ein Tag mit Uhrzeit."
     },
@@ -704,7 +710,7 @@
         },
         "keep_original": {
           "name": "Original behalten",
-          "description": "Kopieren statt verschieben, der Termin bleibt im Quellkalender."
+          "description": "Kopieren statt verschieben, der Termin bleibt im Quellkalender. Von der Kopie erfährt niemand, und eine Einladung von jemand anderem lässt sich nur verschieben."
         }
       }
     },
@@ -920,7 +926,7 @@
         },
         "keep_original": {
           "name": "Original behalten",
-          "description": "Kopieren statt verschieben, die Aufgabe bleibt auf der Quellliste."
+          "description": "Kopieren statt verschieben, die Aufgabe bleibt auf der Quellliste. Von der Kopie erfährt niemand."
         }
       }
     },

@@ -148,7 +148,8 @@ def _registered_key(entry_id: str, unique_id: str, domain: str) -> str | None:
 
 async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> bool:
     """Set up the CalDAV account from a config entry."""
-    client, calendars, delegations = await _async_connect(hass, entry)
+    client, calendars, told = await _async_connect(hass, entry)
+    delegations = told or []
     _async_key_by_url(hass, entry, calendars)
     _async_follow_copies(hass, entry, delegations)
     await _async_remember_principal(hass, entry, client)
@@ -243,6 +244,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaCaldavConfigEntry) -> 
             colors,
             {calendar_key(calendar.url) for calendar in calendars},
             {calendar_key(item.calendar.url) for item in managed},
+            None
+            if told is None
+            else {calendar_key(delegation.home.url) for delegation in told},
         )
     )
     _async_check_for_issues(hass, entry)
@@ -271,7 +275,7 @@ def _owner_addresses(
 
 async def _async_connect(
     hass: HomeAssistant, entry: HaCaldavConfigEntry
-) -> tuple[caldav.DAVClient, list[caldav.Calendar], list[Delegation]]:
+) -> tuple[caldav.DAVClient, list[caldav.Calendar], list[Delegation] | None]:
     """Connect and list the calendars, trying the RFC 6764 bootstrap url too."""
     kwargs = connection_kwargs(entry.data, request_timeout(entry))
     last_error: Exception | None = None
@@ -365,7 +369,7 @@ def _async_key_by_url(
 def _async_follow_copies(
     hass: HomeAssistant, entry: HaCaldavConfigEntry, delegations: list[Delegation]
 ) -> None:
-    """Move what the options say about SOGo's copies onto the calendars copied.
+    """Move the entities and options of SOGo's copies onto the calendars copied.
 
     Earlier versions listed both, and the copies are left out now.
     """
@@ -376,6 +380,16 @@ def _async_follow_copies(
     }
     if not moved:
         return
+    registry = er.async_get(hass)
+    for record in er.async_entries_for_config_entry(registry, entry.entry_id):
+        key = _registered_key(entry.entry_id, record.unique_id, record.domain)
+        if key not in moved:
+            continue
+        wanted = f"{entry.entry_id}-{moved[key]}{_SUFFIXES.get(record.domain, '')}"
+        # Earlier versions registered the copy first, under the plain ids.
+        if held := registry.async_get_entity_id(record.domain, DOMAIN, wanted):
+            registry.async_remove(held)
+        registry.async_update_entity(record.entity_id, new_unique_id=wanted)
     options = dict(entry.options)
     if selected := options.get(CONF_CALENDARS):
         options[CONF_CALENDARS] = list(
@@ -438,12 +452,15 @@ def _async_follow_the_server(
     colors: HaCaldavColorCoordinator,
     listed: set[str],
     loaded: set[str],
+    delegated: set[str] | None,
 ) -> CALLBACK_TYPE:
     """Keep the entry in step with the calendars the color poll finds.
 
     It reloads once a loaded calendar is renamed or gone, and once the poll
     finds a calendar the entry should load that the listing left out. The
-    entities of a calendar missing from _GONE_POLLS polls in a row go.
+    entities of a calendar missing from _GONE_POLLS polls in a row go. The
+    delegated homes are None when the server could not tell them; until it
+    does, the listing is asked again for a calendar of a home the poll skips.
     """
     selected = entry.options.get(CONF_CALENDARS)
     previous = colors.data
@@ -467,19 +484,25 @@ def _async_follow_the_server(
             _LOGGER.debug("Reloading %s for a change on the server", entry.title)
             hass.config_entries.async_schedule_reload(entry.entry_id)
             return
-        if wanted := {
+        unread = {key for key in missing if key.rpartition("/")[0] not in found}
+        wanted = {
             key
             for key, item in found.items()
             if item.calendar and key not in listed and (not selected or key in selected)
-        }:
+        }
+        if delegated is None:
+            wanted |= unread
+        if wanted:
             entry.async_create_task(
                 hass, _async_reload_once_listed(hass, entry, client, wanted)
             )
         for key in missing:
             if key in calendars:
                 missing[key] = 0
-            # A home that did not answer this poll may still hold the calendar.
-            elif key.rpartition("/")[0] in found:
+            # A delegated home that did not answer this poll may still hold it.
+            elif key not in unread or (
+                delegated is not None and key.rpartition("/")[0] not in delegated
+            ):
                 missing[key] += 1
         if gone := {key for key, polls in missing.items() if polls >= _GONE_POLLS}:
             _async_forget_calendars(hass, entry, gone)

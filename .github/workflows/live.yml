@@ -83,4 +83,4 @@ jobs:
         run: pip install -r requirements_test.txt
 
       - name: Run live tests against ${{ matrix.server }} ${{ matrix.tag }}
-        run: tests/live-test.sh ${{ matrix.server }} ${{ matrix.tag }} -- -v
+        run: tests/live-test.sh ${{ matrix.server }} ${{ matrix.tag }} -- -v -rs

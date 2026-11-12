@@ -24,6 +24,8 @@ class RecordingClient:
         self.delete_headers: list[dict[str, str]] = []
         self.fail_from: int | None = None
         self.delete_status: int = 204
+        self.move_status: int = 201
+        self.moves: list[tuple[str, str]] = []
         self.stored: dict[str, tuple[str, str]] = {}
 
     def put(self, url, body, headers=None):
@@ -47,6 +49,11 @@ class RecordingClient:
             if held is None:
                 return _answer(404, "Not Found")
             return _answer(200, raw=held[0], headers={"Etag": held[1]})
+        if method == "MOVE":
+            self.moves.append((url, headers["Destination"]))
+            if self.move_status < 300 and held is not None:
+                self.stored[headers["Destination"]] = self.stored.pop(url)
+            return _answer(self.move_status)
         self.deletes.append(url)
         self.delete_headers.append(headers)
         if (

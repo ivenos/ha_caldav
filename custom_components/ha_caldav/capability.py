@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import cache, partial
 import logging
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 from urllib.parse import urljoin, urlparse
 
 import caldav
@@ -30,6 +30,18 @@ class ProxyReadFor(BaseElement):
     """The accounts this one may read as a delegate, by caldav-proxy."""
 
     tag: ClassVar[str] = "{http://calendarserver.org/ns/}calendar-proxy-read-for"
+
+
+class ShareResourceUri(BaseElement):
+    """The resource every instance of a shared calendar names, by sabre/dav."""
+
+    tag: ClassVar[str] = ns("D", "share-resource-uri")
+
+
+class ShareAccess(BaseElement):
+    """What this account may do with a calendar shared with it, by sabre/dav."""
+
+    tag: ClassVar[str] = ns("D", "share-access")
 
 
 class ProxyWriteFor(BaseElement):
@@ -87,10 +99,12 @@ class Delegation:
     copies: Mapping[str, str] = field(default_factory=dict)
 
 
-def fetch_delegations(client: caldav.DAVClient, principal: Any) -> list[Delegation]:
+def fetch_delegations(
+    client: caldav.DAVClient, principal: Any
+) -> list[Delegation] | None:
     """Return the accounts that made this one their delegate.
 
-    None on a server without caldav-proxy.
+    None when the server could not tell, which is not the same as none.
     """
     try:
         response = principal.get_properties(
@@ -104,8 +118,8 @@ def fetch_delegations(client: caldav.DAVClient, principal: Any) -> list[Delegati
             if element.text
         ]
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("No delegated accounts: %s", err)
-        return []
+        _LOGGER.debug("Could not read the delegated accounts: %s", err)
+        return None
     found = []
     own = client.url
     for href in dict.fromkeys(hrefs):
@@ -123,7 +137,8 @@ def fetch_delegations(client: caldav.DAVClient, principal: Any) -> list[Delegati
                 )
             )
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Leaving out a delegated account: %s", err)
+            _LOGGER.debug("Could not read a delegated account: %s", err)
+            return None
         finally:
             # caldav moves the client to the host of every home it reads.
             client.url = own
@@ -132,12 +147,14 @@ def fetch_delegations(client: caldav.DAVClient, principal: Any) -> list[Delegati
 
 def account_calendars(
     client: caldav.DAVClient,
-) -> tuple[list[caldav.Calendar], list[Delegation]]:
+) -> tuple[list[caldav.Calendar], list[Delegation] | None]:
     """Return the calendars of the account and of those it is a delegate of.
 
     A delegated calendar is named with its owner, as it may share its name
     with one of the account's own. SOGo names it so by itself, and lists a
-    copy of it among the account's own, which is left out.
+    copy of it among the account's own, which is left out, as is an own
+    calendar shared with the delegator. The delegations are None when the
+    server could not tell them.
     """
     principal = client.principal()
     # caldav moves the client to the host of the home on reading it, as on iCloud.
@@ -148,7 +165,7 @@ def account_calendars(
     seen = {calendar_key(calendar.url) for calendar in calendars}
     own_names = {_name(calendar.url): calendar_key(calendar.url) for calendar in own}
     owners = cache(partial(_owners, principal.calendar_home_set))
-    for index, delegation in enumerate(delegations):
+    for index, delegation in enumerate(delegations or []):
         try:
             delegated = delegation.home.calendars()
         except Exception as err:  # noqa: BLE001
@@ -158,8 +175,9 @@ def account_calendars(
             continue
         if found := _copies(own_names, delegation, delegated, owners):
             delegations[index] = replace(delegation, copies=found)
+        mine = _shared_back(delegation.home, principal, owners) if delegated else set()
         for calendar in delegated:
-            if (key := calendar_key(calendar.url)) not in seen:
+            if (key := calendar_key(calendar.url)) not in seen and key not in mine:
                 seen.add(key)
                 name = display_name(calendar)
                 if delegation.owner.lower() not in name.lower():
@@ -172,7 +190,7 @@ def account_calendars(
                         name=name,
                     )
                 )
-    hidden = {key for delegation in delegations for key in delegation.copies}
+    hidden = {key for delegation in delegations or [] for key in delegation.copies}
     return [
         calendar for calendar in calendars if calendar_key(calendar.url) not in hidden
     ], delegations
@@ -227,23 +245,73 @@ def _copies(
     return {
         key: theirs
         for key, theirs in named.items()
-        if owners().get(key) == delegation.owner
+        if (holder := owners().get(key)) is not None
+        and holder.owner == delegation.owner
     }
 
 
-def _owners(home: Any) -> dict[str, str]:
-    """Return calendar key -> the account owning it, for the calendars of a home."""
+class _Holder(NamedTuple):
+    owner: str | None
+    resource: str | None
+    shared_in: bool
+
+
+def _owners(home: Any) -> dict[str, _Holder]:
+    """Return calendar key -> who owns it and the resource it shares, for a home.
+
+    Shared in means another account shared it with this one.
+    """
     try:
-        response = home.get_properties([dav.Owner()], depth=1, parse_response_xml=False)
+        response = home.get_properties(
+            [dav.Owner(), ShareResourceUri(), ShareAccess()],
+            depth=1,
+            parse_response_xml=False,
+        )
         found = objects_and_props(response, home.url)
     except Exception as err:  # noqa: BLE001
         _LOGGER.debug("Could not read who owns the calendars: %s", err)
         return {}
+    holders = {}
+    for key, props in found.items():
+        owner = _href(props.get(dav.Owner.tag))
+        access = props.get(ShareAccess.tag)
+        holders[key] = _Holder(
+            _name(owner) if owner else None,
+            _href(props.get(ShareResourceUri.tag)),
+            access is not None and any(item.tag in _SHARED_IN for item in access),
+        )
+    return holders
+
+
+_SHARED_IN = {ns("D", "read"), ns("D", "read-write")}
+
+
+def _href(holder: Any) -> str | None:
+    return None if holder is None else holder.findtext(dav.Href.tag) or None
+
+
+def _shared_back(
+    home: Any, principal: Any, owners: Callable[[], dict[str, _Holder]]
+) -> set[str]:
+    """Return the keys in a delegator's home of calendars the account owns.
+
+    Nextcloud names the account as their owner, sabre/dav names the resource
+    of one of the account's own calendars.
+    """
+    if not (theirs := _owners(home)):
+        return set()
+    login = _name(principal.url)
+    shared: set[str] = set()
+    if any(item.shared_in and item.resource for item in theirs.values()):
+        shared = {
+            item.resource
+            for item in owners().values()
+            if item.resource and not item.shared_in
+        }
     return {
-        key: _name(href)
-        for key, props in found.items()
-        if (holder := props.get(dav.Owner.tag)) is not None
-        and (href := holder.findtext(dav.Href.tag))
+        key
+        for key, item in theirs.items()
+        if item.owner == login or (item.shared_in and item.resource in shared)
     }
 
 

@@ -85,9 +85,9 @@ Called as `ha_caldav.<action>` on a calendar or to-do list, `create_calendar` an
 | `share_calendar`, `unshare_calendar`, `get_calendar_shares` | Share a calendar with another account on the server for reading or writing, stop sharing it, or return its `shares`, administrators only |
 | `create_calendar`, `delete_calendar` | Create a calendar for events, to-dos or journal entries, or delete one of the account's own, administrators only |
 
-An alarm of an event in the next 35 days, or in the days ahead if that is longer, or of an open to-do fires the event `ha_caldav_reminder` with `entity_id`, `uid`, `summary`, `description`, `start` and the `alarm`, plus `recurrence_id`, `location` and `end` for an event or `due` for a to-do. Each calendar with events or to-dos also gets a reminder entity named after it, which gets the same fields except `entity_id`, with the event type `event` or `todo`, and can be picked as a trigger in the automation editor. Completing, canceling or deleting a to-do does the same to its subtasks, and reopening one reopens the to-dos above it. A subtask without a position of its own is listed right under its parent. When another app changed only the current occurrence of a recurring to-do, the list shows that occurrence, and an edit in Home Assistant changes it.
+An alarm of an event in the next 35 days, or in the days ahead if that is longer, or of an open to-do fires the event `ha_caldav_reminder` with `entity_id`, `uid`, `summary`, `description`, `start` and the `alarm`, plus `recurrence_id`, `location` and `end` for an event or `due` for a to-do. Each calendar with events or to-dos also gets a reminder entity named after it, which gets the same fields except `entity_id`, with the event type `event` or `todo`, and can be picked as a trigger in the automation editor. Completing, canceling or deleting a to-do does the same to its subtasks, and reopening one reopens the to-dos above it. A subtask without a position of its own is listed right under its parent. When another app changed only the current occurrence of a recurring to-do, the list shows that occurrence, and an edit in Home Assistant changes it. When it deleted that occurrence, the list shows the next one.
 
-Changing only the alarms of an event or to-do, or the order of a to-do list, sends nothing to the attendees. Moving an event you organize, or changing how it repeats, asks the attendees to answer again.
+Changing only the alarms of an event or to-do, or the order of a to-do list, sends nothing to the attendees, and neither does a copy to another calendar. Moving an event you organize, or changing how it repeats, asks the attendees to answer again. An invitation from someone else can be moved to another calendar but not copied.
 
 ## Compatibility
 
@@ -97,7 +97,7 @@ Changing only the alarms of an event or to-do, or the order of a to-do list, sen
 | Journal entries | ✅ | ✅ | ✅ | ✅ | ❌ |
 | Invitations | ✅ | ✅ | ❌ | ❌ | ✅ |
 | Busy times of a calendar | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Free/busy of other people | ✅ | 🟡 | ❌ | ❌ | ✅ |
+| Free/busy of other people | ✅ | 🟡 | ❌ | ❌ | ❌ |
 | Sharing a calendar | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Delegated calendars | ✅ | ✅ | ❌ | ❌ | ✅ |
 

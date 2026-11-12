@@ -310,12 +310,15 @@ async def test_a_delegated_invitation_is_left_out_with_only_busy_events(
     assert [event.summary for event in events] == ["Accepted"]
 
 
+@pytest.mark.parametrize(
+    "token_moves", [True, False], ids=["token_moves", "token_stands"]
+)
 async def test_a_write_that_timed_out_after_landing_is_shown(
-    hass: HomeAssistant,
+    hass: HomeAssistant, token_moves: bool
 ) -> None:
     calendar = _calendar("Personal")
     calendar.objects_by_sync_token.side_effect = lambda token=None: Mock(
-        sync_token=str(len(shown))
+        sync_token=str(len(shown) if token_moves else 1), objects=[]
     )
     shown = [_search_item("Before", timedelta(hours=2), etag='"e1"')]
     calendar.search.side_effect = lambda **kw: list(shown) if kw.get("event") else []

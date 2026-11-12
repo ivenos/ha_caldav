@@ -141,6 +141,7 @@ def update_event(
     # A date added by hand is no slot of the rule, and a series anchored on
     # one would be rescheduled. It leaves as an event of its own.
     detached: list[Any] = []
+    edited = True
     if (
         master.get("RRULE") is not None
         and not _rule_rewritten(master, data)
@@ -148,8 +149,17 @@ def update_event(
         and not _on_rule(master, occurrence)
         and (following := _next_on_rule(master, occurrence)) is not None
     ):
+        edited = _override(ical, following) is None
         detached, data = _detach_dates(
-            calendar, ical, master, data, occurrence, following, own_address, addresses
+            calendar,
+            ical,
+            master,
+            data,
+            occurrence,
+            following,
+            own_address,
+            addresses,
+            quiet,
         )
         occurrence = following
 
@@ -157,9 +167,12 @@ def update_event(
     # the tail instead of duplicating it.
     tail = save_document(
         calendar,
-        _tail_document(ical, master, data, occurrence, own_address, addresses),
+        _tail_document(
+            ical, master, data, occurrence, own_address, addresses, edited, quiet
+        ),
         as_todo=False,
         overwrite=True,
+        quiet=quiet,
     )
     try:
         _cap_series(master, occurrence)
@@ -168,7 +181,7 @@ def update_event(
         if _series_empty(master) and not _overrides(ical):
             delete_components(dav_event, "VEVENT", tag)
         else:
-            _save(dav_event, ical, master, addresses, tag)
+            _save(dav_event, ical, master, addresses, tag, quiet)
     except WRITE_ERRORS:
         # The server may have committed the cap before the timeout.
         if _head_uncapped(calendar, uid, occurrence):
@@ -241,7 +254,11 @@ def _update_series(
                 _shift_dates(master, move)
             if rule_changed:
                 _filter_dates(master, "EXDATE", partial(_has_slot, master))
-                for override in _overrides(ical):
+                for override in sorted(
+                    _overrides(ical),
+                    key=lambda item: to_utc(item["RECURRENCE-ID"].dt),
+                    reverse=True,
+                ):
                     rid = override["RECURRENCE-ID"].dt
                     if override is not master and not _is_occurrence(master, rid):
                         if _is_ranged(override):
@@ -260,6 +277,9 @@ def _timing(component: Any) -> tuple[Any, ...]:
     end = component["DTEND"].dt if "DTEND" in component else None
     if end is None and start is not None and "DURATION" in component:
         end = start + component["DURATION"].dt
+    elif end is None and start is not None:
+        # RFC 5545 3.6.1: without an end a date lasts the day, a time no time.
+        end = start if isinstance(start, datetime) else start + timedelta(days=1)
     return tuple(
         None if value is None else (isinstance(value, datetime), to_utc(value))
         for value in (start, end)
@@ -267,8 +287,14 @@ def _timing(component: Any) -> tuple[Any, ...]:
 
 
 def _ask_again(ical: Any, component: Any, addresses: list[str] | None) -> None:
-    """Have the attendees answer again, unless this is someone else's invitation."""
-    if not any(organized_elsewhere(item, addresses) for item in ical.walk("VEVENT")):
+    """Have the attendees answer again, unless this is someone else's invitation.
+
+    Without an own address any organizer may be someone else, so nobody is asked.
+    """
+    vevents = ical.walk("VEVENT")
+    if not addresses and any("ORGANIZER" in item for item in vevents):
+        return
+    if not any(organized_elsewhere(item, addresses) for item in vevents):
         reset_replies(component, addresses)
 
 
@@ -537,7 +563,7 @@ def _slots_after(master: Any, moment: datetime | date) -> Iterator[datetime | da
 
 def _extend_range(
     ical: Any, master: Any, ranged: Any, slots: Iterable[datetime | date]
-) -> None:
+) -> Any | None:
     """Give the first of these occurrences without an exception a copy of a ranged one.
 
     Up to another ranged exception, which takes over from there anyway.
@@ -546,13 +572,19 @@ def _extend_range(
         if (held := _override(ical, slot)) is None:
             successor = ICalEvent.from_ical(ranged.to_ical())
             del successor["RECURRENCE-ID"]
-            successor.add("RECURRENCE-ID", vDDDTypes(_align(master, slot)))
+            rid = _align(master, slot)
+            if (zone := _zone(master)) is not None:
+                # recurring_ical_events shifts a range on the wall clock only when
+                # its id shares the zone of its start.
+                rid = rid.astimezone(zone)
+            successor.add("RECURRENCE-ID", vDDDTypes(rid))
             successor["RECURRENCE-ID"].params["RANGE"] = "THISANDFUTURE"
             _follow(successor, master, ranged, slot)
             ical.add_component(successor)
-            return
+            return successor
         if _is_ranged(held):
-            return
+            return None
+    return None
 
 
 def _narrowed(ical: Any, master: Any, override: Any) -> Any:
@@ -713,6 +745,8 @@ def _tail_document(
     occurrence: datetime | date,
     own_address: str | None = None,
     addresses: list[str] | None = None,
+    edited: bool = True,
+    quiet: bool = False,
 ) -> ICalCalendar:
     """Return the tail of a split as a document of its own.
 
@@ -726,7 +760,9 @@ def _tail_document(
     if ranged is not None and to_utc(ranged["RECURRENCE-ID"].dt) < target:
         # What an earlier ranged exception gave these occurrences comes along.
         slots = chain([_align(master, occurrence)], _slots_after(vevent, occurrence))
-        _extend_range(source, vevent, ranged, slots)
+        made = _extend_range(source, vevent, ranged, slots)
+        if not edited and made is not None:
+            _apply(made, _without_times(data), own_address)
     rewritten = _rule_rewritten(master, data)
     removed = rewritten and not data["rrule"]
     # The frontend names the exception's start when the split point carries
@@ -736,7 +772,8 @@ def _tail_document(
         data = {**_shown_span(split), **data}
         split = None
     baseline = split["DTSTART"].dt if split is not None else occurrence
-    _ask_again(source, vevent, addresses)
+    if not quiet:
+        _ask_again(source, vevent, addresses)
     _anchor_at(vevent, master, occurrence)
     slot = vevent["DTSTART"].dt
     _apply(
@@ -759,7 +796,7 @@ def _tail_document(
         for override in _overrides(source)
         if not removed and to_utc(override["RECURRENCE-ID"].dt) >= target
     ]
-    if split is not None and any(override is split for override in carried):
+    if edited and split is not None and any(override is split for override in carried):
         # The occurrence being edited is this exception, not the slot under it.
         _apply(split, _without_times(data), own_address)
     uid = _tail_uid(str(master["UID"]), occurrence)
@@ -803,7 +840,7 @@ def _tail_document(
                     replace(vevent, "rrule", framed_rule(recur, start))
             for override in carried:
                 _shift_override(override, move, vevent, slot)
-    for override in carried:
+    for override in carried if not quiet else ():
         _ask_again(source, override, addresses)
     zones = [sub for sub in source.subcomponents if sub.name == "VTIMEZONE"]
     # Master first: caldav reads the first non-timezone component, and a
@@ -966,6 +1003,7 @@ def _detach_dates(
     following: datetime | date,
     own_address: str | None,
     addresses: list[str] | None = None,
+    quiet: bool = False,
 ) -> tuple[list[Any], dict[str, Any]]:
     """Write the added dates from a split up to the next rule slot as single events.
 
@@ -989,7 +1027,7 @@ def _detach_dates(
     }
     written = []
     for instant in sorted(moments):
-        document = _alone(ical, master, moments[instant], addresses)
+        document = _alone(ical, master, moments[instant], addresses, quiet)
         vevent = _master(document)
         if instant == low:
             _apply(vevent, _without_rrule(data), own_address)
@@ -1001,13 +1039,19 @@ def _detach_dates(
                     replace(vevent, key.lower(), moved)
         written.append(
             save_document(
-                calendar, zoned_document(document), as_todo=False, overwrite=True
+                calendar,
+                zoned_document(document),
+                as_todo=False,
+                overwrite=True,
+                quiet=quiet,
             )
         )
     ranged = _governing(ical, master, following)
     if ranged is not None and leaving(ranged["RECURRENCE-ID"].dt):
         slots = chain([following], _slots_after(master, following))
-        _extend_range(ical, master, ranged, slots)
+        made = _extend_range(ical, master, ranged, slots)
+        if made is not None and to_utc(made["RECURRENCE-ID"].dt) != high:
+            _apply(made, _without_times(data), own_address)
     _filter_dates(master, "RDATE", lambda value: not leaving(value))
     for override in _overrides(ical):
         if override is not master and leaving(override["RECURRENCE-ID"].dt):
@@ -1022,6 +1066,7 @@ def _alone(
     master: Any,
     moment: datetime | date,
     addresses: list[str] | None = None,
+    quiet: bool = False,
 ) -> ICalCalendar:
     """Return one occurrence of a series as a document of its own."""
     source = ICalCalendar.from_ical(ical.to_ical())
@@ -1037,7 +1082,8 @@ def _alone(
     replace(vevent, "dtstamp", now)
     replace(vevent, "last-modified", now)
     replace(vevent, "sequence", None)
-    _ask_again(source, vevent, addresses)
+    if not quiet:
+        _ask_again(source, vevent, addresses)
     zones = [sub for sub in source.subcomponents if sub.name == "VTIMEZONE"]
     source.subcomponents = [*zones, vevent]
     return source

@@ -125,6 +125,8 @@ from .const import (
 )
 from .coordinator import (
     FLOATING_MARGIN,
+    UNFILTERED,
+    UNMAPPABLE,
     HaCaldavConfigEntry,
     ManagedCalendar,
     calendar_unique_id,
@@ -186,6 +188,17 @@ def _named(values: tuple[str, ...]) -> Any:
     hassfest holds selector option keys to [a-z0-9-_]+.
     """
     return vol.All(vol.Lower, vol.In(tuple(v.lower() for v in values)), vol.Upper)
+
+
+def _blank_as_none(validator: Any) -> Any:
+    """Return a field that reads as left out when a template renders it empty."""
+
+    def validate(value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return validator(value)
+
+    return validate
 
 
 EXTRA_FIELDS = {
@@ -269,7 +282,9 @@ SEARCH_SCHEMA = {
 FREE_BUSY_SCHEMA = {
     vol.Required("start"): _local_datetime,
     vol.Required("end"): _local_datetime,
-    vol.Optional(ATTR_ATTENDEES): vol.All(cv.ensure_list, [cv.string]),
+    vol.Optional(ATTR_ATTENDEES): _blank_as_none(
+        vol.All(cv.ensure_list, [vol.All(cv.string, vol.Strip, vol.Length(min=1))])
+    ),
 }
 
 INVITATIONS_SCHEMA = {
@@ -289,17 +304,6 @@ SPAN_FIELDS = {
 
 _ONE_START = cv.has_at_most_one_key("start_date_time", "start_date")
 _ONE_END = cv.has_at_most_one_key("end_date_time", "end_date")
-
-
-def _blank_as_none(validator: Any) -> Any:
-    """Return a field that reads as left out when a template renders it empty."""
-
-    def validate(value: Any) -> Any:
-        if value is None or (isinstance(value, str) and not value.strip()):
-            return None
-        return validator(value)
-
-    return validate
 
 
 _BLANK_EXTRAS = {
@@ -465,7 +469,7 @@ JOURNAL_FIELDS = {
 }
 
 _ONE_JOURNAL_START = cv.has_at_most_one_key("start_date", "start_date_time")
-_NAMED = vol.All(cv.string, vol.Length(min=1))
+_NAMED = vol.All(cv.string, vol.Strip, vol.Length(min=1))
 
 CREATE_JOURNAL_SCHEMA = vol.All(
     cv.make_entity_service_schema({vol.Required("summary"): _NAMED, **JOURNAL_FIELDS}),
@@ -707,7 +711,9 @@ def _found_events(calendar: Any, criteria: dict[str, Any]) -> list[dict[str, Any
         query["start"] = criteria["start"] - FLOATING_MARGIN
         query["end"] = criteria["end"] + FLOATING_MARGIN
     events = []
-    for item in calendar.search(event=True, **query):
+    # caldav decides a text match itself where it distrusts the server's.
+    unfiltered = {} if set(query) - {"start", "end"} else UNFILTERED
+    for item in calendar.search(event=True, **query, **unfiltered):
         vevents = (
             [
                 vevent
@@ -763,7 +769,7 @@ def _found_invitations(
     """
     window = {"start": start} if end is None else {"start": start, "end": end}
     invitations = []
-    for item in calendar.search(event=True, **window):
+    for item in calendar.search(event=True, **window, **UNFILTERED):
         for vevent in components_of(item, "vevent"):
             if not awaits_reply(vevent, addresses):
                 continue
@@ -971,6 +977,7 @@ async def _async_move_event(entity: HaCaldavCalendarEntity, call: ServiceCall) -
             target.calendar,
             call.data["uid"],
             call.data[ATTR_KEEP_ORIGINAL],
+            entity.addresses,
         ),
         SERVICE_MOVE_EVENT,
     )
@@ -1146,11 +1153,15 @@ def _found_todos(
                 todo[key] = value.isoformat()
         if shown.description:
             todo["description"] = shown.description
-        todo.update(read_todo_extras(vtodo, master))
+        try:
+            todo.update(read_todo_extras(vtodo, master))
+            order = sort_order(master)
+        except UNMAPPABLE:
+            continue
         wanted = (not statuses or status in statuses) and (
             not text or _matches(todo, field, text)
         )
-        found.append((sort_order(master), shown.uid, parent_of(master), (wanted, todo)))
+        found.append((order, shown.uid, parent_of(master), (wanted, todo)))
     return [todo for wanted, todo in list_order(found) if wanted]
 
 
@@ -1288,9 +1299,19 @@ async def _async_require_admin(hass: HomeAssistant, call: ServiceCall) -> None:
         raise Unauthorized(context=call.context)
 
 
+def _require_own(entity: HaCaldavEntity) -> None:
+    if entity.managed.addresses is not None:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="delegated_share",
+            translation_placeholders={"name": entity.managed.name},
+        )
+
+
 async def _async_share_calendar(entity: HaCaldavEntity, call: ServiceCall) -> None:
     await _async_require_admin(entity.hass, call)
     _require_writable(entity)
+    _require_own(entity)
     await _async_account_job(
         entity.hass,
         partial(
@@ -1306,6 +1327,7 @@ async def _async_share_calendar(entity: HaCaldavEntity, call: ServiceCall) -> No
 async def _async_unshare_calendar(entity: HaCaldavEntity, call: ServiceCall) -> None:
     await _async_require_admin(entity.hass, call)
     _require_writable(entity)
+    _require_own(entity)
     await _async_account_job(
         entity.hass,
         partial(unshare_calendar, entity.calendar, call.data[ATTR_USER]),
@@ -1326,7 +1348,12 @@ async def _async_get_shares(
 async def _async_import_ics(entity: HaCaldavEntity, call: ServiceCall) -> None:
     _require_writable(entity)
     await entity.async_write(
-        partial(import_ics, entity.calendar, call.data[ATTR_ICS]),
+        partial(
+            import_ics,
+            entity.calendar,
+            call.data[ATTR_ICS],
+            entity.managed.capability.components,
+        ),
         SERVICE_IMPORT_ICS,
     )
 

@@ -318,3 +318,12 @@ async def test_only_an_administrator_lists_the_shares(hass: HomeAssistant) -> No
         )
 
     read.assert_not_called()
+
+
+def test_a_share_made_by_email_address_is_taken_back_by_it() -> None:
+    calendar = SharedCalendar("oc")
+    share_calendar(calendar, "ann@example.com", write=False)
+
+    unshare_calendar(calendar, "ann@example.com")
+
+    assert calendar.sharees == {}

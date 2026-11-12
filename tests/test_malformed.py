@@ -46,7 +46,7 @@ from custom_components.ha_caldav.capability import (
 from custom_components.ha_caldav.connection import calendar_key
 from custom_components.ha_caldav.const import DOMAIN
 from custom_components.ha_caldav.coordinator import (
-    _UNMAPPABLE,
+    UNMAPPABLE,
     HaCaldavCoordinator,
     components_of,
     get_end_date,
@@ -832,7 +832,7 @@ def test_reading_one_component_never_raises(case: Case) -> None:
         assert isinstance(sort_key(component), datetime)
         assert isinstance(is_all_day(component), bool)
         for placing in (get_end_date, is_over):
-            with suppress(*_UNMAPPABLE):
+            with suppress(*UNMAPPABLE):
                 placing(component)
         event = to_event(component, "FREQ=WEEKLY")
         assert event is None or isinstance(event.summary, str)
@@ -1961,7 +1961,7 @@ def test_no_pair_of_stored_dates_breaks_the_event_read_path(
         assert isinstance(sort_key(component), datetime)
         assert isinstance(is_all_day(component), bool)
         for placing in (get_end_date, is_over):
-            with suppress(*_UNMAPPABLE):
+            with suppress(*UNMAPPABLE):
                 placing(component)
         event = to_event(component)
         assert event is None or isinstance(event.start, date)
@@ -1974,3 +1974,22 @@ def test_no_stored_due_date_breaks_the_todo_read_path(due: date | datetime) -> N
     for component in components_of(StoredObject(ics), "vtodo"):
         item = to_todo(component)
         assert item is None or isinstance(item, TodoItem)
+
+
+async def test_a_second_rule_is_held_to_the_density_check(hass: HomeAssistant) -> None:
+    soon = f"{dt_util.utcnow() + timedelta(hours=2):%Y%m%dT%H%M%S}Z"
+    dense = StoredObject(
+        document(
+            vevent(
+                f"DTSTART:{soon}\r\nDURATION:PT1M\r\nRRULE:FREQ=DAILY\r\n"
+                "RRULE:FREQ=HOURLY;BYMINUTE=" + ",".join(map(str, range(60))),
+                uid="dense",
+            )
+        ),
+        url="https://dav.test/cal/dense.ics",
+    )
+
+    coordinator = await poll(hass, [dense, SENTINEL])
+
+    held = coordinator.halves["events"].cached
+    assert [vevent.uid.value for vevent in held] == ["sentinel"]

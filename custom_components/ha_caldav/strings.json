@@ -213,6 +213,12 @@
     "delegated_calendar": {
       "message": "{name} belongs to another account, so only its owner can delete it."
     },
+    "delegated_share": {
+      "message": "{name} belongs to another account, so only its owner can share it."
+    },
+    "invitation_copied": {
+      "message": "The event is an invitation from someone else, so it can only be moved, not copied."
+    },
     "mixed_start_and_due": {
       "message": "The start ({start}) and the due date of a to-do have to be the same kind: both a day, or both a day and time."
     },
@@ -704,7 +710,7 @@
         },
         "keep_original": {
           "name": "Keep the original",
-          "description": "Copy instead of move, leaving the event on the source calendar."
+          "description": "Copy instead of move, leaving the event on the source calendar. Nobody is told about the copy, and an invitation from someone else can only be moved."
         }
       }
     },
@@ -920,7 +926,7 @@
         },
         "keep_original": {
           "name": "Keep the original",
-          "description": "Copy instead of move, leaving the to-do on the source list."
+          "description": "Copy instead of move, leaving the to-do on the source list. Nobody is told about the copy."
         }
       }
     },

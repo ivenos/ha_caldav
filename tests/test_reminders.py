@@ -712,3 +712,22 @@ async def test_two_events_with_the_same_alarm_both_remind_when_one_is_found_late
     await _poll(hass)
 
     assert [event.data["uid"] for event in fired] == ["uid-1", "uid-2"]
+
+
+async def test_a_repeat_without_a_delay_reminds_once(
+    hass: HomeAssistant, freezer
+) -> None:
+    freezer.move_to(datetime(2026, 7, 6, 8, 0, tzinfo=UTC))
+    calendar = _calendar(
+        events=[
+            _event(
+                "DTSTART:20260706T100000Z\nDTEND:20260706T110000Z\n"
+                + _alarm("TRIGGER:-PT15M", "REPEAT:100\nDURATION:PT0S\n")
+            )
+        ]
+    )
+    fired = await _setup(hass, calendar)
+
+    await _move_to(hass, freezer, datetime(2026, 7, 6, 9, 45, tzinfo=UTC))
+
+    assert len(fired) == 1

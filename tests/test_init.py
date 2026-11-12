@@ -344,6 +344,7 @@ async def test_a_rejected_password_at_setup_asks_for_a_new_one(
     entry, _ = await _connect_with(hass, AuthorizationError(reason="Unauthorized"))
 
     assert entry.state is ConfigEntryState.SETUP_ERROR
+    assert entry.error_reason_translation_key == "invalid_auth"
     assert any(
         flow["context"]["source"] == "reauth"
         for flow in hass.config_entries.flow.async_progress()
@@ -1184,6 +1185,17 @@ async def test_a_calendar_deleted_on_the_server_leaves_the_stored_options(
     assert entry.options[CONF_CALENDAR_OPTIONS] == {}
 
 
+async def test_the_only_selected_calendar_deleted_on_the_server_selects_no_other(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    entry = await _setup_then_delete_work(
+        hass, principal, {CONF_CALENDARS: ["/remote.php/dav/Work"]}
+    )
+
+    assert entry.options[CONF_CALENDARS] == ["/remote.php/dav/Work"]
+    assert er.async_get(hass).async_get("calendar.personal") is None
+
+
 async def test_ticking_every_calendar_follows_the_server_after_one_was_deleted(
     hass: HomeAssistant, principal: Mock
 ) -> None:
@@ -1280,13 +1292,130 @@ async def test_a_delegation_missed_at_setup_keeps_its_entities(
         entry = await _setup_on_account(hass)
         assert er.async_get(hass).async_get("calendar.anna_work") is not None
 
-        listings.append((own, []))
+        listings.append((own, None))
         await hass.config_entries.async_reload(entry.entry_id)
         await hass.async_block_till_done()
         for _ in range(3):
             await _next_poll(hass)
 
     assert er.async_get(hass).async_get("calendar.anna_work") is not None
+
+
+async def test_a_delegation_missed_at_setup_comes_back_once_the_server_answers(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    own = principal.calendars.return_value
+    home = Mock(url="https://cloud.example.com/remote.php/dav/anna/")
+    home.get_properties.return_value = propfind_answer(
+        {
+            "/remote.php/dav/anna/work/": {
+                dav.DisplayName.tag: Mock(text="anna/work"),
+                dav.ResourceType.tag: (dav.Collection.tag, cdav.Calendar.tag),
+            }
+        }
+    )
+    delegation = Delegation(home, ["mailto:anna@example.com"], "anna")
+    full = ([*own, _calendar("anna/work")], [delegation])
+    listings = [full]
+    with (
+        patch("custom_components.ha_caldav.fetch_capabilities", return_value={}),
+        patch(
+            "custom_components.ha_caldav.account_calendars",
+            side_effect=lambda _client: listings[-1],
+        ),
+    ):
+        entry = await _setup_on_account(hass)
+        assert hass.states.get("calendar.anna_work").state != "unavailable"
+
+        listings.append((own, None))
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        listings.append(full)
+        for _ in range(5):
+            await _next_poll(hass)
+
+    assert hass.states.get("calendar.anna_work").state != "unavailable"
+
+
+async def test_the_entity_of_sogos_copy_survives_the_upgrade(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    personal, copied = _calendar("Personal"), _calendar("admin_personal")
+    principal.calendars.return_value = [personal, copied]
+    _home_set(principal)
+    theirs = _calendar("admin/personal")
+    home = Mock(url="https://cloud.example.com/remote.php/dav/admin/")
+    home.get_properties.return_value = propfind_answer(
+        {
+            "/remote.php/dav/admin/personal/": {
+                dav.DisplayName.tag: Mock(text="personal"),
+                dav.ResourceType.tag: (dav.Collection.tag, cdav.Calendar.tag),
+            }
+        }
+    )
+    delegation = Delegation(
+        home,
+        ["mailto:admin@example.com"],
+        "admin",
+        copies={calendar_key(copied.url): calendar_key(theirs.url)},
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x", minor_version=2
+    )
+    entry.add_to_hass(hass)
+    er.async_get(hass).async_get_or_create(
+        "calendar",
+        DOMAIN,
+        f"{entry.entry_id}-{calendar_key(copied.url)}",
+        suggested_object_id="used_in_automations",
+        config_entry=entry,
+    )
+    er.async_get(hass).async_get_or_create(
+        "calendar",
+        DOMAIN,
+        f"{entry.entry_id}-{calendar_key(theirs.url)}",
+        suggested_object_id="used_in_automations_2",
+        config_entry=entry,
+    )
+    with (
+        patch("custom_components.ha_caldav.fetch_capabilities", return_value={}),
+        patch(
+            "custom_components.ha_caldav.account_calendars",
+            return_value=([personal, theirs], [delegation]),
+        ),
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        for _ in range(3):
+            await _next_poll(hass)
+
+    registry = er.async_get(hass)
+    assert registry.async_get("calendar.used_in_automations").unique_id == (
+        f"{entry.entry_id}-{calendar_key(theirs.url)}"
+    )
+    assert registry.async_get("calendar.used_in_automations_2") is None
+
+
+async def test_the_entities_of_a_server_moved_away_from_go(
+    hass: HomeAssistant, principal: Mock
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x", minor_version=2
+    )
+    entry.add_to_hass(hass)
+    er.async_get(hass).async_get_or_create(
+        "calendar",
+        DOMAIN,
+        f"{entry.entry_id}-/jane/work",
+        suggested_object_id="old_server_work",
+        config_entry=entry,
+    )
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    for _ in range(3):
+        await _next_poll(hass)
+
+    assert er.async_get(hass).async_get("calendar.old_server_work") is None
 
 
 async def test_an_entry_from_a_later_major_version_is_not_migrated(

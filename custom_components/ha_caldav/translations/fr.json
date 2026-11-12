@@ -213,6 +213,12 @@
     "delegated_calendar": {
       "message": "{name} appartient à un autre compte, seul son propriétaire peut le supprimer."
     },
+    "delegated_share": {
+      "message": "{name} appartient à un autre compte, seul son propriétaire peut le partager."
+    },
+    "invitation_copied": {
+      "message": "L'événement est une invitation de quelqu'un d'autre, il peut seulement être déplacé, pas copié."
+    },
     "mixed_start_and_due": {
       "message": "Le début ({start}) et l'échéance d'une tâche doivent être de même nature : tous deux un jour, ou tous deux un jour avec heure."
     },
@@ -476,7 +482,7 @@
       "fields": {
         "start": {
           "name": "Début",
-          "description": "Uniquement les invitations se terminant après ce moment. Maintenant, sans indication."
+          "description": "Uniquement les invitations se terminant après ce moment. Sans indication, maintenant."
         },
         "end": {
           "name": "Fin",
@@ -704,7 +710,7 @@
         },
         "keep_original": {
           "name": "Conserver l'original",
-          "description": "Copier au lieu de déplacer, l'événement reste dans le calendrier source."
+          "description": "Copier au lieu de déplacer, l'événement reste dans le calendrier source. Personne n'est prévenu de la copie, et une invitation de quelqu'un d'autre peut seulement être déplacée."
         }
       }
     },
@@ -920,7 +926,7 @@
         },
         "keep_original": {
           "name": "Conserver l'original",
-          "description": "Copier au lieu de déplacer, la tâche reste dans la liste source."
+          "description": "Copier au lieu de déplacer, la tâche reste dans la liste source. Personne n'est prévenu de la copie."
         }
       }
     },

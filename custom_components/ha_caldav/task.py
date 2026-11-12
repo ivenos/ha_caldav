@@ -227,6 +227,8 @@ def apply_fields(
         _set_moment(vtodo, "DUE", data["due"])
     if _span(vtodo) != span:
         _check_span(vtodo)
+        if "RRULE" in vtodo and "rrule" not in data and (anchor := _anchor(vtodo)):
+            replace(vtodo, "rrule", framed_rule(vtodo["RRULE"], anchor))
     if "rrule" in data:
         _set_rule(vtodo, data["rrule"])
     undated = _span(vtodo) == (None, None)
@@ -292,6 +294,10 @@ def _written_out(value: date | datetime) -> str:
     return shown.strftime("%Y-%m-%d %H:%M")
 
 
+def _anchor(vtodo: Any) -> date | None:
+    return next((vtodo[key].dt for key in ("DTSTART", "DUE") if key in vtodo), None)
+
+
 def _set_rule(vtodo: Any, rrule: str | None) -> None:
     """Write a recurrence rule, an empty one removing it.
 
@@ -301,7 +307,7 @@ def _set_rule(vtodo: Any, rrule: str | None) -> None:
     if not rrule:
         vtodo.pop("RRULE", None)
         return
-    anchor = next((vtodo[key].dt for key in ("DTSTART", "DUE") if key in vtodo), None)
+    anchor = _anchor(vtodo)
     if anchor is None:
         raise Refused("rrule_needs_date")
     recur = framed_rule(parse_rule(rrule), anchor)

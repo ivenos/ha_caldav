@@ -213,6 +213,12 @@
     "delegated_calendar": {
       "message": "{name} appartiene a un altro account, solo il suo proprietario può eliminarlo."
     },
+    "delegated_share": {
+      "message": "{name} appartiene a un altro account, solo il suo proprietario può condividerlo."
+    },
+    "invitation_copied": {
+      "message": "L'evento è un invito di qualcun altro, quindi può solo essere spostato, non copiato."
+    },
     "mixed_start_and_due": {
       "message": "Inizio ({start}) e scadenza di un'attività devono essere dello stesso tipo: entrambi un giorno, oppure entrambi un giorno con ora."
     },
@@ -704,7 +710,7 @@
         },
         "keep_original": {
           "name": "Mantieni l'originale",
-          "description": "Copia invece di spostare, l'evento resta nel calendario di partenza."
+          "description": "Copia invece di spostare, l'evento resta nel calendario di partenza. Nessuno viene avvisato della copia, e un invito di qualcun altro si può solo spostare."
         }
       }
     },
@@ -920,7 +926,7 @@
         },
         "keep_original": {
           "name": "Mantieni l'originale",
-          "description": "Copia invece di spostare, l'attività resta nell'elenco di partenza."
+          "description": "Copia invece di spostare, l'attività resta nell'elenco di partenza. Nessuno viene avvisato della copia."
         }
       }
     },
@@ -968,7 +974,7 @@
     },
     "update_journal": {
       "name": "Aggiorna voce di diario",
-      "description": "Modifica qualsiasi proprietà di una voce di diario. Un campo lasciato vuoto viene cancellato.",
+      "description": "Modifica qualsiasi proprietà di una voce di diario. Un campo indicato vuoto viene cancellato.",
       "fields": {
         "uid": {
           "name": "UID",

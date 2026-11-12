@@ -12,11 +12,13 @@ All notable changes to this project are documented in this file, in the format o
 ### Changed
 
 - Only administrators can list who a calendar is shared with.
-- A delegated calendar can only be deleted by its owner.
+- A delegated calendar can only be deleted or shared by its owner.
 - The settings of a single to-do list or journal only offer Read-only.
 - Importing a calendar file no longer sends invitations to the people in it.
 - Changing only the reminders of an event or to-do, or the order of a to-do list, no longer notifies the attendees.
 - Moving an event you organize asks the attendees to answer again.
+- Copying an event or a to-do to another calendar no longer notifies the attendees.
+- An invitation from someone else can be moved to another calendar but no longer copied.
 - Subtasks without a manual order are listed right under their parent.
 - When another app changed only the current occurrence of a recurring to-do, the list shows that occurrence, and an edit in Home Assistant changes it.
 
@@ -40,7 +42,7 @@ All notable changes to this project are documented in this file, in the format o
 - Reopening a to-do that is listed as its own parent failed.
 - Ticking off a to-do that someone else organizes counted as a new version of it.
 - After splitting a series, moving the earlier part added a second event on the day of the split.
-- Sharing a calendar on Nextcloud by email address reported an error although it worked.
+- Sharing a calendar on Nextcloud by email address reported an error although it worked, and the share could not be taken back by that address.
 - Events could be written into a calendar that only holds journal entries.
 - Asking when other people are busy on a server without scheduling gave a message about invitations.
 - Reminders further ahead than the days ahead, such as one week before, never fired.
@@ -59,12 +61,14 @@ All notable changes to this project are documented in this file, in the format o
 - To-dos without a title did not show up.
 - Changing a series from an added date on moved the later events and undid the next changed one.
 - On SOGo, a change made in the same second as the last check stayed hidden until the next one.
-- One to-do with a date far outside the calendar made the whole to-do list unavailable.
-- A series repeating every few minutes through its rule slowed down Home Assistant instead of being left out.
+- One to-do with a date far outside the calendar made the whole to-do list unavailable, and searching the to-dos failed.
+- A series repeating every few minutes through one of its rules slowed down Home Assistant instead of being left out.
+- A series with a broken rule on the server could make Home Assistant hang.
 - A move or an import whose answer never came could leave a copy behind that blocked the next try.
 - Asking when you are busy found nothing on Radicale.
 - An empty attendee list, category or attachment in the event and journal actions wrote broken entries.
 - A calendar could be created without a name.
+- A calendar or journal entry could be created with a name of only spaces.
 - Time zones written with an event ended in 2038, so other apps could show later summer times an hour off.
 - Dragging a to-do failed halfway when another app had written a line of an item twice.
 - Dragging a to-do someone else organizes counted as a new version of it.
@@ -76,11 +80,25 @@ All notable changes to this project are documented in this file, in the format o
 - After a calendar was deleted on the server, new calendars were no longer picked up with every calendar ticked.
 - A second user on a server that does not say whose account it is was refused as already set up.
 - The calendar choice in the options did not show its explanation.
-- An invalid recurrence rule, an unreadable import or a refused password showed an untranslated message.
+- An invalid recurrence rule, an empty or unreadable import or a refused password showed an untranslated message.
 - The repair for a clash with the built-in CalDAV integration missed the same account entered under another address.
 - A change whose answer never came stayed hidden until the next check although the server had stored it.
 - On SOGo, asking when a calendar is busy reported a server error instead of saying that SOGo cannot tell.
 - Importing into a calendar that cannot hold that kind of item reported a server error.
+- After the server was down, a calendar checked more often than every 15 minutes stayed unavailable for up to an hour.
+- A reminder set to repeat without a pause fired many times at once.
+- Ticking off a repeating to-do could move it onto a day the series leaves out.
+- Giving a repeating all-day to-do a time, or taking it away, left the end of the series in a form other apps may misread.
+- Reopening a subtask again after a failed try left a parent further up ticked off.
+- Asking when people are busy with an empty list of people asked the server about an empty address.
+- Sharing with a blank user name reported a server error.
+- An email reminder without attendees was saved with no address to send it to on servers that know no email address for the account.
+- Changing the rule of a series that another app changed from two dates on showed the details of the wrong change later on.
+- Editing one occurrence of a series that another app changed from some date on moved the later occurrences by an hour after a change to or from summer time.
+- Your own calendar showed up a second time when you act for an account you shared it with.
+- When another app deleted the current occurrence of a recurring to-do, the list still showed it.
+- On servers that know no email address for the account, changing a series from some date on asked everyone to answer again.
+- Some Spanish, Italian and French descriptions of the actions were misleading.
 
 ## [1.5.1] - 2026-10-11
 

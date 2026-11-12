@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
+import inspect
 import logging
 from math import inf, isfinite
 import threading
@@ -20,6 +22,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 import homeassistant.util.dt as dt_util
+from icalendar import vRecur
 import recurring_ical_events
 
 from .capability import Capability
@@ -27,7 +30,15 @@ from .color import Collection, fetch_collections
 from .connection import calendar_key, display_name
 from .const import DOMAIN
 from .errors import rejected
-from .extras import alarm_moments, check_expandable, own_reply, read_extras, to_utc
+from .extras import (
+    alarm_moments,
+    as_datetime,
+    check_expandable,
+    own_reply,
+    read_extras,
+    shifted,
+    to_utc,
+)
 from .task import SETTLED, names_slot, parent_of
 
 try:
@@ -48,6 +59,13 @@ _MAX_AGE = timedelta(hours=1)
 _CACHE_LIMIT = 2000
 
 _REMINDER_HORIZON = timedelta(days=35)
+
+# caldav 3 expands every series of a time-range search to recheck it.
+UNFILTERED = (
+    {"post_filter": False}
+    if "post_filter" in inspect.signature(caldav.Calendar.search).parameters
+    else {}
+)
 
 # Without a zone in the query (RFC 4791 9.9) a server places dates and floating
 # times in one of its own, and UTC offsets reach 14 hours either way.
@@ -308,6 +326,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             journal=True,
             start=start_date - FLOATING_MARGIN,
             end=end_date + FLOATING_MARGIN,
+            **UNFILTERED,
         )
         entries = (master_of(item, "vjournal") for item in found)
         return [
@@ -395,7 +414,10 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         stale = (
             changed
             or epoch != self._epoch_read
-            or any(half.cached is None for half in self.halves.values())
+            or any(
+                half.cached is None or half.error is not None
+                for half in self.halves.values()
+            )
         )
         moved = self._window != (start, end)
         # A server may hand back the same token forever.
@@ -511,6 +533,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             end=reach + FLOATING_MARGIN,
             event=True,
             props=[dav.GetEtag()],
+            **UNFILTERED,
         )
         etags: dict[str, str] = {}
         rules: dict[str, str | None] = {}
@@ -586,7 +609,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         for vevent in sorted(self.halves["events"].cached or [], key=sort_key):
             try:
                 over = is_over(vevent)
-            except _UNMAPPABLE as err:
+            except UNMAPPABLE as err:
                 _LOGGER.debug("Skipping an event that cannot be placed: %s", err)
                 continue
             if over or not (self.include_all_day or not is_all_day(vevent)):
@@ -614,7 +637,7 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             try:
                 order = sort_order(master)
                 alarms = todo_reminders(vtodo, item)
-            except _UNMAPPABLE as err:
+            except UNMAPPABLE as err:
                 _LOGGER.debug("Skipping a to-do that cannot be placed: %s", err)
                 continue
             found.append((order, item.uid, parent_of(master), item))
@@ -772,20 +795,51 @@ def shown_occurrence(item: Any, master: Any) -> Any:
     Thunderbird and Evolution store a change to this occurrence only under a
     RECURRENCE-ID naming it; the current one starts at the master's DTSTART,
     or at its DUE without one. One they closed while the series goes on is an
-    occurrence done there, which the series does not wait on.
+    occurrence done there, which the series does not wait on. Where the series
+    excludes its own start, as Thunderbird deletes an occurrence, the next one
+    is the current one.
     """
     anchor = get_attr_value(master, "dtstart")
     if not isinstance(anchor, date):
         anchor = get_attr_value(master, "due")
     going_on = not _settled(master)
+    current = _next_slot(master, anchor) if going_on else None
     for component in components_of(item, "vtodo"):
         if (
             component is not master
-            and names_slot(get_attr_value(component, "recurrence_id"), anchor)
+            and names_slot(
+                get_attr_value(component, "recurrence_id"), current or anchor
+            )
             and not (going_on and _settled(component))
         ):
             return component
-    return master
+    return master if current is None else _moved_on(master, anchor, current)
+
+
+def _next_slot(master: Any, anchor: date | None) -> datetime | None:
+    """Return the first occurrence of a series that excludes its start, else None."""
+    if anchor is None or not hasattr(master, "rrule"):
+        return None
+    try:
+        check_expandable(vRecur.from_ical(master.rrule.value), anchor)
+        first = next(iter(master.getrruleset(addRDate=True)), None)
+        if first is None or first == as_datetime(anchor):
+            return None
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Showing a series from its start as it is: %s", err)
+        return None
+    return first
+
+
+def _moved_on(master: Any, anchor: date, slot: datetime) -> Any:
+    """Return a copy of the master on the occurrence given, as the list shows it."""
+    moved = deepcopy(master)
+    delta = slot.replace(tzinfo=None) - as_datetime(anchor).replace(tzinfo=None)
+    zone = anchor.tzinfo if isinstance(anchor, datetime) else None
+    for name in ("dtstart", "due"):
+        if (line := getattr(moved, name, None)) is not None:
+            line.value = shifted(line.value, delta, zone)
+    return moved
 
 
 def _settled(vtodo: Any) -> bool:
@@ -810,7 +864,7 @@ def to_todo(vtodo: Any) -> TodoItem | None:
         completed: datetime | None = None
         if isinstance(value := get_attr_value(vtodo, "completed"), datetime):
             completed = dt_util.as_local(value)
-    except _UNMAPPABLE as err:
+    except UNMAPPABLE as err:
         _LOGGER.debug("Skipping a to-do that cannot be mapped: %s", err)
         return None
     return TodoItem(
@@ -837,7 +891,7 @@ def event_reminders(vevents: list[Any]) -> list[Reminder]:
         try:
             moments = alarm_moments(vevent, vevent.dtstart.value, get_end_date(vevent))
             event = to_event(vevent) if moments else None
-        except _UNMAPPABLE as err:
+        except UNMAPPABLE as err:
             _LOGGER.debug("Skipping the alarms of an event: %s", err)
             continue
         if event is None:
@@ -867,7 +921,7 @@ def todo_reminders(vtodo: Any, item: TodoItem) -> list[Reminder]:
     try:
         start = get_attr_value(vtodo, "dtstart")
         moments = alarm_moments(vtodo, start, get_attr_value(vtodo, "due"))
-    except _UNMAPPABLE as err:
+    except UNMAPPABLE as err:
         _LOGGER.debug("Skipping the alarms of a to-do: %s", err)
         return []
     data = {
@@ -955,7 +1009,7 @@ def to_local(value: datetime | date) -> datetime | date:
 
 # ArithmeticError for the OverflowError a date near the year 9999 raises once a
 # zone offset is added to it.
-_UNMAPPABLE = (
+UNMAPPABLE = (
     HomeAssistantError,
     ArithmeticError,
     AttributeError,
@@ -992,7 +1046,7 @@ def within(component: Any, start: datetime, end: datetime) -> bool:
     try:
         first = to_utc(component.dtstart.value)
         last = to_utc(get_end_date(component))
-    except _UNMAPPABLE as err:
+    except UNMAPPABLE as err:
         _LOGGER.debug("Skipping an event that cannot be placed: %s", err)
         return False
     return first < end and (last > start or start <= first == last)
@@ -1089,9 +1143,10 @@ def occurrences(item: Any, start: datetime, end: datetime) -> list[Any]:
     if any(key in vevent for vevent in vevents for key in _RECURRING):
         try:
             for vevent in vevents:
-                rule = vevent.get("RRULE")
-                if rule is not None and "RECURRENCE-ID" not in vevent:
-                    check_expandable(_first(rule), vevent["DTSTART"].dt)
+                rules = vevent.get("RRULE")
+                if rules is not None and "RECURRENCE-ID" not in vevent:
+                    for rule in rules if isinstance(rules, list) else [rules]:
+                        check_expandable(rule, vevent["DTSTART"].dt)
             instance = item.icalendar_instance
             zones = [
                 part for part in instance.subcomponents if part.name == "VTIMEZONE"
@@ -1139,7 +1194,7 @@ def _name_own_slot(vevent: Any, ranged: list[tuple[Any, Any]]) -> None:
             if to_utc(held.value) == to_utc(rid) and to_utc(start) != to_utc(first):
                 held.value = start - (first - rid)
                 return
-        except _UNMAPPABLE as err:
+        except UNMAPPABLE as err:
             _LOGGER.debug("Leaving the id of an occurrence as it came: %s", err)
 
 
@@ -1176,7 +1231,7 @@ def to_event(vevent: Any, rrule: str | None = None) -> CalendarEvent | None:
             ),
             **_status(vevent),
         )
-    except _UNMAPPABLE as err:
+    except UNMAPPABLE as err:
         if rrule is not None:
             # Core refuses rules its own editor cannot offer, FREQ=HOURLY among
             # them; the rule only decides what the recurrence editor opens with.

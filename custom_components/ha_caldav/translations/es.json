@@ -213,6 +213,12 @@
     "delegated_calendar": {
       "message": "{name} pertenece a otra cuenta, así que solo su propietario puede eliminarlo."
     },
+    "delegated_share": {
+      "message": "{name} pertenece a otra cuenta, así que solo su propietario puede compartirlo."
+    },
+    "invitation_copied": {
+      "message": "El evento es una invitación de otra persona, así que solo se puede mover, no copiar."
+    },
     "mixed_start_and_due": {
       "message": "El inicio ({start}) y el vencimiento de una tarea deben ser del mismo tipo: los dos un día, o los dos un día con hora."
     },
@@ -704,7 +710,7 @@
         },
         "keep_original": {
           "name": "Conservar el original",
-          "description": "Copiar en vez de mover, el evento permanece en el calendario de origen."
+          "description": "Copiar en vez de mover, el evento permanece en el calendario de origen. Nadie recibe aviso de la copia, y una invitación de otra persona solo se puede mover."
         }
       }
     },
@@ -920,7 +926,7 @@
         },
         "keep_original": {
           "name": "Conservar el original",
-          "description": "Copiar en vez de mover, la tarea permanece en la lista de origen."
+          "description": "Copiar en vez de mover, la tarea permanece en la lista de origen. Nadie recibe aviso de la copia."
         }
       }
     },
@@ -968,7 +974,7 @@
     },
     "update_journal": {
       "name": "Actualizar entrada de diario",
-      "description": "Cambia cualquier subconjunto de las propiedades de una entrada de diario. Un campo vacío se borra.",
+      "description": "Cambia cualquier subconjunto de las propiedades de una entrada de diario. Un campo indicado vacío se borra.",
       "fields": {
         "uid": {
           "name": "UID",
@@ -1094,12 +1100,12 @@
       "fields": {
         "user": {
           "name": "Usuario",
-          "description": "La cuenta con la que dejar de compartir, tal como la nombra la lista de usos compartidos."
+          "description": "La cuenta con la que dejar de compartir, tal como la nombra la lista de cuentas con acceso."
         }
       }
     },
     "get_calendar_shares": {
-      "name": "Consultar usos compartidos",
+      "name": "Consultar con quién se comparte",
       "description": "Devuelve las cuentas con las que se comparte el calendario y lo que puede hacer cada una, solo administradores."
     },
     "respond_to_invitation": {

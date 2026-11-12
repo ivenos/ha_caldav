@@ -98,7 +98,12 @@ def unshare_calendar(calendar: caldav.Calendar, user: str) -> None:
     """Stop sharing a calendar with an account."""
     dialect, _ = _invite(calendar)
     href = _href(dialect, user)
-    listed = [share for share in read_shares(calendar) if _same(share["href"], href)]
+    before = read_shares(calendar)
+    listed = [share for share in before if _same(share["href"], href)]
+    if not listed and dialect == _OC and "@" in user:
+        _post(calendar, dialect, href, None)
+        if len(read_shares(calendar)) < len(before):
+            return
     if not listed:
         raise Refused("not_shared_with", user=user)
     # sabre/dav lists a principal by its path and drops it by the address it

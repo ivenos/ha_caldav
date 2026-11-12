@@ -262,6 +262,17 @@ def test_an_email_alarm_without_attendees_goes_to_the_account() -> None:
     assert "ATTENDEE:mailto:me@example.com" in _written(component)
 
 
+def test_an_email_alarm_is_not_sent_to_a_principal_url() -> None:
+    component = _component()
+
+    with pytest.raises(Refused, match="email_alarm_needs_recipient"):
+        apply_extras(
+            component,
+            {"alarms": [{"minutes_before": 60, "action": "EMAIL"}]},
+            "http://dav.example.com:5232/jane/",
+        )
+
+
 def test_an_email_alarm_with_nobody_to_send_it_to_is_refused() -> None:
     component = _component()
 

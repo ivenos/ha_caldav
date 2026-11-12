@@ -51,6 +51,7 @@ from .errors import NETWORK_ERRORS, WRITE_ERRORS, Refused, rejected
 from .extras import (
     apply_extras,
     as_datetime,
+    check_expandable,
     check_rule,
     comparable_address,
     date_values,
@@ -366,9 +367,12 @@ def _shown_of(resource: Any) -> tuple[Any, Any]:
     """Return the master of a to-do and the component the list shows for it.
 
     That is the override of the master's current occurrence where there is
-    one, as coordinator.shown_occurrence finds it.
+    one, as coordinator.shown_occurrence finds it. A series that excludes its
+    own start first moves on to the occurrence the list shows.
     """
     master = collapse_repeated(vtodo_of(resource))
+    if _start_excluded(master):
+        _roll_todo(master)
     anchor = next((master[key].dt for key in ("DTSTART", "DUE") if key in master), None)
     for component in resource.icalendar_instance.walk("VTODO"):
         held = component.get("RECURRENCE-ID")
@@ -379,6 +383,22 @@ def _shown_of(resource: Any) -> tuple[Any, Any]:
         ):
             return master, collapse_repeated(component)
     return master, master
+
+
+def _start_excluded(vtodo: Any) -> bool:
+    """Return whether an open recurring to-do's series excludes its own start."""
+    anchor_key = "DTSTART" if "DTSTART" in vtodo else "DUE"
+    if closed(vtodo) or "RRULE" not in vtodo or anchor_key not in vtodo:
+        return False
+    anchor = vtodo[anchor_key].dt
+    start = as_datetime(anchor)
+    try:
+        check_expandable(vtodo["RRULE"], anchor)
+        occurrences = _occurrences(vtodo, rule_from(vtodo["RRULE"], anchor), start)
+        occurrences.rdate(start)
+        return start not in occurrences
+    except Refused, TypeError, ValueError:
+        return False
 
 
 def _rolled(resource: Any, vtodo: Any, shown: Any) -> bool:
@@ -463,12 +483,18 @@ def _close_below(
 def _reopen(
     by_uid: dict[str, Any], uids: list[str], addresses: list[str] | None = None
 ) -> None:
-    """Reopen the closed parents above an item, up to the first open one."""
+    """Reopen the closed parents above an item, up to the first open one.
+
+    The farthest first, so a call that failed halfway still finds the rest closed.
+    """
+    pending = []
     for uid in uids:
         resource = by_uid[uid]
         vtodo, shown = _shown_of(resource)
         if not closed(shown):
-            return
+            break
+        pending.append((resource, vtodo, shown))
+    for resource, vtodo, shown in reversed(pending):
         tag = held_etag(resource, None)
         for part in _parts(vtodo, shown):
             if closed(part):
@@ -522,9 +548,7 @@ def _save_todo(todo: Any, tag: str | None, quiet: bool = False) -> None:
     put_resource(todo, tag, quiet=quiet)
 
 
-def reorder_todos(
-    calendar: caldav.Calendar, uids: list[str], addresses: list[str] | None = None
-) -> None:
+def reorder_todos(calendar: caldav.Calendar, uids: list[str]) -> None:
     """Write the given order onto the items.
 
     Core sends the whole ordering for a single drag, so the moved item is
@@ -543,13 +567,13 @@ def reorder_todos(
         and (moved := _single_move(stored, known)) is not None
         and (place := _between(known, positions, moved)) is not None
     ):
-        _write_position(by_uid[moved], place, addresses)
+        _write_position(by_uid[moved], place)
         return
     # Numbered with room between them, so the next drag has somewhere to land.
     for index, uid in enumerate(known):
         # Compared numerically: a server-written "03" is 3.
         if positions[uid] != float(index * _SORT_GAP):
-            _write_position(by_uid[uid], index * _SORT_GAP, addresses)
+            _write_position(by_uid[uid], index * _SORT_GAP)
 
 
 def _stored_order(
@@ -599,13 +623,11 @@ def _between(
     return place if low < place < high else None
 
 
-def _write_position(
-    todo: Any, position: int, addresses: list[str] | None = None
-) -> None:
+def _write_position(todo: Any, position: int) -> None:
     tag = held_etag(todo, None)
     vtodo = collapse_repeated(vtodo_of(todo))
     vtodo[SORT_ORDER_PROPERTY] = str(position)
-    stamp(vtodo, addresses, personal=True)
+    stamp(vtodo, personal=True)
     _save_todo(todo, tag, quiet=True)
 
 
@@ -692,7 +714,7 @@ def move_todo(
                 target,
                 _document(vtodos, zones, instance.get("PRODID")),
                 as_todo=True,
-                quiet=not keep_original,
+                quiet=True,
             )
     except Exception:
         for copy in copies.values():
@@ -861,22 +883,28 @@ def move_event(
     target: caldav.Calendar,
     uid: str,
     keep_original: bool,
+    addresses: list[str] | None = None,
 ) -> None:
     """Copy an event to another calendar, optionally removing the original.
 
-    Nextcloud and Radicale disagree on cross-collection COPY and MOVE.
+    Nextcloud and Radicale disagree on cross-collection COPY and MOVE. A copy
+    tells no one, and an invitation from someone else is only moved.
     """
     event = object_by_uid(source, uid)
     tag = held_etag(event, None)
     instance = ICalCalendar.from_ical(event.data)
-    if not instance.walk("VEVENT"):
+    if not (vevents := instance.walk("VEVENT")):
         raise Refused("no_event_in_object")
+    if keep_original and any(
+        organized_elsewhere(vevent, addresses) for vevent in vevents
+    ):
+        raise Refused("invitation_copied")
     # RFC 4791 gives one uid one resource, and caldav names it after the uid.
     if _already_there(target, {uid}):
         raise Refused("uid_clash", uids=uid)
-    copy = _save_new(
-        target, as_written(instance), as_todo=False, quiet=not keep_original
-    )
+    if not keep_original and _moved(event, target, tag):
+        return
+    copy = _save_new(target, as_written(instance), as_todo=False, quiet=True)
     if keep_original:
         return
     try:
@@ -889,6 +917,25 @@ def move_event(
         # SOGo moves an invitation by itself once its uid lands in another calendar.
         if not isinstance(err, NotFoundError):
             raise
+
+
+def _moved(resource: Any, target: caldav.Calendar, tag: str | None) -> bool:
+    """Move a resource by RFC 4918 9.9 MOVE; False where the server will not.
+
+    SOGo reads the DELETE of a copy and delete as a cancellation to every attendee.
+    """
+    if resource.client is not target.client:
+        return False
+    name = str(resource.url).rstrip("/").rsplit("/", 1)[-1]
+    headers = {"Destination": str(target.url.join(name)), "Overwrite": "F"}
+    if tag is not None:
+        headers["If-Match"] = tag
+    try:
+        response = resource.client.request(str(resource.url), "MOVE", "", headers)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("No MOVE between the calendars: %s", err)
+        return False
+    return response.status in (201, 204)
 
 
 def _still_there(calendar: caldav.Calendar, uid: str, todo: bool = False) -> bool:
@@ -1075,12 +1122,16 @@ def zoned_document(instance: ICalCalendar) -> ICalCalendar:
 _IMPORTED = ("VEVENT", "VTODO", "VJOURNAL")
 
 
-def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
+def import_ics(
+    calendar: caldav.Calendar, ics: str, held: frozenset[str] | None = None
+) -> list[str]:
     """Write every event, to-do and journal entry in a document to the calendar.
 
     Components sharing a uid are one resource (RFC 4791). A uid already on
     the calendar aborts the whole import. Nobody the document names is invited.
     """
+    if not ics.strip():
+        raise Refused("document_empty")
     try:
         document = ICalCalendar.from_ical(ics)
     except ValueError as err:
@@ -1110,6 +1161,10 @@ def import_ics(calendar: caldav.Calendar, ics: str) -> list[str]:
         masters = [item for item in components if "RECURRENCE-ID" not in item]
         if len(masters) > 1 or len({item.name for item in components}) > 1:
             raise Refused("duplicate_uid", uid=uid)
+    if held is not None:
+        for components in groups.values():
+            if (kind := components[0].name) not in held:
+                raise Refused(_NOT_HELD[kind], name=display_name(calendar))
     as_todo = {uid: components[0].name == "VTODO" for uid, components in groups.items()}
     if clashing := sorted(_already_there(calendar, set(as_todo))):
         raise Refused("uid_clash", uids=", ".join(clashing[:5]))
@@ -1506,13 +1561,36 @@ def _drop_dates_through(vtodo: Any, moment: datetime) -> None:
 
 
 def _occurrences(vtodo: Any, rule: Any, start: datetime) -> rruleset:
-    """Return the rule with the item's own RDATE and EXDATE values applied."""
+    """Return the rule with the item's own RDATE, EXDATE and EXRULE values applied.
+
+    An EXDATE that is a date beside a timed start excludes that whole day.
+    """
     occurrences = rruleset()
     occurrences.rrule(rule)
-    for key, add in (("RDATE", occurrences.rdate), ("EXDATE", occurrences.exdate)):
-        for value in date_values(vtodo, key):
-            add(_like(as_datetime(start_of(value)), start))
+    added = [
+        _like(as_datetime(start_of(value)), start)
+        for value in date_values(vtodo, "RDATE")
+    ]
+    for value in added:
+        occurrences.rdate(value)
+    for value in date_values(vtodo, "EXDATE"):
+        if isinstance(value, datetime):
+            occurrences.exdate(_like(value, start))
+            continue
+        day = _like(as_datetime(value), start)
+        for when in [*rule.between(day, day + timedelta(days=1), inc=True), *added]:
+            if day <= when < day + timedelta(days=1):
+                occurrences.exdate(when)
+    for exrule in _exrules(vtodo):
+        occurrences.exrule(rule_from(exrule, start))
     return occurrences
+
+
+def _exrules(vtodo: Any) -> list[Any]:
+    held = vtodo.get("EXRULE")
+    if held is None:
+        return []
+    return list(held) if isinstance(held, list) else [held]
 
 
 def _like(value: datetime, start: datetime) -> datetime:

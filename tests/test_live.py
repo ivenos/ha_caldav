@@ -636,6 +636,29 @@ def test_completing_recurring_todo_rolls_forward(calendar) -> None:
     assert item.due.astimezone(UTC) == datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
 
 
+def test_a_series_that_excludes_its_start_is_shown_and_ticked_off_from_the_next(
+    calendar,
+) -> None:
+    calendar.save_todo(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//test//EN\r\n"
+        "BEGIN:VTODO\r\nUID:rt-skipped\r\nDTSTAMP:20260101T000000Z\r\n"
+        "DUE:20260706T090000Z\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\n"
+        "EXDATE:20260706T090000Z\r\nSUMMARY:Paper\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+    shown = stored_todos(calendar)["Paper"]["due"]
+
+    update_todo(calendar, "rt-skipped", {"summary": "Paper", "status": "COMPLETED"})
+
+    item = stored_todos(calendar)["Paper"]
+    assert datetime.fromisoformat(shown).astimezone(UTC) == datetime(
+        2026, 7, 13, 9, 0, tzinfo=UTC
+    )
+    assert item["status"] == "needs_action"
+    assert datetime.fromisoformat(item["due"]).astimezone(UTC) == datetime(
+        2026, 7, 20, 9, 0, tzinfo=UTC
+    )
+
+
 def test_an_occurrence_changed_elsewhere_is_shown_renamed_and_ticked_off(
     calendar,
 ) -> None:
@@ -1379,6 +1402,49 @@ def test_the_busy_times_of_an_account_come_back_from_the_outbox(calendar) -> Non
     ]
 
 
+def test_the_busy_times_of_another_account_come_back_from_the_outbox(calendar) -> None:
+    from custom_components.ha_caldav.api import attendee_free_busy
+
+    own, _mail, other, _theirs, them = _invitee(calendar)
+    theirs = next(
+        held
+        for held in other.principal().calendars()
+        if "VEVENT" in held.get_supported_components()
+    )
+    create_event(
+        theirs,
+        {
+            "summary": "Live busy elsewhere",
+            "dtstart": datetime(2026, 7, 7, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 7, 10, 0, tzinfo=UTC),
+        },
+    )
+    [held] = [
+        item
+        for item in theirs.events()
+        if "Live busy elsewhere" in str(item.icalendar_component.get("SUMMARY"))
+    ]
+    try:
+        busy = attendee_free_busy(calendar.client, RANGE_START, RANGE_END, [them], own)
+    finally:
+        enable_sockets()
+        held.delete()
+
+    spans = [
+        {
+            key: datetime.fromisoformat(value).astimezone(UTC).isoformat()
+            for key, value in period.items()
+        }
+        for period in busy[them] or []
+    ]
+    if not spans:
+        missing("others_busy", "the server reports other accounts as free")
+    assert {
+        "start": "2026-07-07T09:00:00+00:00",
+        "end": "2026-07-07T10:00:00+00:00",
+    } in spans
+
+
 @pytest.fixture
 def journal_calendar(calendar):
     principal = calendar.client.principal()
@@ -1516,6 +1582,56 @@ def test_a_delegate_sees_the_calendars_of_the_account_it_acts_for(calendar) -> N
         members("")
 
 
+def test_the_server_tells_whom_the_account_acts_for(calendar) -> None:
+    from custom_components.ha_caldav.capability import account_calendars
+
+    assert account_calendars(calendar.client)[1] is not None
+
+
+def test_an_own_calendar_shared_with_the_account_one_acts_for_is_listed_once(
+    calendar,
+) -> None:
+    from custom_components.ha_caldav.capability import account_calendars
+    from custom_components.ha_caldav.connection import calendar_key
+    from custom_components.ha_caldav.sharing import share_calendar, unshare_calendar
+
+    other = _other_client()
+    theirs = other.principal()
+    group = str(theirs.url).rstrip("/") + "/calendar-proxy-write/"
+    member = urlparse(str(calendar.client.principal().url)).path
+
+    def members(hrefs: str) -> int:
+        body = (
+            '<d:propertyupdate xmlns:d="DAV:"><d:set><d:prop><d:group-member-set>'
+            f"{hrefs}</d:group-member-set></d:prop></d:set></d:propertyupdate>"
+        )
+        headers = {"Content-Type": "application/xml; charset=utf-8"}
+        return other.request(group, "PROPPATCH", body, headers).status
+
+    try:
+        share_calendar(calendar, OTHER, write=True)
+    except Refused:
+        missing("sharing", "server shares calendars in no dialect known here")
+    try:
+        try:
+            granted = members(f"<d:href>{member}</d:href>")
+        except Exception:  # noqa: BLE001
+            missing("delegation", "server has no delegation")
+        calendars, delegations = account_calendars(calendar.client)
+        if granted != 207 or not delegations:
+            missing("delegation", "server has no delegation")
+        home = calendar_key(theirs.calendar_home_set.url)
+        assert not [
+            display_name(item)
+            for item in calendars
+            if calendar_key(item.url).startswith(home + "/")
+            and CALENDAR_NAME in display_name(item)
+        ]
+    finally:
+        members("")
+        unshare_calendar(calendar, OTHER)
+
+
 def _invitee(calendar) -> tuple[list[str], str, object, list[str], str]:
     from custom_components.ha_caldav.capability import fetch_address_set
 
@@ -1526,6 +1642,8 @@ def _invitee(calendar) -> tuple[list[str], str, object, list[str], str]:
     them = next((a for a in theirs if a.lower().startswith("mailto:")), None)
     if mail is None or them is None:
         missing("email", "an account has no email address to invite")
+    # SOGo creates the calendar of an account on its first visit, not on delivery.
+    other.principal().calendars()
     return own, mail, other, theirs, them
 
 
@@ -1623,7 +1741,7 @@ def test_moving_an_event_asks_the_attendees_to_answer_again(calendar) -> None:
         )
         renamed = _answer_of(str(calendar.event_by_uid(uid).data), them)
         if "PARTSTAT=ACCEPTED" not in renamed:
-            missing("replies", "the server does not pass the answer to the organizer")
+            missing("replies", "the server asks again on every change by the organizer")
         update_event(
             calendar,
             uid,
@@ -1640,6 +1758,42 @@ def test_moving_an_event_asks_the_attendees_to_answer_again(calendar) -> None:
 
     assert "PARTSTAT=NEEDS-ACTION" in moved
     assert "RSVP=TRUE" in moved
+
+
+def test_moving_an_organized_event_to_another_calendar_keeps_the_attendees_copy(
+    calendar,
+) -> None:
+    from custom_components.ha_caldav.api import move_event
+
+    own, mail, other, _theirs, them = _invitee(calendar)
+    principal = calendar.client.principal()
+    target_name = f"{CALENDAR_NAME}_target"
+    for existing in principal.calendars():
+        if display_name(existing) == target_name:
+            existing.delete()
+    target = principal.make_calendar(name=target_name)
+    create_event(
+        calendar,
+        {
+            "summary": "Live moved invitation",
+            "dtstart": datetime(2026, 7, 16, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+            "attendees": [them],
+        },
+        mail,
+    )
+    uid = uid_of(calendar)
+    try:
+        if _copy_of(other, uid) is None:
+            missing("delivery", "the server delivers no invitation to the attendee")
+        move_event(calendar, target, uid, keep_original=False)
+        kept = _copy_of(other, uid)
+    finally:
+        _forget_copies(other, uid)
+        enable_sockets()
+        target.delete()
+
+    assert kept is not None
 
 
 def _raw(uid: str, summary: str = "Raw") -> str:

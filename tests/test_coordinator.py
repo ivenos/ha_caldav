@@ -18,6 +18,7 @@ import vobject
 from custom_components.ha_caldav.capability import Capability
 from custom_components.ha_caldav.const import DOMAIN
 from custom_components.ha_caldav.coordinator import (
+    UNFILTERED,
     HaCaldavCoordinator,
     calendar_unique_id,
     components_of,
@@ -634,6 +635,39 @@ async def test_an_own_write_is_read_even_when_the_sync_token_did_not_move(
     assert coordinator.data.next_event.summary == "After"
 
 
+async def test_an_own_write_is_read_once_and_later_polls_stay_quiet(
+    hass: HomeAssistant,
+) -> None:
+    calendar = Mock()
+    calendar.name = "Personal"
+    calendar.url = "https://cloud.example.com/remote.php/dav/personal"
+    calendar.search.side_effect = lambda **kw: (
+        [_upcoming("Before")] if kw.get("event") else []
+    )
+    calendar.objects_by_sync_token.return_value = SimpleNamespace(
+        sync_token="1762890000", objects=[]
+    )
+    entry = MockConfigEntry(domain=DOMAIN, unique_id="x")
+    entry.add_to_hass(hass)
+    coordinator = HaCaldavCoordinator(
+        hass,
+        entry,
+        calendar,
+        Capability(frozenset({"VEVENT"}), writable=True),
+        days=7,
+        include_all_day=True,
+        scan_interval=timedelta(minutes=15),
+    )
+    await coordinator.async_refresh()
+    coordinator.forget_etags("etags", ())
+    await coordinator.async_refresh()
+    calendar.search.reset_mock()
+
+    await coordinator.async_refresh()
+
+    calendar.search.assert_not_called()
+
+
 EVERY_HOUR = ",".join(map(str, range(24)))
 
 
@@ -656,3 +690,86 @@ def test_a_rule_denser_than_hourly_in_disguise_is_refused(rule: str) -> None:
 )
 def test_a_rule_at_most_hourly_is_not_refused(rule: str) -> None:
     check_expandable(vRecur.from_ical(rule), datetime(2026, 7, 6, 9, tzinfo=UTC))
+
+
+def _polled(hass: HomeAssistant, minutes: int) -> HaCaldavCoordinator:
+    calendar = Mock()
+    calendar.name = "Personal"
+    calendar.url = "https://cloud.example.com/remote.php/dav/personal"
+    calendar.objects_by_sync_token.return_value = SimpleNamespace(
+        sync_token="1762890000", objects=[]
+    )
+    entry = MockConfigEntry(domain=DOMAIN, unique_id="x")
+    entry.add_to_hass(hass)
+    coordinator = HaCaldavCoordinator(
+        hass,
+        entry,
+        calendar,
+        Capability(frozenset({"VEVENT", "VTODO"}), writable=True),
+        days=7,
+        include_all_day=True,
+        scan_interval=timedelta(minutes=minutes),
+    )
+    _answer(coordinator, up=True)
+    return coordinator
+
+
+def _answer(coordinator: HaCaldavCoordinator, up: bool) -> None:
+    calendar = coordinator.calendar
+    if up:
+        calendar.search.side_effect = lambda **kw: (
+            [_upcoming("Dentist")] if kw.get("event") else []
+        )
+        calendar.objects_by_sync_token.side_effect = None
+    else:
+        calendar.search.side_effect = requests.ConnectionError("down")
+        calendar.objects_by_sync_token.side_effect = requests.ConnectionError("down")
+
+
+async def test_a_calendar_back_from_an_outage_is_available_at_the_next_poll(
+    hass: HomeAssistant, freezer
+) -> None:
+    coordinator = _polled(hass, minutes=1)
+    await coordinator.async_refresh()
+    _answer(coordinator, up=False)
+    for _ in range(5):
+        freezer.tick(timedelta(minutes=1))
+        await coordinator.async_refresh()
+    assert not coordinator.last_update_success
+
+    _answer(coordinator, up=True)
+    freezer.tick(timedelta(minutes=1))
+    await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    assert not any(half.dead for half in coordinator.halves.values())
+
+
+async def test_single_failures_between_good_polls_do_not_add_up(
+    hass: HomeAssistant, freezer
+) -> None:
+    coordinator = _polled(hass, minutes=5)
+    await coordinator.async_refresh()
+
+    for up in [False, True] * 4:
+        _answer(coordinator, up)
+        freezer.tick(timedelta(minutes=5))
+        await coordinator.async_refresh()
+
+    assert not coordinator.halves["events"].dead
+
+
+async def test_a_window_is_read_without_caldavs_own_expansion(
+    hass: HomeAssistant,
+) -> None:
+    coordinator = _polled(hass, minutes=15)
+
+    await coordinator.async_refresh()
+
+    windowed = [
+        call.kwargs
+        for call in coordinator.calendar.search.call_args_list
+        if "start" in call.kwargs
+    ]
+    assert windowed
+    assert all(kwargs.items() >= UNFILTERED.items() for kwargs in windowed)

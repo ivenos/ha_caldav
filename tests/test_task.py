@@ -340,3 +340,11 @@ def test_a_stored_cycle_is_walked_once() -> None:
 
 def test_a_parent_that_is_not_on_the_list_is_no_ancestor() -> None:
     assert Tree({"a": "gone"}).ancestors("a") == []
+
+
+def test_completing_a_completed_item_again_keeps_when_it_was_done() -> None:
+    vtodo = _written("STATUS:COMPLETED", "COMPLETED:20260701T080000Z")
+
+    set_status(vtodo, "COMPLETED")
+
+    assert vtodo["COMPLETED"].dt == datetime(2026, 7, 1, 8, 0, tzinfo=UTC)

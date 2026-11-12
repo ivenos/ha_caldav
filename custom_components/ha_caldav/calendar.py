@@ -35,7 +35,6 @@ from .recurrence import delete_event, update_event
 # one taken from the server.
 COLOR_STATE = f"{DOMAIN}.private"
 
-# The lock in HaCaldavEntity.async_write serializes the writes to a collection.
 PARALLEL_UPDATES = 0
 
 # The frontend writes a timed UNTIL as UTC digits without the Z.
@@ -60,7 +59,6 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
     """A CalDAV calendar with full create, update and delete support."""
 
     _half = "events"
-    # Templatable, but not worth keeping for the whole recorder retention.
     _unrecorded_attributes = frozenset(EVENT_ATTRIBUTES)
 
     def __init__(
@@ -113,7 +111,6 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         if entry.options.get(CALENDAR_DOMAIN, {}).get("color") == self._written_color:
             return
         self._picked = True
-        # Recorded now; a restart before the next poll would lose it.
         state = entry.options.get(COLOR_STATE)
         if state is not None and not state.get("override"):
             er.async_get(self.hass).async_update_entity_options(
@@ -135,7 +132,7 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         current = entry.options.get(CALENDAR_DOMAIN, {}).get("color")
         server = self._server_color()
         if state is None:
-            # Registered before colors were tracked: what shows is the user's pick.
+            # Registered by a version that did not track colors yet.
             override = current is not None
         else:
             override = state.get("override") or current != state.get("color")
@@ -173,8 +170,6 @@ class HaCaldavCalendarEntity(HaCaldavEntity, CalendarEntity):
         if (entry := self.registry_entry) is None:
             return
         current = entry.options.get(CALENDAR_DOMAIN, {}).get("color")
-        # Re-baselined on the color shown now, or the watcher reads the user's
-        # earlier pick as a fresh one.
         self._written_color = current
         if entry.options.get(COLOR_STATE) is not None:
             er.async_get(self.hass).async_update_entity_options(

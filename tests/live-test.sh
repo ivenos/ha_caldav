@@ -77,7 +77,7 @@ case "$server" in
         php occ user:setting "$account" settings email "$account@example.com" >/dev/null
     done
     url="http://localhost:8080/remote.php/dav"
-    expect="scheduling,email,inbox,replies,busy,journal,sharing,delegation"
+    expect="scheduling,email,inbox,delivery,replies,busy,others_busy,journal,sharing,delegation"
     ;;
 
   radicale)
@@ -253,7 +253,7 @@ EOF
       exit 1
     }
     url="http://localhost:8084/SOGo/dav/"
-    expect="scheduling,email,delegation"
+    expect="scheduling,email,delivery,delegation"
     ;;
 
   *)

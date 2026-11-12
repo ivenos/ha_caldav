@@ -12,6 +12,7 @@ import voluptuous as vol
 
 from custom_components.ha_caldav.capability import Capability
 from custom_components.ha_caldav.const import CONF_READ_ONLY, DOMAIN
+from custom_components.ha_caldav.coordinator import master_of, shown_occurrence, to_todo
 
 ENTRY_DATA = {
     CONF_URL: "https://cloud.example.com/remote.php/dav",
@@ -647,7 +648,7 @@ async def test_a_list_that_holds_no_events_takes_an_import_and_a_color(
             blocking=True,
         )
 
-    assert importer.call_args.args == (tasks, ICS)
+    assert importer.call_args.args[:2] == (tasks, ICS)
     assert setter.call_args.args == (tasks, "#00679e")
     refresh.assert_called_once()
 
@@ -741,3 +742,40 @@ async def test_export_on_the_todo_list_of_a_calendar_with_events_answers_there(
         )
 
     assert list(result) == ["todo.personal"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "DTSTART:00010101T010000Z",
+        "CREATED:99991231T235959",
+        "CREATED;TZID=America/Los_Angeles:99991231T235959",
+    ],
+)
+async def test_one_unplaceable_todo_does_not_cost_the_search_its_answer(
+    hass: HomeAssistant, line: str
+) -> None:
+    await _setup(
+        hass,
+        [_todo_list("personal", _item("bad", "Old", line), _item("good", "Buy milk"))],
+    )
+
+    found = await _search(hass)
+
+    assert [todo["summary"] for todo in found] == ["Buy milk"]
+
+
+def test_a_series_that_excludes_its_start_is_listed_on_its_next_occurrence() -> None:
+    item = _item(
+        "t1",
+        "Bins",
+        "DUE;VALUE=DATE:20261110",
+        "RRULE:FREQ=WEEKLY",
+        "EXDATE;VALUE=DATE:20261110",
+    )
+    master = master_of(item, "vtodo")
+
+    shown = to_todo(shown_occurrence(item, master))
+
+    assert shown.due == date(2026, 11, 17)
+    assert master.due.value == date(2026, 11, 10)

@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from conftest import written_through
@@ -872,3 +873,136 @@ def test_an_occurrence_completed_elsewhere_does_not_hold_up_the_series() -> None
     update_todo(todos, "paper", {"parent_uid": "bins"}, as_shown=False)
 
     assert todos.statuses()["paper"] == "NEEDS-ACTION"
+
+
+def _rolled(calendar: FakeTodoCalendar, due: date | datetime | None) -> Any:
+    update_todo(
+        calendar, "t1", {"summary": "Water plants", "status": "COMPLETED", "due": due}
+    )
+    return calendar.todo.stored()
+
+
+def test_a_date_exdate_beside_a_timed_start_skips_that_day() -> None:
+    berlin = ZoneInfo("Europe/Berlin")
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DTSTART;TZID=Europe/Berlin:20261110T090000\r\n"
+            "DUE;TZID=Europe/Berlin:20261110T100000\r\n"
+            "RRULE:FREQ=WEEKLY\r\n"
+            "EXDATE;VALUE=DATE:20261117"
+        )
+    )
+
+    vtodo = _rolled(calendar, datetime(2026, 11, 10, 10, 0, tzinfo=berlin))
+
+    assert vtodo["DTSTART"].dt == datetime(2026, 11, 24, 9, 0, tzinfo=berlin)
+
+
+def test_an_exrule_is_skipped_when_rolling() -> None:
+    berlin = ZoneInfo("Europe/Berlin")
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DTSTART;TZID=Europe/Berlin:20261110T090000\r\n"
+            "DUE;TZID=Europe/Berlin:20261110T100000\r\n"
+            "RRULE:FREQ=WEEKLY\r\n"
+            "EXRULE:FREQ=MONTHLY;BYMONTHDAY=17"
+        )
+    )
+
+    vtodo = _rolled(calendar, datetime(2026, 11, 10, 10, 0, tzinfo=berlin))
+
+    assert vtodo["DTSTART"].dt == datetime(2026, 11, 24, 9, 0, tzinfo=berlin)
+
+
+def test_a_date_exdate_on_an_all_day_series_skips_that_day() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DUE;VALUE=DATE:20261110\r\nRRULE:FREQ=WEEKLY\r\nEXDATE;VALUE=DATE:20261117"
+        )
+    )
+
+    assert _rolled(calendar, date(2026, 11, 10))["DUE"].dt == date(2026, 11, 24)
+
+
+def test_a_utc_exdate_beside_a_zoned_start_skips_that_occurrence() -> None:
+    berlin = ZoneInfo("Europe/Berlin")
+    calendar = FakeTodoCalendar(
+        _vtodo(
+            "DTSTART;TZID=Europe/Berlin:20261110T090000\r\n"
+            "RRULE:FREQ=WEEKLY\r\n"
+            "EXDATE:20261117T080000Z"
+        )
+    )
+
+    vtodo = _rolled(calendar, None)
+
+    assert vtodo["DTSTART"].dt == datetime(2026, 11, 24, 9, 0, tzinfo=berlin)
+
+
+def test_an_all_day_series_given_a_time_keeps_its_until_in_step() -> None:
+    berlin = ZoneInfo("Europe/Berlin")
+    calendar = FakeTodoCalendar(
+        _vtodo("DUE;VALUE=DATE:20261110\r\nRRULE:FREQ=WEEKLY;UNTIL=20261231")
+    )
+
+    update_todo(
+        calendar,
+        "t1",
+        {"summary": "Water plants", "due": datetime(2026, 11, 10, 9, 0, tzinfo=berlin)},
+    )
+
+    assert isinstance(calendar.todo.stored()["RRULE"]["UNTIL"][0], datetime)
+
+
+def test_a_timed_series_made_all_day_keeps_its_until_in_step() -> None:
+    calendar = FakeTodoCalendar(
+        _vtodo("DUE:20261110T080000Z\r\nRRULE:FREQ=WEEKLY;UNTIL=20261231T080000Z")
+    )
+
+    update_todo(calendar, "t1", {"summary": "Water plants", "due": date(2026, 11, 10)})
+
+    assert not isinstance(calendar.todo.stored()["RRULE"]["UNTIL"][0], datetime)
+
+
+def _excluded_start(*lines: str) -> FakeTodoCalendar:
+    return FakeTodoCalendar(
+        _vtodo(
+            "DTSTART;TZID=Europe/Berlin:20261110T090000\r\n"
+            "DUE;TZID=Europe/Berlin:20261110T100000\r\n"
+            "RRULE:FREQ=WEEKLY;COUNT=4\r\n"
+            "EXDATE;TZID=Europe/Berlin:20261110T090000" + "".join(lines)
+        )
+    )
+
+
+def test_ticking_off_a_series_that_excludes_its_start_skips_what_the_list_showed() -> (
+    None
+):
+    berlin = ZoneInfo("Europe/Berlin")
+    calendar = _excluded_start()
+
+    vtodo = _rolled(calendar, datetime(2026, 11, 17, 10, 0, tzinfo=berlin))
+
+    assert vtodo["DTSTART"].dt == datetime(2026, 11, 24, 9, 0, tzinfo=berlin)
+    assert vtodo["RRULE"]["COUNT"] == [2]
+
+
+def test_an_edit_of_a_series_that_excludes_its_start_lands_where_the_list_showed() -> (
+    None
+):
+    berlin = ZoneInfo("Europe/Berlin")
+    calendar = _excluded_start()
+
+    update_todo(
+        calendar,
+        "t1",
+        {
+            "summary": "Water the plants",
+            "due": datetime(2026, 11, 17, 10, 0, tzinfo=berlin),
+        },
+    )
+
+    vtodo = calendar.todo.stored()
+    assert vtodo["DTSTART"].dt == datetime(2026, 11, 17, 9, 0, tzinfo=berlin)
+    assert vtodo["DUE"].dt == datetime(2026, 11, 17, 10, 0, tzinfo=berlin)
+    assert str(vtodo["SUMMARY"]) == "Water the plants"

@@ -28,6 +28,7 @@ from custom_components.ha_caldav.const import (
     CONF_READ_ONLY,
     DOMAIN,
 )
+from custom_components.ha_caldav.coordinator import UNFILTERED
 
 ENTRY_DATA = {
     CONF_URL: "https://cloud.example.com/remote.php/dav",
@@ -107,6 +108,7 @@ async def test_search_returns_what_the_server_matched(hass: HomeAssistant) -> No
     assert [event["summary"] for event in events] == ["Dentist"]
     assert calendar.search.call_args.kwargs["summary"] == "dent"
     assert calendar.search.call_args.kwargs["event"] is True
+    assert "post_filter" not in calendar.search.call_args.kwargs
 
 
 async def test_search_can_target_another_field(hass: HomeAssistant) -> None:
@@ -537,6 +539,23 @@ async def test_a_new_calendar_needs_a_name(hass: HomeAssistant) -> None:
             DOMAIN,
             "create_calendar",
             {"config_entry_id": entry.entry_id, "name": ""},
+            blocking=True,
+        )
+
+    create.assert_not_called()
+
+
+async def test_a_name_of_only_spaces_is_no_name(hass: HomeAssistant) -> None:
+    entry = await _setup(hass)
+
+    with (
+        patch("custom_components.ha_caldav.services.create_calendar") as create,
+        pytest.raises(vol.Invalid),
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "create_calendar",
+            {"config_entry_id": entry.entry_id, "name": "   "},
             blocking=True,
         )
 
@@ -2251,7 +2270,8 @@ async def test_a_search_without_a_text_returns_every_event_of_the_window(
     )
 
     assert len(result["calendar.personal"]["events"]) == 1
-    assert set(calendar.search.call_args.kwargs) == {"event", "start", "end"}
+    searched = set(calendar.search.call_args.kwargs)
+    assert searched == {"event", "start", "end", *UNFILTERED}
 
 
 async def test_a_time_a_template_rendered_with_an_offset_lands_in_the_local_zone(
@@ -2478,7 +2498,7 @@ async def test_the_open_invitations_are_the_events_nobody_answered_for_us(
     [invitation] = result["calendar.personal"]["invitations"]
     assert invitation["uid"] == "uid-1"
     assert invitation["organizer"] == "boss@example.com"
-    assert set(calendar.search.call_args.kwargs) == {"event", "start"}
+    assert set(calendar.search.call_args.kwargs) == {"event", "start", *UNFILTERED}
 
 
 async def test_an_invitation_without_a_reply_status_counts_as_open(
@@ -2698,3 +2718,67 @@ async def test_free_busy_of_others_needs_a_scheduling_server(
         )
 
     assert refusal.value.translation_key == "no_free_busy"
+
+
+async def test_a_blank_sharee_is_refused_before_the_server_is_asked(
+    hass: HomeAssistant,
+) -> None:
+    await _setup(hass)
+
+    with (
+        patch("custom_components.ha_caldav.services.share_calendar") as share,
+        pytest.raises(vol.Invalid),
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "share_calendar",
+            {"entity_id": "calendar.personal", "user": "  "},
+            blocking=True,
+        )
+
+    share.assert_not_called()
+
+
+async def test_blank_attendees_ask_about_nobody_else(hass: HomeAssistant) -> None:
+    calendar = _calendar("Personal")
+    await _setup(hass, [calendar])
+    calendar.freebusy_request.return_value.icalendar_instance.walk.return_value = []
+
+    with patch("custom_components.ha_caldav.services.attendee_free_busy") as asked:
+        result = await hass.services.async_call(
+            DOMAIN,
+            "get_free_busy",
+            {
+                "entity_id": "calendar.personal",
+                "start": "2026-07-06T00:00:00",
+                "end": "2026-07-07T00:00:00",
+                "attendees": "",
+            },
+            blocking=True,
+            return_response=True,
+        )
+
+    asked.assert_not_called()
+    assert "attendees" not in result["calendar.personal"]
+
+
+@pytest.mark.parametrize("action", ["share_calendar", "unshare_calendar"])
+async def test_a_delegated_calendar_is_shared_only_by_its_owner(
+    hass: HomeAssistant, action: str
+) -> None:
+    entry = await _setup(hass)
+    _managed(entry, "Personal").addresses = ["mailto:boss@example.com"]
+
+    with (
+        patch(f"custom_components.ha_caldav.services.{action}") as written,
+        pytest.raises(ServiceValidationError) as refusal,
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            action,
+            {"entity_id": "calendar.personal", "user": "ann"},
+            blocking=True,
+        )
+
+    assert refusal.value.translation_key == "delegated_share"
+    written.assert_not_called()

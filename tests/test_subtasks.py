@@ -192,7 +192,7 @@ def test_reopening_a_subtask_reopens_the_closed_parents_above_it() -> None:
 
     update_todo(todos, "oat", {"summary": "oat", "status": "NEEDS-ACTION"})
 
-    assert todos.written() == ["milk", "shop", "oat"]
+    assert todos.written() == ["shop", "milk", "oat"]
     assert set(todos.statuses().values()) == {"NEEDS-ACTION"}
     assert "COMPLETED" not in todos.held()["shop"]
 
@@ -402,6 +402,24 @@ def test_a_move_takes_the_subtasks_along_and_leaves_the_parent_behind() -> None:
     assert parent_uid(moved["milk"]) == "shop"
 
 
+def test_a_move_tells_no_one() -> None:
+    source, target = _two_lists(_task("shop"), _under("milk", "shop"))
+
+    move_todo(source, target, "shop", keep_original=False)
+
+    headers = [*source.client.put_headers, *source.client.delete_headers]
+    assert {item.get("Schedule-Reply") for item in headers} == {"F"}
+
+
+def test_a_copy_tells_no_one() -> None:
+    source, target = _two_lists(_task("shop"), _under("milk", "shop"))
+
+    move_todo(source, target, "shop", keep_original=True)
+
+    headers = source.client.put_headers
+    assert {item.get("Schedule-Reply") for item in headers} == {"F"}
+
+
 def test_a_copy_leaves_the_originals_where_they_are() -> None:
     source, target = _two_lists(_task("shop"), _under("milk", "shop"))
 
@@ -457,3 +475,20 @@ def test_reopening_an_item_listed_as_its_own_parent_works() -> None:
     update_todo(todos, "s", {"summary": "s", "status": "NEEDS-ACTION"})
 
     assert todos.statuses() == {"s": "NEEDS-ACTION"}
+
+
+def test_reopening_a_subtask_again_after_a_failure_reopens_every_parent() -> None:
+    done = ("STATUS:COMPLETED", "COMPLETED:20260101T120000Z", "PERCENT-COMPLETE:100")
+    todos = TodoList(
+        _under("shop", "trip", *done),
+        _task("trip", *done),
+        _under("milk", "shop", *done),
+    )
+    todos.client.fail_from = 1
+
+    with pytest.raises(PutError):
+        update_todo(todos, "milk", {"summary": "milk", "status": "NEEDS-ACTION"})
+    todos.client.fail_from = None
+    update_todo(todos, "milk", {"summary": "milk", "status": "NEEDS-ACTION"})
+
+    assert todos.statuses() == dict.fromkeys(("shop", "trip", "milk"), "NEEDS-ACTION")

@@ -371,7 +371,7 @@ def alarm_moments(
             first = to_utc(trigger)
         gap = getattr(getattr(valarm, "duration", None), "value", None)
         repeats = 0
-        if isinstance(gap, timedelta):
+        if isinstance(gap, timedelta) and gap > timedelta(0):
             with suppress(TypeError, ValueError):
                 repeats = int(valarm.repeat.value)
         for count in range(min(max(repeats, 0), _MAX_REPEATS) + 1):
@@ -660,8 +660,13 @@ def _describe_alarm(
     if spec.get("summary") or "SUMMARY" not in valarm:
         summary = spec.get("summary") or str(component.get("SUMMARY", "")) or "Reminder"
         replace(valarm, "summary", summary)
+    mailbox = (
+        own_address
+        if own_address and own_address.lower().startswith("mailto:")
+        else None
+    )
     recipients = spec.get("attendees") or (
-        [] if "ATTENDEE" in valarm else [own_address] if own_address else []
+        [] if "ATTENDEE" in valarm else [mailbox] if mailbox else []
     )
     if recipients:
         valarm.pop("ATTENDEE", None)

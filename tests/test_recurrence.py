@@ -9,6 +9,7 @@ from conftest import written_through
 from homeassistant.util import dt as dt_util
 from icalendar import Calendar as ICalendar
 import pytest
+import recurring_ical_events
 
 from custom_components.ha_caldav.errors import Refused
 from custom_components.ha_caldav.recurrence import (
@@ -4512,6 +4513,7 @@ def test_a_split_off_series_asks_the_attendees_again_but_not_its_organizer() -> 
         {"summary": "Planning, new room"},
         recurrence_id=THIRD_OCCURRENCE,
         this_and_future=True,
+        addresses=ME,
     )
 
     tail = calendar.created[0].stored()
@@ -4768,6 +4770,34 @@ def test_an_alarm_alone_is_no_new_version_and_announced_to_no_one(
     assert calendar.event.save_kwargs["headers"]["Schedule-Reply"] == "F"
 
 
+def test_an_alarm_alone_from_a_changed_first_occurrence_is_no_new_version() -> None:
+    organized = "SEQUENCE:4\nORGANIZER:mailto:me@example.com\n"
+    changed_first = (
+        "BEGIN:VEVENT\nUID:timed-1\nDTSTAMP:20260101T000000Z\n"
+        f"RECURRENCE-ID:20260706T090000Z\n{organized}"
+        "DTSTART:20260706T110000Z\nDTEND:20260706T120000Z\n"
+        "SUMMARY:Standup moved\nEND:VEVENT\nEND:VCALENDAR\n"
+    )
+    calendar = FakeCalendar(
+        TIMED_SERIES.replace(
+            "SUMMARY:Standup\n", f"SUMMARY:Standup\n{organized}"
+        ).replace("END:VCALENDAR\n", changed_first)
+    )
+
+    update_event(
+        calendar,
+        "timed-1",
+        {"alarms": [15]},
+        recurrence_id=FIRST_OCCURRENCE,
+        this_and_future=True,
+        addresses=ME,
+    )
+
+    [changed] = _overrides(calendar.event.stored())
+    assert "BEGIN:VALARM" in changed.to_ical().decode()
+    assert int(changed["SEQUENCE"]) == 4
+
+
 def _answers(component) -> dict[str, tuple[str, str]]:
     return {
         str(line): (str(line.params.get("PARTSTAT", "")), str(line.params.get("RSVP")))
@@ -4904,3 +4934,329 @@ def test_an_attendee_splitting_their_own_copy_keeps_every_answer() -> None:
             "ACCEPTED",
             "DECLINED",
         }
+
+
+def test_a_series_kept_at_its_length_written_as_a_duration_keeps_the_answers() -> None:
+    calendar = FakeCalendar(
+        ORGANIZED_SERIES.replace("DTEND:20260706T100000Z", "DURATION:PT1H", 1)
+    )
+
+    update_event(
+        calendar,
+        "invite-1",
+        {
+            "summary": "Planning, new room",
+            "dtstart": datetime(2026, 7, 6, 9, 0, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 6, 10, 0, tzinfo=UTC),
+        },
+        addresses=ME,
+    )
+
+    assert _answers(_master(calendar.event.stored()))["mailto:bob@example.com"] == (
+        "ACCEPTED",
+        "None",
+    )
+
+
+def _expanded(ics: str, start: datetime, end: datetime) -> list:
+    found = recurring_ical_events.of(ICalendar.from_ical(ics)).between(start, end)
+    return sorted(
+        (item["DTSTART"].dt.astimezone(UTC), str(item["SUMMARY"])) for item in found
+    )
+
+
+TWO_RANGED = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//EN
+BEGIN:VEVENT
+UID:r2
+DTSTAMP:20260101T000000Z
+DTSTART:20260105T090000Z
+DTEND:20260105T100000Z
+RRULE:FREQ=DAILY;COUNT=21
+SUMMARY:Series
+END:VEVENT
+BEGIN:VEVENT
+UID:r2
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID;RANGE=THISANDFUTURE:20260106T090000Z
+DTSTART:20260106T120000Z
+DTEND:20260106T130000Z
+SUMMARY:First
+END:VEVENT
+BEGIN:VEVENT
+UID:r2
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID;RANGE=THISANDFUTURE:20260108T090000Z
+DTSTART:20260108T070000Z
+DTEND:20260108T080000Z
+SUMMARY:Second
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+STANDUP_SERIES = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//EN
+BEGIN:VEVENT
+UID:inv
+DTSTAMP:20260101T000000Z
+DTSTART:20260105T090000Z
+DTEND:20260105T100000Z
+RRULE:FREQ=DAILY;COUNT=5
+SUMMARY:Standup
+SEQUENCE:2
+ORGANIZER:mailto:me@example.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:bob@example.com
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+ADDED_THEN_CHANGED = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//EN
+BEGIN:VEVENT
+UID:ad
+DTSTAMP:20260101T000000Z
+DTSTART:20260706T090000Z
+DTEND:20260706T100000Z
+RRULE:FREQ=WEEKLY;COUNT=4
+RDATE:20260709T090000Z
+SUMMARY:Standup
+LOCATION:Room 1
+END:VEVENT
+BEGIN:VEVENT
+UID:ad
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID:20260713T090000Z
+DTSTART:20260713T110000Z
+DTEND:20260713T120000Z
+SUMMARY:Demo day
+DESCRIPTION:Bring the laptop
+LOCATION:Hall B
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+NO_END = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//EN
+BEGIN:VEVENT
+UID:ne
+DTSTAMP:20260101T000000Z
+DTSTART;VALUE=DATE:20260706
+SUMMARY:Offsite
+SEQUENCE:1
+ORGANIZER:mailto:me@example.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:bob@example.com
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+RANGED_BEFORE_DST = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//EN
+BEGIN:VEVENT
+UID:dst
+DTSTAMP:20260101T000000Z
+DTSTART;TZID=America/New_York:20260305T003000
+DTEND;TZID=America/New_York:20260305T010000
+RRULE:FREQ=DAILY;COUNT=8
+SUMMARY:Series
+END:VEVENT
+BEGIN:VEVENT
+UID:dst
+DTSTAMP:20260101T000000Z
+RECURRENCE-ID;TZID=America/New_York;RANGE=THISANDFUTURE:20260307T003000
+DTSTART;TZID=America/New_York:20260307T033000
+DTEND;TZID=America/New_York:20260307T040000
+SUMMARY:Later
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def test_a_new_rule_keeps_the_later_of_two_ranged_exceptions_in_charge() -> None:
+    calendar = FakeCalendar(TWO_RANGED)
+
+    update_event(
+        calendar,
+        "r2",
+        {
+            "summary": "Series",
+            "dtstart": datetime(2026, 1, 5, 9, tzinfo=UTC),
+            "dtend": datetime(2026, 1, 5, 10, tzinfo=UTC),
+            "rrule": "FREQ=WEEKLY;BYDAY=MO;COUNT=3",
+        },
+    )
+
+    shown = _expanded(
+        calendar.event.data,
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 2, 1, tzinfo=UTC),
+    )
+    assert shown == [
+        (datetime(2026, 1, 5, 9, tzinfo=UTC), "Series"),
+        (datetime(2026, 1, 12, 7, tzinfo=UTC), "Second"),
+        (datetime(2026, 1, 19, 7, tzinfo=UTC), "Second"),
+    ]
+
+
+def test_a_reminder_only_change_from_an_occurrence_on_asks_no_one_again() -> None:
+    calendar = FakeCalendar(STANDUP_SERIES)
+
+    update_event(
+        calendar,
+        "inv",
+        {"alarms": [15]},
+        recurrence_id="2026-01-07T09:00:00+00:00",
+        this_and_future=True,
+        addresses=["mailto:me@example.com"],
+    )
+
+    tails = [ICalendar.from_ical(created.data) for created in calendar.created]
+    bob = [
+        attendee
+        for tail in tails
+        for vevent in tail.walk("VEVENT")
+        for attendee in vevent["ATTENDEE"]
+        if "bob" in str(attendee)
+    ]
+    head = ICalendar.from_ical(calendar.event.data).walk("VEVENT")[0]
+    assert [str(attendee.params["PARTSTAT"]) for attendee in bob] == ["ACCEPTED"]
+    assert int(head["SEQUENCE"]) == 2
+    assert calendar.event.save_kwargs["headers"].get("Schedule-Reply") == "F"
+
+
+def test_a_split_at_an_added_date_leaves_the_next_changed_occurrence_its_own() -> None:
+    calendar = FakeCalendar(ADDED_THEN_CHANGED)
+
+    update_event(
+        calendar,
+        "ad",
+        {
+            "summary": "Sync",
+            "dtstart": datetime(2026, 7, 9, 9, tzinfo=UTC),
+            "dtend": datetime(2026, 7, 9, 10, tzinfo=UTC),
+            "description": None,
+            "location": "Room 1",
+            "rrule": "FREQ=WEEKLY;COUNT=4",
+        },
+        recurrence_id="2026-07-09T09:00:00+00:00",
+        this_and_future=True,
+    )
+
+    shown = {}
+    for data in [calendar.event.data, *(created.data for created in calendar.created)]:
+        for item in recurring_ical_events.of(ICalendar.from_ical(data)).between(
+            datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 8, 1, tzinfo=UTC)
+        ):
+            shown[item["DTSTART"].dt] = tuple(
+                str(item.get(key)) for key in ("SUMMARY", "DESCRIPTION", "LOCATION")
+            )
+    assert shown[datetime(2026, 7, 9, 9, tzinfo=UTC)][0] == "Sync"
+    assert shown[datetime(2026, 7, 20, 9, tzinfo=UTC)][0] == "Sync"
+    assert shown[datetime(2026, 7, 13, 11, tzinfo=UTC)] == (
+        "Demo day",
+        "Bring the laptop",
+        "Hall B",
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "dtstart", "dtend"),
+    [
+        ("DTSTART;VALUE=DATE:20260706", date(2026, 7, 6), date(2026, 7, 7)),
+        (
+            "DTSTART:20260706T090000Z",
+            datetime(2026, 7, 6, 9, tzinfo=UTC),
+            datetime(2026, 7, 6, 9, tzinfo=UTC),
+        ),
+    ],
+    ids=["all_day", "timed"],
+)
+def test_renaming_an_event_without_an_end_asks_no_one_again(
+    start: str, dtstart: date, dtend: date
+) -> None:
+    calendar = FakeCalendar(NO_END.replace("DTSTART;VALUE=DATE:20260706", start))
+
+    update_event(
+        calendar,
+        "ne",
+        {
+            "summary": "Offsite, renamed",
+            "dtstart": dtstart,
+            "dtend": dtend,
+            "description": None,
+            "location": None,
+        },
+        addresses=["mailto:me@example.com"],
+    )
+
+    stored = ICalendar.from_ical(calendar.event.data).walk("VEVENT")[0]
+    replies = [str(attendee.params["PARTSTAT"]) for attendee in stored["ATTENDEE"]]
+    assert replies == ["ACCEPTED", "ACCEPTED"]
+
+
+def test_an_edit_inside_a_ranged_exception_keeps_the_later_ones_over_dst() -> None:
+    calendar = FakeCalendar(RANGED_BEFORE_DST)
+    window = datetime(2026, 3, 1, tzinfo=UTC), datetime(2026, 4, 1, tzinfo=UTC)
+    edited = datetime(2026, 3, 7, 8, 30, tzinfo=UTC)
+    before = _expanded(RANGED_BEFORE_DST, *window)
+
+    update_event(
+        calendar,
+        "dst",
+        {
+            "summary": "Once",
+            "dtstart": edited,
+            "dtend": edited + timedelta(minutes=30),
+            "description": None,
+            "location": None,
+        },
+        recurrence_id="2026-03-07T05:30:00+00:00",
+    )
+
+    after = _expanded(calendar.event.data, *window)
+    assert [item for item in after if item[1] != "Once"] == [
+        item for item in before if item[0] != edited
+    ]
+
+
+@pytest.mark.parametrize("this_and_future", [False, True], ids=["one", "following"])
+def test_without_an_own_address_an_organized_event_moved_keeps_the_replies(
+    this_and_future: bool,
+) -> None:
+    calendar = FakeCalendar(
+        STANDUP_SERIES.replace("ORGANIZER:mailto:me@", "ORGANIZER:mailto:boss@")
+    )
+
+    update_event(
+        calendar,
+        "inv",
+        {
+            "summary": "Standup",
+            "dtstart": datetime(2026, 1, 7, 10, tzinfo=UTC),
+            "dtend": datetime(2026, 1, 7, 11, tzinfo=UTC),
+            "description": None,
+            "location": None,
+        },
+        recurrence_id="2026-01-07T09:00:00+00:00",
+        this_and_future=this_and_future,
+        addresses=[],
+    )
+
+    written = [calendar.event.data, *(created.data for created in calendar.created)]
+    replies = {
+        str(attendee.params["PARTSTAT"])
+        for data in written
+        for vevent in ICalendar.from_ical(data).walk("VEVENT")
+        for attendee in vevent["ATTENDEE"]
+    }
+    assert replies == {"ACCEPTED"}

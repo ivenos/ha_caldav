@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 from urllib.parse import unquote, urlparse
 
 import caldav
@@ -662,6 +662,89 @@ def test_a_delegated_calendar_is_listed_with_the_name_of_its_owner() -> None:
     assert client.principal.call_count == 1
 
 
+def _holders(home: str, held: dict[str, tuple[str, str, str]]) -> Mock:
+    """A depth-1 answer naming owner, share resource and access by calendar."""
+    import xml.etree.ElementTree as ET
+
+    responses = "".join(
+        f"<d:response><d:href>{home}/{name}/</d:href><d:propstat><d:prop>"
+        f"<d:owner><d:href>/remote.php/dav/principals/users/{owner}/</d:href>"
+        f"</d:owner><d:share-resource-uri><d:href>{resource}</d:href>"
+        f"</d:share-resource-uri><d:share-access><d:{access}/></d:share-access>"
+        "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+        for name, (owner, resource, access) in held.items()
+    )
+    return Mock(
+        tree=ET.fromstring(f'<d:multistatus xmlns:d="DAV:">{responses}</d:multistatus>')
+    )
+
+
+@pytest.mark.parametrize(
+    ("own", "theirs", "listed"),
+    [
+        (
+            {"work": ("iven", "/ns/share/1", "shared-owner")},
+            {
+                "personal": ("boss", "/ns/share/2", "not-shared"),
+                "work_shared_by_iven": ("iven", "/ns/share/1", "read-write"),
+            },
+            ["work", "personal"],
+        ),
+        (
+            {"work": ("iven", "/ns/share/1", "not-shared")},
+            {
+                "personal": ("boss", "/ns/share/2", "not-shared"),
+                "8f1c": ("boss", "/ns/share/1", "read-write"),
+            },
+            ["work", "personal"],
+        ),
+        (
+            {
+                "work": ("iven", "/ns/share/1", "not-shared"),
+                "4ab2": ("iven", "/ns/share/2", "read"),
+            },
+            {"personal": ("boss", "/ns/share/2", "not-shared")},
+            ["work", "4ab2", "personal"],
+        ),
+    ],
+    ids=["named_as_owner", "same_share_resource", "theirs_shared_with_us_stays"],
+)
+def test_an_own_calendar_shared_with_the_delegator_is_not_listed_again(
+    own: dict, theirs: dict, listed: list[str]
+) -> None:
+    from caldav.lib.url import URL
+
+    client = _delegating_client(
+        _proxy_response(write_for=BOSS),
+        [
+            _setup_calendar(name, f"https://cloud.example.com{HOME}/{name}/")
+            for name in own
+        ],
+    )
+    principal = client.principal.return_value
+    principal.url = URL(
+        "https://cloud.example.com/remote.php/dav/principals/users/iven/"
+    )
+    principal.calendar_home_set.get_properties.return_value = _holders(HOME, own)
+    delegator = _delegator(
+        [
+            _setup_calendar(name, f"https://cloud.example.com{BOSS_HOME}/{name}/")
+            for name in theirs
+        ]
+    )
+    delegator.calendar_home_set.get_properties.return_value = _holders(
+        BOSS_HOME, theirs
+    )
+
+    with patch(
+        "custom_components.ha_caldav.capability.caldav.Principal",
+        return_value=delegator,
+    ):
+        calendars, _ = account_calendars(client)
+
+    assert [calendar_key(item.url).rsplit("/", 1)[-1] for item in calendars] == listed
+
+
 def test_an_account_named_as_reader_and_writer_is_listed_once() -> None:
     client = _delegating_client(_proxy_response(write_for=BOSS, read_for=BOSS), [])
     theirs = _setup_calendar("Team", f"https://cloud.example.com{BOSS_HOME}/team/")
@@ -692,9 +775,28 @@ def test_a_calendar_reached_through_two_delegations_is_listed_once() -> None:
 def test_a_server_without_delegation_lists_only_the_accounts_own_calendars() -> None:
     own = _setup_calendar("Personal", f"https://cloud.example.com{HOME}/personal/")
     client = _delegating_client(_proxy_response(), [own])
-    client.principal.return_value.get_properties.side_effect = RuntimeError("no")
 
     assert account_calendars(client) == ([own], [])
+
+
+def test_a_server_that_cannot_tell_its_delegations_says_so() -> None:
+    own = _setup_calendar("Personal", f"https://cloud.example.com{HOME}/personal/")
+    client = _delegating_client(_proxy_response(), [own])
+    client.principal.return_value.get_properties.side_effect = RuntimeError("no")
+
+    assert account_calendars(client) == ([own], None)
+
+
+def test_a_delegator_that_cannot_be_read_leaves_the_delegations_untold() -> None:
+    own = _setup_calendar("Personal", f"https://cloud.example.com{HOME}/personal/")
+    client = _delegating_client(_proxy_response(write_for=BOSS), [own])
+    broken = Mock()
+    type(broken).calendar_home_set = PropertyMock(side_effect=RuntimeError("gone"))
+
+    with patch(
+        "custom_components.ha_caldav.capability.caldav.Principal", return_value=broken
+    ):
+        assert account_calendars(client) == ([own], None)
 
 
 def test_a_delegated_account_that_cannot_be_read_leaves_the_others() -> None:
@@ -1074,7 +1176,11 @@ def test_a_listing_with_nothing_named_like_a_copy_asks_for_no_owner() -> None:
     )
 
     assert "/SOGo/dav/other/Calendar/work_shared_by_admin" in listed
-    assert not any("owner" in body for _, _, body in asked)
+    assert not any(
+        "owner" in body
+        for _, path, body in asked
+        if path == "/SOGo/dav/other/Calendar/"
+    )
 
 
 def test_owners_the_server_will_not_name_leave_the_listing_as_it_was() -> None:

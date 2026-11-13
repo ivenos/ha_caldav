@@ -8,7 +8,7 @@ from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import Unauthorized
 from lxml import etree
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
+from pytest_homeassistant.common import MockConfigEntry, MockUser
 
 from custom_components.ha_caldav.const import DOMAIN
 from custom_components.ha_caldav.errors import Refused

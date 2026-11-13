@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 from icalendar import vRecur
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 import vobject
 
 from custom_components.ha_caldav.capability import Capability

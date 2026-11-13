@@ -15,7 +15,7 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.14"
-  # Home Assistant 2026.3.1; no harness pins the 2026.3.0 hacs.json sets.
+  # Home Assistant 2026.3.1; no harness pins the 2026.3.0 hacs.json sets, and pytest-homeassistant starts at 2026.11.
   OLDEST_HARNESS: "0.13.317"
 
 permissions:
@@ -67,7 +67,8 @@ jobs:
       - name: Pin the oldest supported Home Assistant and the minimum requirements
         if: matrix.homeassistant == 'oldest'
         run: |
-          sed -i "s/^pytest-homeassistant-custom-component==.*/pytest-homeassistant-custom-component==$OLDEST_HARNESS/" requirements_test.txt
+          sed -i "s/^pytest-homeassistant==.*/pytest-homeassistant-custom-component==$OLDEST_HARNESS/" requirements_test.txt
+          sed -i 's/\bpytest_homeassistant\b/pytest_homeassistant_custom_component/' tests/*.py
           jq -r '.requirements[]' custom_components/ha_caldav/manifest.json | while read -r minimum; do
             sed -i "s/^${minimum%%>=*}==.*/${minimum/>=/==}/" requirements_test.txt
           done

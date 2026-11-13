@@ -1910,7 +1910,7 @@ async def test_a_trigger_window_in_any_zone_finds_what_starts_in_it(
     from datetime import timedelta
     from zoneinfo import ZoneInfo
 
-    from pytest_homeassistant_custom_component.common import MockConfigEntry
+    from pytest_homeassistant.common import MockConfigEntry
 
     from custom_components.ha_caldav.api import import_ics
     from custom_components.ha_caldav.capability import Capability

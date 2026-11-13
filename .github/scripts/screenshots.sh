@@ -9,10 +9,8 @@ DAV="$NAME-dav"
 NETWORK="$NAME"
 WORK="${HA_CALDAV_SCREENSHOTS_DIR:-$HOME/.cache/ha_caldav-screenshots-$PORT}"
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-HARNESS=$(sed -n 's/^pytest-homeassistant-custom-component==//p' "$ROOT/requirements_test.txt")
-: "${HARNESS:?could not be read out of requirements_test.txt}"
-HA_VERSION=$(curl -sf "https://pypi.org/pypi/pytest-homeassistant-custom-component/$HARNESS/json" \
-    | python3 -c "import json, sys; print(next(r.split('==')[1] for r in json.load(sys.stdin)['info']['requires_dist'] if r.startswith('homeassistant==')))")
+HA_VERSION=$(sed -n 's/^pytest-homeassistant==//p' "$ROOT/requirements_test.txt")
+: "${HA_VERSION:?could not be read out of requirements_test.txt}"
 HA_IMAGE="${HA_IMAGE:-ghcr.io/home-assistant/home-assistant:$HA_VERSION}"
 DAV_IMAGE="${DAV_IMAGE:-tomsquest/docker-radicale:latest}"
 BROWSER_IMAGE="${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v1.65.0-noble}"
@@ -231,7 +229,7 @@ async function open(scheme) {
 {
     const [context, page] = await open('light');
     await page.goto(BASE + '/calendar');
-    const occurrence = page.locator('td[data-date="2026-10-14"] .fc-event', { hasText: 'Team sync' });
+    const occurrence = page.locator('[data-date="2026-10-14"]').getByText('Team sync');
     await occurrence.waitFor({ timeout: 60000 });
     await page.getByText('Birthdays', { exact: true }).waitFor();
     await page.waitForTimeout(1500);
@@ -255,7 +253,7 @@ async function open(scheme) {
 {
     const [context, page] = await open('dark');
     await page.goto(BASE + '/calendar');
-    await page.locator('.fc-event').first().waitFor({ timeout: 60000 });
+    await page.getByText('Team sync').first().waitFor({ timeout: 60000 });
     await page.evaluate(async () => {
         const hass = document.querySelector('home-assistant').hass;
         const named = name => Object.keys(hass.states).find(id => hass.states[id].attributes.friendly_name === name);

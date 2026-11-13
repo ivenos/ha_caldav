@@ -9,7 +9,7 @@ from homeassistant.components.diagnostics import REDACTED
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.ha_caldav.capability import Capability
 from custom_components.ha_caldav.const import (

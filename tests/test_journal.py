@@ -10,7 +10,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.util import dt as dt_util
 from icalendar import Calendar as ICalCalendar
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 import voluptuous as vol
 
 from custom_components.ha_caldav.api import export_ics, import_ics

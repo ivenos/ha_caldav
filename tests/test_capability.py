@@ -9,7 +9,7 @@ from caldav.lib.error import DAVError
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 import requests
 
 from custom_components.ha_caldav.capability import (

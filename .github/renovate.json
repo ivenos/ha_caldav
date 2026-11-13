@@ -50,6 +50,11 @@
       "postUpgradeTasks": { "commands": [] }
     },
     {
+      "description": "Its betas are those of Home Assistant, which PyPI lists as pre-releases.",
+      "matchPackageNames": ["pytest-homeassistant"],
+      "ignoreUnstable": false
+    },
+    {
       "matchFileNames": [".github/scripts/screenshots.sh"],
       "postUpgradeTasks": { "commands": [] }
     },

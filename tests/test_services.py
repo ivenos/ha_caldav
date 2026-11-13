@@ -17,7 +17,7 @@ from homeassistant.util import dt as dt_util
 import icalendar
 from icalendar import Calendar as ICalCalendar
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
+from pytest_homeassistant.common import MockConfigEntry, MockUser
 import vobject
 import voluptuous as vol
 

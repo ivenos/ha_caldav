@@ -1,4 +1,5 @@
-pytest-homeassistant-custom-component==0.13.375
+pytest-homeassistant==2026.11.1
+pytest-timeout==2.4.0
 caldav==3.5.0a0
 icalendar==6.3.1
 vobject==0.9.9

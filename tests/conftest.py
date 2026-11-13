@@ -116,6 +116,7 @@ def patched_libraries():
     apply_patches()
 
 
+# pytest-homeassistant-custom-component, used for the oldest Home Assistant, needs it.
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
     return

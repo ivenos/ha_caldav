@@ -24,10 +24,7 @@ from homeassistant.helpers import (
 from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.util import dt as dt_util
 import pytest
-from pytest_homeassistant_custom_component.common import (
-    MockConfigEntry,
-    async_fire_time_changed,
-)
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.ha_caldav import async_migrate_entry
 from custom_components.ha_caldav.capability import Delegation
@@ -866,7 +863,7 @@ async def test_an_entity_carries_the_calendar_name_alone(hass: HomeAssistant) ->
     assert hass.states.get("todo.personal").name == "Personal"
 
 
-def _older_install(hass: HomeAssistant, **entity: object) -> MockConfigEntry:
+def _older_install(hass: HomeAssistant) -> MockConfigEntry:
     entry = MockConfigEntry(domain=DOMAIN, title="iven", data=ENTRY_DATA, unique_id="x")
     entry.add_to_hass(hass)
     device = dr.async_get(hass).async_get_or_create(
@@ -882,7 +879,6 @@ def _older_install(hass: HomeAssistant, **entity: object) -> MockConfigEntry:
         suggested_object_id="iven_personal",
         config_entry=entry,
         device_id=device.id,
-        **entity,
     )
     return entry
 
@@ -918,7 +914,11 @@ async def test_an_entity_disabled_with_the_account_device_stays_disabled(
     hass: HomeAssistant,
 ) -> None:
     # Only a device being enabled again clears a device disabler.
-    entry = _older_install(hass, disabled_by=er.RegistryEntryDisabler.DEVICE)
+    entry = _older_install(hass)
+    devices = dr.async_get(hass)
+    [device] = dr.async_entries_for_config_entry(devices, entry.entry_id)
+    devices.async_update_device(device.id, disabled_by=dr.DeviceEntryDisabler.USER)
+    await hass.async_block_till_done()
 
     await _setup_existing(hass, entry)
 

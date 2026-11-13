@@ -22,7 +22,7 @@ from homeassistant.util import dt as dt_util
 from hypothesis import HealthCheck, given, settings, strategies as st
 from icalendar import Calendar as ICalCalendar, Event as ICalEvent, vRecur
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.ha_caldav.api import (
     create_event,

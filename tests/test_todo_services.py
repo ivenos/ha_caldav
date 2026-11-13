@@ -6,7 +6,7 @@ from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import ServiceValidationError, Unauthorized
 from homeassistant.util import dt as dt_util
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
+from pytest_homeassistant.common import MockConfigEntry, MockUser
 import vobject
 import voluptuous as vol
 

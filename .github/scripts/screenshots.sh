@@ -13,7 +13,7 @@ HA_VERSION=$(sed -n 's/^pytest-homeassistant==//p' "$ROOT/requirements_test.txt"
 : "${HA_VERSION:?could not be read out of requirements_test.txt}"
 HA_IMAGE="${HA_IMAGE:-ghcr.io/home-assistant/home-assistant:$HA_VERSION}"
 DAV_IMAGE="${DAV_IMAGE:-tomsquest/docker-radicale:latest}"
-BROWSER_IMAGE="${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v1.65.0-noble}"
+BROWSER_IMAGE="${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v1.65.1-noble}"
 # The image carries the browsers but not the library, and the two have to be the same release.
 BROWSER_VERSION=$(printf '%s' "$BROWSER_IMAGE" | sed -n 's/.*:v\([0-9.]*\).*/\1/p')
 

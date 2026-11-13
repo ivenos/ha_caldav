@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file, in the format o
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-13
+
 ### Added
 
 - Each calendar gets a reminder entity that automations can use as a trigger in the editor.
@@ -355,7 +357,8 @@ All notable changes to this project are documented in this file, in the format o
 - Options for calendar selection, poll interval, days ahead, all-day events and read-only.
 - English and German translations.
 
-[Unreleased]: https://github.com/ivenos/ha_caldav/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/ivenos/ha_caldav/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/ivenos/ha_caldav/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/ivenos/ha_caldav/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/ivenos/ha_caldav/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/ivenos/ha_caldav/compare/v1.4.1...v1.4.2

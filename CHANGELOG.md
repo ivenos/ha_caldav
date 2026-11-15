@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file, in the format o
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-11-15
+
 ### Fixed
 
 - An account could get stuck setting up when the server kept sending an answer without ever finishing it (#70).
@@ -361,7 +363,8 @@ All notable changes to this project are documented in this file, in the format o
 - Options for calendar selection, poll interval, days ahead, all-day events and read-only.
 - English and German translations.
 
-[Unreleased]: https://github.com/ivenos/ha_caldav/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/ivenos/ha_caldav/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/ivenos/ha_caldav/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/ivenos/ha_caldav/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/ivenos/ha_caldav/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/ivenos/ha_caldav/compare/v1.4.2...v1.5.0

@@ -130,7 +130,7 @@ def bootstrap_probe():
         return Mock(url=url, history=[])
 
     with patch(
-        "custom_components.ha_caldav.connection.requests.request",
+        "custom_components.ha_caldav.connection._request",
         side_effect=answer,
     ) as request:
         yield request

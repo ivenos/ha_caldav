@@ -187,7 +187,7 @@ def _resolve_bootstrap(probe: str, kwargs: Mapping[str, Any]) -> str | None:
     whoever replied, and that answer cracks offline.
     """
     try:
-        response = requests.request(
+        response = _request(
             "GET",
             probe,
             allow_redirects=True,
@@ -215,6 +215,74 @@ def _resolve_bootstrap(probe: str, kwargs: Mapping[str, Any]) -> str | None:
     return without_userinfo(resolved)
 
 
+_CHUNK = 10 * 1024
+
+
+class DeadlineAdapter(requests.adapters.HTTPAdapter):
+    """An adapter that gives up on an answer that keeps coming in drips.
+
+    requests applies the timeout to each read, so a server that keeps sending
+    a few bytes holds a request open for good.
+    """
+
+    def send(
+        self, request: Any, stream: bool = False, timeout: Any = None, **kwargs: Any
+    ) -> Any:
+        """Send a request and read its answer while it keeps coming."""
+        response = super().send(request, stream=True, timeout=timeout, **kwargs)
+        if stream or response.raw is None or not isinstance(timeout, int | float):
+            return response
+        try:
+            response._content = b"".join(_arriving(request, response, timeout))
+        except (
+            requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.ContentDecodingError,
+        ):
+            # requests reads past a broken body on a redirect.
+            if not response.is_redirect:
+                raise
+            response._content = b""
+        return response
+
+
+def _arriving(request: Any, response: Any, timeout: float) -> Iterator[bytes]:
+    """Yield the answer as it arrives, until a timeout brings less than a chunk.
+
+    A read of a length would wait for all of it. The stretch that fell short
+    gets one more read, which may find the end.
+    """
+    errors = requests.packages.urllib3.exceptions
+    window, received, short = time.monotonic() + timeout, 0, False
+    try:
+        while part := response.raw.read1(_CHUNK, decode_content=True):
+            if short:
+                response.close()
+                raise requests.exceptions.ReadTimeout(
+                    f"The answer brought less than {_CHUNK} bytes in {timeout} s",
+                    request=request,
+                    response=response,
+                )
+            yield part
+            received += len(part)
+            if time.monotonic() > window:
+                short = received < _CHUNK
+                window, received = time.monotonic() + timeout, 0
+    except errors.ProtocolError as err:
+        raise requests.exceptions.ChunkedEncodingError(err) from err
+    except errors.DecodeError as err:
+        raise requests.exceptions.ContentDecodingError(err) from err
+    except errors.ReadTimeoutError as err:
+        raise requests.exceptions.ConnectionError(err) from err
+    except errors.SSLError as err:
+        raise requests.exceptions.SSLError(err) from err
+
+
+def _request(method: str, url: str, **kwargs: Any) -> Any:
+    """Send one request as requests.request does, through a session of ours."""
+    with HostLockedSession() as session:
+        return session.request(method, url, **kwargs)
+
+
 class HostLockedSession(requests.Session):
     """A session that carries no credentials across a change of host or out of https.
 
@@ -234,6 +302,8 @@ class HostLockedSession(requests.Session):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize the session, its login not yet confirmed."""
         super().__init__(*args, **kwargs)
+        for prefix in ("https://", "http://"):
+            self.mount(prefix, DeadlineAdapter())
         self._login = threading.Lock()
         self._cleared_at = -inf
 
@@ -351,6 +421,6 @@ def size_pool(client: caldav.DAVClient, calendars: int) -> None:
     They all poll in the same second, and urllib3 warns about and drops each
     connection past its default of ten.
     """
-    adapter = requests.adapters.HTTPAdapter(pool_maxsize=max(calendars + 1, 10))
+    adapter = DeadlineAdapter(pool_maxsize=max(calendars + 1, 10))
     for prefix in ("https://", "http://"):
         client.session.mount(prefix, adapter)

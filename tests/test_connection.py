@@ -1,8 +1,13 @@
 import asyncio
 from base64 import b64encode
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import timedelta
+import http.server
 import threading
+import time
 from unittest.mock import Mock, patch
+import zlib
 
 import caldav
 from caldav.davclient import requests
@@ -14,7 +19,9 @@ from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.ha_caldav.capability import Capability
 from custom_components.ha_caldav.connection import (
+    DeadlineAdapter,
     HostLockedSession,
+    _request,
     account_key,
     build_client,
     calendar_key,
@@ -74,7 +81,7 @@ def _probe(resolved: str | None = None, hops: list[str] | None = None):
     response.url = resolved
     response.history = [Mock(url=hop) for hop in hops or []]
     return patch(
-        "custom_components.ha_caldav.connection.requests.request",
+        "custom_components.ha_caldav.connection._request",
         return_value=response,
     )
 
@@ -173,7 +180,235 @@ def test_the_pool_holds_a_connection_for_every_calendar_and_the_colors() -> None
 
     size_pool(client, 14)
 
-    assert client.session.get_adapter("https://dav.example.com")._pool_maxsize == 15
+    adapter = client.session.get_adapter("https://dav.example.com")
+    assert adapter._pool_maxsize == 15
+    assert isinstance(adapter, DeadlineAdapter)
+
+
+@pytest.mark.parametrize("url", ["https://dav.example.com/", "http://dav.example.com/"])
+def test_every_request_of_a_session_goes_through_the_deadline_adapter(
+    url: str,
+) -> None:
+    assert isinstance(HostLockedSession().get_adapter(url), DeadlineAdapter)
+
+
+@contextmanager
+def _server(
+    pieces: list[bytes],
+    pause: float,
+    gzip: bool = False,
+    chunked: bool = True,
+    headers: Mapping[str, str] | None = None,
+) -> Iterator[tuple[str, threading.Event]]:
+    """Answer one request piece by piece; the event is set once the client hangs up."""
+    compressor = zlib.compressobj(wbits=31)
+    dropped = threading.Event()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_PROPFIND(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.close_connection = True
+            self.send_response(207)
+            fields = (
+                {"Transfer-Encoding": "chunked"}
+                if chunked
+                else {"Content-Length": str(len(b"".join(pieces)))}
+            )
+            if gzip:
+                fields["Content-Encoding"] = "gzip"
+            for name, value in {**fields, **(headers or {})}.items():
+                self.send_header(name, value)
+            self.end_headers()
+            try:
+                for piece in pieces:
+                    if gzip:
+                        piece = compressor.compress(piece)
+                        piece += compressor.flush(zlib.Z_SYNC_FLUSH)
+                    self.wfile.write(
+                        b"%x\r\n%s\r\n" % (len(piece), piece) if chunked else piece
+                    )
+                    time.sleep(pause)
+                if gzip:
+                    tail = compressor.flush()
+                    self.wfile.write(b"%x\r\n%s\r\n" % (len(tail), tail))
+                if chunked:
+                    self.wfile.write(b"0\r\n\r\n")
+            except OSError:
+                dropped.set()
+
+        do_GET = do_PROPFIND
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/", dropped
+    finally:
+        thread.join(len(pieces) * pause + 1)
+        server.server_close()
+
+
+@pytest.mark.parametrize("chunked", [True, False], ids=["chunked", "with_a_length"])
+def test_an_answer_sent_a_byte_at_a_time_gives_up_at_the_timeout(
+    socket_enabled: None, chunked: bool
+) -> None:
+    with _server([b" "] * 80, pause=0.05, chunked=chunked) as (url, dropped):
+        started = time.monotonic()
+        with pytest.raises(requests.exceptions.ReadTimeout) as raised:
+            HostLockedSession().request("PROPFIND", url, data="<x/>", timeout=1.0)
+        took = time.monotonic() - started
+
+        assert dropped.wait(1)
+    assert took < 2
+    assert raised.value.response.status_code == 207
+
+
+def test_a_fast_start_does_not_excuse_a_dribble_after_it(socket_enabled: None) -> None:
+    pieces = [b"x" * 16 * 1024] + [b" "] * 80
+
+    with (
+        _server(pieces, pause=0.05) as (url, _),
+        pytest.raises(requests.exceptions.ReadTimeout),
+    ):
+        HostLockedSession().request("PROPFIND", url, data="<x/>", timeout=1)
+
+
+def test_a_large_answer_on_a_slow_line_takes_as_long_as_it_needs(
+    socket_enabled: None,
+) -> None:
+    pieces = [b"x" * 4 * 1024] * 30
+
+    with _server(pieces, pause=0.1) as (url, _):
+        response = HostLockedSession().request("PROPFIND", url, data="<x/>", timeout=1)
+
+    assert response.content == b"".join(pieces)
+
+
+@pytest.mark.parametrize("chunked", [True, False], ids=["chunked", "with_a_length"])
+def test_a_small_answer_that_ends_after_the_timeout_is_kept(
+    socket_enabled: None, chunked: bool
+) -> None:
+    pieces = [b"<a>", b"<b/>", b"</a>"]
+
+    with _server(pieces, pause=0.6, chunked=chunked) as (url, _):
+        response = HostLockedSession().request("PROPFIND", url, data="<x/>", timeout=1)
+
+    assert response.content == b"<a><b/></a>"
+
+
+def test_an_answer_without_a_timeout_is_read_as_requests_reads_it(
+    socket_enabled: None,
+) -> None:
+    with _server([b"<a/>"], pause=0) as (url, _):
+        response = HostLockedSession().request("PROPFIND", url, data="<x/>")
+
+    assert response.content == b"<a/>"
+
+
+def test_a_streamed_answer_is_left_to_the_caller(socket_enabled: None) -> None:
+    with _server([b"<a/>"], pause=0) as (url, _):
+        response = HostLockedSession().request(
+            "PROPFIND", url, data="<x/>", stream=True, timeout=1
+        )
+        streamed = b"".join(response.iter_content(1024))
+
+    assert streamed == b"<a/>"
+
+
+def test_a_server_falling_silent_mid_answer_is_a_connection_error(
+    socket_enabled: None,
+) -> None:
+    with (
+        _server([b"<a>"], pause=2) as (url, _),
+        pytest.raises(requests.exceptions.ConnectionError),
+    ):
+        HostLockedSession().request("PROPFIND", url, data="<x/>", timeout=1)
+
+
+def test_an_answer_cut_off_short_is_an_error_not_an_empty_answer(
+    socket_enabled: None,
+) -> None:
+    with (
+        _server(
+            [b"<a/>"], pause=0, chunked=False, headers={"Content-Length": "100"}
+        ) as (url, _),
+        pytest.raises(requests.exceptions.ChunkedEncodingError),
+    ):
+        HostLockedSession().request("PROPFIND", url, data="<x/>", timeout=1)
+
+
+def test_an_answer_that_is_not_the_gzip_it_claims_is_a_decoding_error(
+    socket_enabled: None,
+) -> None:
+    with (
+        _server(
+            [b"not gzip"], pause=0, chunked=False, headers={"Content-Encoding": "gzip"}
+        ) as (url, _),
+        pytest.raises(requests.exceptions.ContentDecodingError),
+    ):
+        HostLockedSession().request("PROPFIND", url, data="<x/>", timeout=1)
+
+
+def test_the_bootstrap_lookup_gives_up_on_a_dribbling_server(
+    socket_enabled: None,
+) -> None:
+    with (
+        patch("custom_components.ha_caldav.connection._request", new=_request),
+        _server([b" "] * 80, pause=0.05) as (url, _),
+    ):
+        started = time.monotonic()
+        candidates = list(url_candidates(url, {"timeout": 1}))
+        took = time.monotonic() - started
+
+    assert candidates == [url]
+    assert took < 2
+
+
+def test_a_redirect_with_a_broken_body_is_still_followed(socket_enabled: None) -> None:
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            self.close_connection = True
+            if self.path == "/old.ics":
+                self.wfile.write(
+                    b"HTTP/1.1 302 Found\r\nLocation: /new.ics\r\n"
+                    b"Content-Length: 9\r\n\r\ncut"
+                )
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", "15")
+            self.end_headers()
+            self.wfile.write(b"BEGIN:VCALENDAR")
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        response = HostLockedSession().request(
+            "GET", f"http://127.0.0.1:{server.server_port}/old.ics", timeout=5
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert response.content == b"BEGIN:VCALENDAR"
+
+
+def test_an_answer_in_compressed_chunks_arrives_whole(socket_enabled: None) -> None:
+    pieces = [b"<multistatus>", b"<response/>" * 500, b"</multistatus>"]
+
+    with _server(pieces, pause=0.05, gzip=True) as (url, _):
+        response = HostLockedSession().request("PROPFIND", url, data="<x/>", timeout=2)
+
+    assert response.content == b"".join(pieces)
 
 
 def _candidates(url: str, resolved: str | None = None) -> list[str]:
@@ -217,7 +452,7 @@ def test_the_scheme_of_the_entered_url_is_kept() -> None:
 
 
 def test_the_entered_url_is_yielded_without_asking_the_server() -> None:
-    with patch("custom_components.ha_caldav.connection.requests.request") as request:
+    with patch("custom_components.ha_caldav.connection._request") as request:
         candidates = url_candidates("https://cloud.example.com", {})
         assert next(candidates) == "https://cloud.example.com"
         assert not request.called
@@ -233,7 +468,7 @@ def test_the_bootstrap_is_followed_to_where_it_lands() -> None:
 
 def test_a_lookup_that_fails_does_not_license_the_bootstrap() -> None:
     with patch(
-        "custom_components.ha_caldav.connection.requests.request",
+        "custom_components.ha_caldav.connection._request",
         side_effect=OSError("no route"),
     ):
         assert list(url_candidates("https://cloud.example.com", {})) == [
@@ -611,10 +846,7 @@ def _radicale():
 
 def test_the_bootstrap_stops_where_the_well_known_url_points() -> None:
     with (
-        patch(
-            "custom_components.ha_caldav.connection.requests.request",
-            new=requests.api.request,
-        ),
+        patch("custom_components.ha_caldav.connection._request", new=_request),
         _radicale(),
     ):
         candidates = list(url_candidates("http://radicale.example.com:5232/.web/", {}))

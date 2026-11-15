@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file, in the format o
 
 ## [Unreleased]
 
+### Fixed
+
+- An account could get stuck setting up when the server kept sending an answer without ever finishing it (#70).
+
 ## [1.6.0] - 2026-11-13
 
 ### Added

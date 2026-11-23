@@ -1945,3 +1945,62 @@ async def test_a_trigger_window_in_any_zone_finds_what_starts_in_it(
             found[attempt, at] = ({event.summary for event in events}, expected)
 
     assert all(got == expected for got, expected in found.values()), found
+
+
+async def test_a_view_shows_what_another_client_did_since_the_last_one(
+    hass, calendar
+) -> None:
+    from datetime import timedelta
+
+    from pytest_homeassistant.common import MockConfigEntry
+
+    from custom_components.ha_caldav.capability import Capability
+    from custom_components.ha_caldav.const import DOMAIN
+    from custom_components.ha_caldav.coordinator import HaCaldavCoordinator
+
+    other = build_client(URL, USERNAME, PASSWORD, connection_kwargs({}))
+    href = f"{str(calendar.url).rstrip('/')}/shared.ics"
+
+    def put(summary: str, hour: int) -> None:
+        body = (
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//ha_caldav//live//EN\r\n"
+            "BEGIN:VEVENT\r\nUID:shared\r\nDTSTAMP:20260701T100000Z\r\n"
+            f"DTSTART:20260706T{hour:02}0000Z\r\nDTEND:20260706T{hour + 1:02}0000Z\r\n"
+            f"SUMMARY:{summary}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+        answer = other.put(href, body, {"Content-Type": "text/calendar; charset=utf-8"})
+        assert answer.status in (201, 204), answer.status
+
+    entry = MockConfigEntry(domain=DOMAIN, data={}, title="live")
+    entry.add_to_hass(hass)
+    coordinator = HaCaldavCoordinator(
+        hass,
+        entry,
+        calendar,
+        Capability(frozenset({"VEVENT"}), True),
+        7,
+        True,
+        timedelta(minutes=15),
+    )
+
+    async def shown() -> list[tuple[str, int]]:
+        events = await coordinator.async_get_events(RANGE_START, RANGE_END)
+        return [(event.summary, event.start.astimezone(UTC).hour) for event in events]
+
+    put("Planned", 9)
+    seen = [await shown(), await shown()]
+    other.request(href, "DELETE")
+    put("Put back", 11)
+    seen.append(await shown())
+    put("Renamed on the phone", 11)
+    seen.append(await shown())
+    other.request(href, "DELETE")
+    seen.append(await shown())
+
+    assert seen == [
+        [("Planned", 9)],
+        [("Planned", 9)],
+        [("Put back", 11)],
+        [("Renamed on the phone", 11)],
+        [],
+    ]

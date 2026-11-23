@@ -58,6 +58,12 @@ _MAX_AGE = timedelta(hours=1)
 # nothing else evicts what it left behind.
 _CACHE_LIMIT = 2000
 
+# Windows a calendar may keep parsed for its views, and their bytes. vobject
+# takes about 8 kB for an occurrence, on top of its text.
+_VIEWS = 8
+_VIEW_LIMIT = 16_000_000
+_OCCURRENCE = 8_000
+
 _REMINDER_HORIZON = timedelta(days=35)
 
 # caldav 3 expands every series of a time-range search to recheck it.
@@ -160,6 +166,22 @@ class _WindowRead:
     reminders: list[Reminder] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _Parsed:
+    """What one object came to in one window."""
+
+    series: tuple[str, str | None] | None
+    vevents: list[Any]
+
+
+def _held(view: dict[str, _Parsed]) -> int:
+    """Return roughly the bytes a view keeps, by the calendar data it parsed."""
+    return sum(
+        len(data) + len(read.vevents) * (len(data) + _OCCURRENCE)
+        for data, read in view.items()
+    )
+
+
 @dataclass
 class _TodoRead:
     """One read of the to-do list, before any of it is kept."""
@@ -249,6 +271,8 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         self._epoch_read = 0
         self._etag_window: set[str] = set()
         self.rrules: dict[str, str] = {}
+        self._views: dict[tuple[Any, ...], dict[str, _Parsed]] = {}
+        self._view_lock = threading.Lock()
         self.todo_etags: dict[str, str] = {}
         self._sync_collection = sync_collection
         self._sync_token: str | None = None
@@ -524,7 +548,9 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         stopped recurring can be told apart from one this window never saw.
         They are read first, as the expansion strips RRULE from every
         occurrence. Up to reminding, the alarms are read as well, and only an
-        object carrying one is expanded that far.
+        object carrying one is expanded that far. A view alone keeps what it
+        parsed, and takes over what its last read of the same window made of
+        every object that comes back unchanged.
         """
         epoch = self._etag_epoch
         reach = max(end, reminding or end)
@@ -539,27 +565,46 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
         rules: dict[str, str | None] = {}
         vevents: list[Any] = []
         alarmed: list[Any] = []
+        # recurring-ical-events sets a floating time against the wall clock of
+        # the window.
+        view = (start.isoformat(), end.isoformat(), dt_util.get_default_time_zone())
+        known = self._view(view) if reminding is None else {}
+        seen: dict[str, _Parsed] = {}
         for item in items:
-            if (series := _series(item)) is not None:
-                uid, rules[uid] = series
+            # SOGo numbers the etags of an object from zero again once it is
+            # deleted and put back.
+            data = item.data if reminding is None else None
+            if not isinstance(data, str):
+                data = None
+            if (read := known.get(data)) is None:
+                series = _series(item)
+                ahead = reminding is not None and _has_alarm(item)
+                # RFC 5545 makes DTSTART optional once the object carries a METHOD.
+                found = [
+                    vevent
+                    for vevent in occurrences(
+                        item,
+                        start - FLOATING_MARGIN,
+                        (reach if ahead else end) + FLOATING_MARGIN,
+                    )
+                    if _shown(vevent) and self._counted(vevent)
+                ]
+                read = _Parsed(
+                    series, [vevent for vevent in found if within(vevent, start, end)]
+                )
+                if ahead:
+                    alarmed.extend(
+                        vevent for vevent in found if within(vevent, start, reach)
+                    )
+            if data:
+                seen[data] = read
+            if read.series is not None:
+                uid, rules[uid] = read.series
                 if isinstance(etag := item.props.get(dav.GetEtag.tag), str):
                     etags[uid] = etag
-            ahead = reminding is not None and _has_alarm(item)
-            # RFC 5545 makes DTSTART optional once the object carries a METHOD.
-            found = [
-                vevent
-                for vevent in occurrences(
-                    item,
-                    start - FLOATING_MARGIN,
-                    (reach if ahead else end) + FLOATING_MARGIN,
-                )
-                if _shown(vevent) and self._counted(vevent)
-            ]
-            vevents.extend(vevent for vevent in found if within(vevent, start, end))
-            if ahead:
-                alarmed.extend(
-                    vevent for vevent in found if within(vevent, start, reach)
-                )
+            vevents.extend(read.vevents)
+        if reminding is None:
+            self._keep_view(view, seen)
         if items and not etags:
             _LOGGER.debug("The window came back without an etag on anything")
         return _WindowRead(
@@ -569,6 +614,24 @@ class HaCaldavCoordinator(DataUpdateCoordinator[CalendarSnapshot]):
             epoch=epoch,
             reminders=event_reminders(alarmed),
         )
+
+    def _view(self, view: tuple[Any, ...]) -> dict[str, _Parsed]:
+        with self._view_lock:
+            return self._views.get(view, {})
+
+    def _keep_view(self, view: tuple[Any, ...], seen: dict[str, _Parsed]) -> None:
+        """Keep what a view parsed in place of what it parsed before.
+
+        Past a limit the views read longest ago go, this one too if it
+        alone is too much.
+        """
+        with self._view_lock:
+            self._views.pop(view, None)
+            if seen:
+                self._views[view] = seen
+            held = sum(_held(kept) for kept in self._views.values())
+            while held > _VIEW_LIMIT or len(self._views) > _VIEWS:
+                held -= _held(self._views.pop(next(iter(self._views))))
 
     def _counted(self, vevent: Any) -> bool:
         if not self.busy_only:

@@ -773,3 +773,223 @@ async def test_a_window_is_read_without_caldavs_own_expansion(
     ]
     assert windowed
     assert all(kwargs.items() >= UNFILTERED.items() for kwargs in windowed)
+
+
+WEEK = datetime(2026, 7, 6, tzinfo=UTC)
+WEDNESDAY = "DTSTART:20260708T090000Z\nDTEND:20260708T100000Z"
+
+
+def _object(uid: str, summary: str, lines: str = WEDNESDAY) -> str:
+    return (
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//test//EN\n"
+        f"BEGIN:VEVENT\nUID:{uid}\nDTSTAMP:20260101T000000Z\n{lines}\n"
+        f"SUMMARY:{summary}\nEND:VEVENT\nEND:VCALENDAR\n"
+    )
+
+
+def _serving(
+    hass: HomeAssistant, objects: list[tuple[str, str]]
+) -> HaCaldavCoordinator:
+    coordinator = _polled(hass, minutes=15)
+    coordinator.calendar.search.side_effect = lambda **kw: (
+        [stored(text, etag) for text, etag in objects] if kw.get("event") else []
+    )
+    return coordinator
+
+
+async def _viewed(
+    coordinator: HaCaldavCoordinator, start: datetime = WEEK, days: int = 7
+) -> list[str]:
+    events = await coordinator.async_get_events(start, start + timedelta(days=days))
+    return [event.summary for event in events]
+
+
+async def test_a_view_parses_an_object_that_came_back_unchanged_only_once(
+    hass: HomeAssistant,
+) -> None:
+    coordinator = _serving(
+        hass, [(_object("a", "Dentist"), '"1"'), (_object("b", "Lunch"), '"2"')]
+    )
+
+    with patch(
+        "custom_components.ha_caldav.coordinator.occurrences", wraps=occurrences
+    ) as parsed:
+        first = await _viewed(coordinator)
+        again = await _viewed(coordinator)
+
+    assert first == again == ["Dentist", "Lunch"]
+    assert parsed.call_count == 2
+
+
+async def test_a_view_parses_only_the_object_that_changed(hass: HomeAssistant) -> None:
+    objects = [(_object("a", "Dentist"), '"1"'), (_object("b", "Lunch"), '"2"')]
+    coordinator = _serving(hass, objects)
+    await _viewed(coordinator)
+    objects[1] = (_object("b", "Dinner"), '"3"')
+
+    with patch(
+        "custom_components.ha_caldav.coordinator.occurrences", wraps=occurrences
+    ) as parsed:
+        shown = await _viewed(coordinator)
+
+    assert shown == ["Dentist", "Dinner"]
+    assert parsed.call_count == 1
+
+
+async def test_an_object_put_back_under_the_etag_it_had_before_is_read_again(
+    hass: HomeAssistant,
+) -> None:
+    objects = [(_object("a", "Dentist"), '"gcs00000000"')]
+    coordinator = _serving(hass, objects)
+    await _viewed(coordinator)
+    objects[0] = (_object("a", "Hairdresser"), '"gcs00000000"')
+
+    assert await _viewed(coordinator) == ["Hairdresser"]
+
+
+async def test_a_series_is_expanded_anew_for_another_window(
+    hass: HomeAssistant,
+) -> None:
+    daily = "DTSTART:20260706T090000Z\nDTEND:20260706T100000Z\nRRULE:FREQ=DAILY"
+    coordinator = _serving(hass, [(_object("a", "Standup", daily), '"1"')])
+
+    first = await coordinator.async_get_events(WEEK, WEEK + timedelta(days=2))
+    later = await coordinator.async_get_events(
+        WEEK + timedelta(days=2), WEEK + timedelta(days=5)
+    )
+
+    assert [event.start.day for event in first] == [6, 7]
+    assert [event.start.day for event in later] == [8, 9, 10]
+
+
+async def test_an_all_day_event_is_placed_anew_once_the_zone_changes(
+    hass: HomeAssistant,
+) -> None:
+    thursday = "DTSTART;VALUE=DATE:20260709\nDTEND;VALUE=DATE:20260710"
+    coordinator = _serving(hass, [(_object("a", "Holiday", thursday), '"1"')])
+    start = datetime(2026, 7, 8, 13, 0, tzinfo=UTC)
+    await hass.config.async_set_time_zone("Europe/Berlin")
+    in_berlin = await coordinator.async_get_events(start, start + timedelta(hours=6))
+
+    await hass.config.async_set_time_zone("Pacific/Auckland")
+    in_auckland = await coordinator.async_get_events(start, start + timedelta(hours=6))
+
+    assert in_berlin == []
+    assert [event.summary for event in in_auckland] == ["Holiday"]
+
+
+async def test_an_unchanged_object_still_hands_its_etag_to_the_next_edit(
+    hass: HomeAssistant,
+) -> None:
+    coordinator = _serving(hass, [(_object("a", "Dentist"), '"1"')])
+    await _viewed(coordinator)
+    coordinator.forget_etags("etags", ("a",))
+
+    await _viewed(coordinator)
+
+    assert coordinator.etags == {"a": '"1"'}
+
+
+async def test_an_unchanged_object_still_clears_the_rule_another_view_recorded(
+    hass: HomeAssistant,
+) -> None:
+    single = (_object("a", "Standup"), '"1"')
+    objects = [single]
+    coordinator = _serving(hass, objects)
+    await _viewed(coordinator)
+    objects[0] = (_object("a", "Standup", f"{WEDNESDAY}\nRRULE:FREQ=WEEKLY"), '"2"')
+    await _viewed(coordinator, days=3)
+    assert coordinator.rrules == {"a": "FREQ=WEEKLY"}
+    objects[0] = single
+
+    await _viewed(coordinator)
+
+    assert coordinator.rrules == {}
+
+
+async def test_the_poll_reads_the_alarms_of_an_object_a_view_has_parsed(
+    hass: HomeAssistant,
+) -> None:
+    start = dt_util.start_of_local_day()
+    tomorrow = start + timedelta(days=1, hours=9)
+    alarmed = (
+        f"DTSTART:{tomorrow:%Y%m%dT%H%M%S}Z\n"
+        f"DTEND:{tomorrow + timedelta(hours=1):%Y%m%dT%H%M%S}Z\n"
+        "BEGIN:VALARM\nACTION:DISPLAY\nDESCRIPTION:x\nTRIGGER:-PT15M\nEND:VALARM"
+    )
+    coordinator = _serving(hass, [(_object("a", "Dentist", alarmed), '"1"')])
+    await _viewed(coordinator, start)
+
+    await coordinator.async_refresh()
+
+    assert [reminder.data["uid"] for reminder in coordinator.reminders["events"]] == [
+        "a"
+    ]
+
+
+async def test_a_view_keeps_what_its_last_read_saw_and_nothing_of_an_empty_one(
+    hass: HomeAssistant,
+) -> None:
+    objects = [(_object("a", "Dentist"), '"1"'), (_object("b", "Lunch"), '"2"')]
+    coordinator = _serving(hass, objects)
+    await _viewed(coordinator)
+    del objects[1]
+
+    await _viewed(coordinator)
+    kept = [list(view) for view in coordinator._views.values()]
+    del objects[0]
+    await _viewed(coordinator)
+    await _viewed(coordinator, days=3)
+
+    assert kept == [[_object("a", "Dentist")]]
+    assert coordinator._views == {}
+
+
+async def test_the_views_read_longest_ago_make_room_past_the_limit(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from custom_components.ha_caldav import coordinator as module
+
+    coordinator = _serving(hass, [(_object("a", "Dentist"), '"1"')])
+    await _viewed(coordinator, days=3)
+    one = module._held(next(iter(coordinator._views.values())))
+    monkeypatch.setattr(module, "_VIEW_LIMIT", 2 * one)
+
+    await _viewed(coordinator, days=4)
+    await _viewed(coordinator, days=3)
+    await _viewed(coordinator, days=5)
+
+    ends = [view[1] for view in coordinator._views]
+    assert ends == [(WEEK + timedelta(days=days)).isoformat() for days in (3, 5)]
+
+
+async def test_a_window_that_keeps_moving_leaves_only_its_latest_views_behind(
+    hass: HomeAssistant,
+) -> None:
+    from custom_components.ha_caldav.coordinator import _VIEWS
+
+    coordinator = _serving(hass, [(_object("a", "Dentist"), '"1"')])
+
+    for minutes in range(_VIEWS + 5):
+        await _viewed(coordinator, WEEK + timedelta(minutes=minutes))
+
+    starts = [view[0] for view in coordinator._views]
+    assert starts == [
+        (WEEK + timedelta(minutes=minutes)).isoformat()
+        for minutes in range(5, _VIEWS + 5)
+    ]
+
+
+async def test_a_view_larger_than_the_limit_is_not_kept(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from custom_components.ha_caldav import coordinator as module
+
+    daily = "DTSTART:20260706T090000Z\nDTEND:20260706T100000Z\nRRULE:FREQ=DAILY"
+    coordinator = _serving(hass, [(_object("a", "Standup", daily), '"1"')])
+    monkeypatch.setattr(module, "_VIEW_LIMIT", 3 * module._OCCURRENCE)
+
+    shown = await _viewed(coordinator)
+
+    assert len(shown) == 7
+    assert coordinator._views == {}

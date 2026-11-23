@@ -3,5 +3,5 @@ pytest-timeout==2.4.0
 caldav==3.5.0a0
 icalendar==6.3.1
 vobject==0.9.9
-hypothesis==6.170.16
+hypothesis==6.170.17
 ruff==0.17.6

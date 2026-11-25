@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file, in the format o
 
 ## [Unreleased]
 
+### Changed
+
+- A calendar view opens faster when the events in it have not changed since it was last shown (#76).
+
 ## [1.6.1] - 2026-11-15
 
 ### Fixed

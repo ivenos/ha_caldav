@@ -42,8 +42,17 @@
       "automerge": false
     },
     {
+      "matchDatasources": ["pypi"],
       "matchPackageNames": ["caldav", "icalendar", "vobject"],
       "enabled": false
+    },
+    {
+      "description": "The rc branch of core carries its beta, and its latest release between two betas.",
+      "matchDatasources": ["custom.home-assistant-beta"],
+      "commitMessagePrefix": "ci:",
+      "ignoreUnstable": false,
+      "automerge": true,
+      "postUpgradeTasks": { "commands": [] }
     },
     {
       "matchManagers": ["pip_requirements"],
@@ -76,6 +85,21 @@
       "managerFilePatterns": ["/^\\.github/scripts/screenshots\\.sh$/"],
       "matchStrings": ["_IMAGE=\"\\$\\{\\w+:-(?<depName>mcr\\.microsoft\\.com/playwright):(?<currentValue>[^}]+)\\}\""],
       "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^requirements_test\\.txt$/"],
+      "matchStrings": ["(^|\\n)(?<depName>caldav|icalendar|vobject)==(?<currentValue>\\S+)"],
+      "datasourceTemplate": "custom.home-assistant-beta",
+      "versioningTemplate": "pep440"
     }
-  ]
+  ],
+  "customDatasources": {
+    "home-assistant-beta": {
+      "defaultRegistryUrlTemplate": "https://raw.githubusercontent.com/home-assistant/core/rc/homeassistant/components/caldav/manifest.json",
+      "transformTemplates": [
+        "{\"releases\": [{\"version\": $substringAfter(requirements[$substringBefore($, '==') = '{{packageName}}'], '==')}]}"
+      ]
+    }
+  }
 }

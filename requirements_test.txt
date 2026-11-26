@@ -1,4 +1,4 @@
-pytest-homeassistant==2026.11.2
+pytest-homeassistant==2026.11.3
 pytest-timeout==2.4.0
 caldav==3.7.0a0
 icalendar==6.3.1
